@@ -59,7 +59,8 @@ def furniture_kind(item, document):
     return None
 
 
-def map_document(document, path, digest, profile, diagnostics=()):
+def map_document(document, path, digest, profile, diagnostics=(), *,
+                 text_representation='native-text'):
     from docling_core.types.doc import ContentLayer, SectionHeaderItem, TableItem, TextItem
 
     blocks, headings, issues = [], [], set(diagnostics)
@@ -70,7 +71,7 @@ def map_document(document, path, digest, profile, diagnostics=()):
         layer = item.content_layer.value
         label = item.label.value
         locations = _locations(item, document)
-        anchor = NativeAnchor(ref, layer, 'native-text', locations)
+        anchor = NativeAnchor(ref, layer, text_representation, locations)
         page = locations[0].page if len(locations) == 1 else None
         bbox = locations[0].bbox if len(locations) == 1 else None
         hierarchy = tuple(v for _, v in headings) if layer == 'body' else ()
@@ -85,12 +86,15 @@ def map_document(document, path, digest, profile, diagnostics=()):
                 if not (0 <= r0 < r1 <= len(rows) and 0 <= c0 < c1 <= item.data.num_cols):
                     raise ValueError('invalid native cell range')
                 cell_bbox, origin = _bbox(entry.bbox) if entry.bbox is not None else (None, None)
-                cell_anchor = NativeAnchor(ref, layer, 'native-table-cell', (),
+                cell_anchor = NativeAnchor(ref, layer, ('ocr-table-cell' if text_representation == 'ocr-native-text'
+                                                       else 'native-table-cell'), (),
                                            (r0, r1), (c0, c1), cell_bbox, origin)
                 rows[r0].append(Cell(c0 + 1, entry.text, None, cell_anchor))
             for row_number, row in enumerate(rows, 1):
                 cells = tuple(sorted(row, key=lambda cell: cell.column))
-                block_anchor = replace(anchor, representation='table-cell-serialization',
+                block_anchor = replace(anchor, representation=('ocr-table-cell-serialization'
+                                       if text_representation == 'ocr-native-text'
+                                       else 'table-cell-serialization'),
                                        row_range=(row_number - 1, row_number))
                 blocks.append(ParsedBlock(path, digest, len(blocks), 'table_row',
                                           ' | '.join(c.text for c in cells), None, hierarchy,

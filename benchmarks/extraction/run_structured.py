@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import resource
 import socket
@@ -18,9 +19,22 @@ from benchmarks.extraction.structural_oracle import ORACLE, score_layout
 ROOT = Path(__file__).resolve().parent
 
 
+def runtime_cgroup():
+    line = next(s for s in Path('/proc/self/cgroup').read_text().splitlines() if s.startswith('0::'))
+    cgroup = Path('/sys/fs/cgroup') / line.split(':',2)[2].lstrip('/')
+    for field, limit in (('memory.max', 4*1024**3), ('memory.swap.max', 0), ('pids.max', 128)):
+        if int((cgroup/field).read_text()) > limit:
+            raise ValueError('ineffective cgroup bound: '+field)
+    quota, period = (cgroup/'cpu.max').read_text().split()
+    if int(quota) / int(period) > 2 or len(os.sched_getaffinity(0)) > 2:
+        raise ValueError('ineffective CPU bound')
+    return cgroup
+
+
 def run(name, artifacts, tessdata):
     if {n for _,n in socket.if_nameindex()} - {'lo'}:
         raise ValueError('offline namespace required')
+    cgroup = runtime_cgroup()
     import torch
     if torch.version.cuda is not None or torch.cuda.is_available():
         raise ValueError('CPU-only torch required')
@@ -42,6 +56,7 @@ def run(name, artifacts, tessdata):
         result['blocks_detail'] = [
             {'kind': b.kind, 'text': b.text, 'headings': b.headings, 'page': b.page,
              'clause': b.clause, 'ref': b.native.item_ref, 'layer': b.native.content_layer,
+             'representation': b.native.representation,
              'locations': [{'page': loc.page, 'bbox': loc.bbox, 'origin': loc.coordinate_origin,
                             'char_span': loc.char_span} for loc in b.native.locations],
              'cells': [{'text': c.text, 'row_range': c.native.row_range,
@@ -57,8 +72,6 @@ def run(name, artifacts, tessdata):
         result['torch'] = torch.__version__
         result['peak_rss_kib'] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         result['peak_child_rss_kib'] = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-        line = next(s for s in Path('/proc/self/cgroup').read_text().splitlines() if s.startswith('0::'))
-        cgroup = Path('/sys/fs/cgroup') / line.split(':',2)[2].lstrip('/')
         result['cgroup_memory_peak_bytes'] = int((cgroup / 'memory.peak').read_text())
         result['cgroup_cpu_stat'] = dict(s.split() for s in (cgroup / 'cpu.stat').read_text().splitlines())
         return result

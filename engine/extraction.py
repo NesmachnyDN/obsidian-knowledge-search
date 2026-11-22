@@ -108,7 +108,9 @@ def _docling(data, path, digest, profile, artifacts=None, tessdata=None):
             included_content_layers=set(ContentLayer))}
         if not {'page_header', 'page_footer'} <= labels:
             diagnostics.append('docx-furniture-not-fully-classified')
-    return map_document(result.document, path, digest, profile, diagnostics)
+    return map_document(result.document, path, digest, profile, diagnostics,
+                        text_representation=('ocr-native-text' if profile == STRUCTURED_SCAN
+                                             else 'native-text'))
 
 
 def extract(reader: ScopedReader, path: str, profile: str, tessdata=None, artifacts=None) -> ParsedDocument:
