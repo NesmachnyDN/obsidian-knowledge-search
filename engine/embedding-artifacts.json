@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "repository": "BAAI/bge-m3",
+  "revision": "5617a9f61b028005a4858fdac845db406aefb181",
+  "license": "MIT",
+  "model_type": "xlm-roberta",
+  "hidden_size": 1024,
+  "serialization_version": "bge-m3-heading-lines-v1",
+  "weights_format": "pytorch_state_dict_bin",
+  "distribution": "reference-only; not redistributed by OKS",
+  "files": {
+    "config.json": {
+      "bytes": 687,
+      "sha256": "26159e7ad065073448460117eb24b7a4572f6f4e78eadff65dc0a11c052449fa"
+    },
+    "README.md": {
+      "bytes": 15822,
+      "sha256": "0b81ccf9134e5874d620a86e6905062ea999e779c34eb1a7e65eaeb7fe00e450"
+    },
+    "pytorch_model.bin": {
+      "bytes": 2271145830,
+      "sha256": "b5e0ce3470abf5ef3831aa1bd5553b486803e83251590ab7ff35a117cf6aad38"
+    }
+  },
+  "notes": "Pinned existing local cache only. No weight download or model activation is authorized by this file; CPU-only bounded experiment requires separate explicit approval."
+}

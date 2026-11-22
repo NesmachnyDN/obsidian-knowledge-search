@@ -1,0 +1,51 @@
+{
+  "dimension": 1024,
+  "embed_max_ms": 205.0220579985762,
+  "embed_p50_ms": 162.80877799727023,
+  "experimental": true,
+  "hybrid_retrieval_implemented": false,
+  "identity": {
+    "dimension": 1024,
+    "effective_max_tokens": 256,
+    "normalization": "l2-cls",
+    "repository": "BAAI/bge-m3",
+    "revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "runtime_tokenizer_parity_verified": true,
+    "serialization_version": "bge-m3-heading-lines-v1",
+    "tokenizer_sha256": "21106b6d7dab2952c1d496fb21d5dc9db75c28ed361a05f5020bbba27810dd08",
+    "tokenizers_version": "0.23.3",
+    "torch_version": "2.14.1+cpu",
+    "transformers_version": "5.18.0",
+    "weights_sha256": "b5e0ce3470abf5ef3831aa1bd5553b486803e83251590ab7ff35a117cf6aad38"
+  },
+  "maximum_unit_norm": 1.0,
+  "minimum_unit_norm": 1.0,
+  "model_backed": true,
+  "model_load_wall_seconds": 10.538656390999677,
+  "no_source_content_recorded": true,
+  "offline": true,
+  "phase": "OKS-03A",
+  "plugin_standalone_implemented": false,
+  "process_peak_rss_kib": 2157020,
+  "profile": "python-reference-only",
+  "protocol_version": 1,
+  "repeat_max_abs_difference": 0.0,
+  "resource_evidence": {
+    "cpu_stat": {
+      "nr_throttled": 0,
+      "throttled_usec": 0,
+      "usage_usec": 11955219
+    },
+    "memory_events": {
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0
+    },
+    "memory_max_bytes": 4294967296,
+    "memory_peak_bytes": 967852032,
+    "memory_swap_max_bytes": 0,
+    "pids_max": 128
+  },
+  "test_count": 3
+}

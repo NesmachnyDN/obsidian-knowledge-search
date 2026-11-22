@@ -4,6 +4,7 @@ No persistent index, fake dense records, network, or query-language execution.
 """
 import re
 import sqlite3
+from typing import Callable
 
 from engine.document import ParsedBlock, ParsedDocument
 from engine.markdown import parse_markdown
@@ -21,6 +22,18 @@ def _terms(text: str) -> list[str]:
     # Whole technical terms have exact equality, without FTS punctuation splitting.
     # ASCII hex encoding keeps arbitrary Unicode casefolded terms SQL/FTS safe.
     return ['x' + match.group().casefold().encode().hex() for match in TERM.finditer(text)]
+
+
+def searchable_blocks(doc: ParsedDocument) -> tuple[ParsedBlock, ...]:
+    """Canonical content candidates, independent of FTS term extraction."""
+    if doc.status not in ('ok', 'partial'):
+        return ()
+    malformed_front = 'unterminated-front-matter' in doc.diagnostics
+    return tuple(
+        block for block in doc.blocks
+        if block.kind not in EXCLUDED
+        or (block.kind == 'property' and malformed_front)
+    )
 
 
 class LexicalIndex:
@@ -47,11 +60,7 @@ class LexicalIndex:
                 # hierarchy, document status and diagnostics, against actual bytes.
                 if parse_markdown(doc.path, source.data) != doc:
                     raise ValueError('inconsistent canonical Markdown or locator')
-                malformed_front = 'unterminated-front-matter' in doc.diagnostics
-                for block in doc.blocks:
-                    if block.kind in EXCLUDED and not (
-                            block.kind == 'property' and malformed_front):
-                        continue
+                for block in searchable_blocks(doc):
                     terms = _terms(' '.join((*block.headings, block.text)))
                     if not terms:
                         continue
@@ -64,13 +73,18 @@ class LexicalIndex:
             self.db.close()
             raise
 
-    def search(self, query: str, limit: int = 10) -> tuple[ParsedBlock, ...]:
+    def search(self, query: str, limit: int = 10, *,
+               candidate_filter: Callable[[ParsedBlock], bool] | None = None
+               ) -> tuple[ParsedBlock, ...]:
         if type(query) is not str or len(query.encode()) > MAX_QUERY_BYTES:
             raise ValueError('query bound')
         if type(limit) is not int or not 1 <= limit <= MAX_RESULTS:
             raise ValueError('result bound')
         terms = list(dict.fromkeys(_terms(query)))
         if not terms:
+            # An empty lexical query is valid, but a broken FTS leg must not
+            # be reported healthy by a hybrid search that skips the MATCH SQL.
+            self.db.execute('SELECT rowid FROM lexical LIMIT 0')
             return ()
         expression = ' OR '.join('"' + item + '"' for item in terms)
         # Entire candidate set is bounded by MAX_BLOCKS. Check freshness before K.
@@ -81,6 +95,10 @@ class LexicalIndex:
         results = []
         for (key,) in ranked:
             block = self.blocks[key]
+            # Apply caller-scoped metadata/path filters before the Top-K cutoff.
+            # Keeping this inside the ranked cursor avoids a lost hit at rank >50.
+            if candidate_filter is not None and not candidate_filter(block):
+                continue
             if block.path not in checked:
                 checked[block.path] = self.reader.fresh(block.path, block.digest)
             if checked[block.path]:
