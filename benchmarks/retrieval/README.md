@@ -12,12 +12,12 @@
 
 ## Experiment A: direct original-line retrieval
 
-The experimental index builds **91 exact-source line-backed candidate blocks**, and model-backed vectors for all 91 with a single published in-memory generation. Independent lexical FTS5 ranking, dense cosine similarity over real normalized vectors and deterministic RRF (k=60) were queried separately. Original source digest/bytes/line spans are reverified on every returned hit; failed modes return typed errors, never lexical success under a hybrid label. Typed Properties filters are applied using their declared types; source changes/deletes/renames suppress stale candidates. This does **not** implement durable storage or a plugin-native index.
+The corrected experimental index retains **92 canonical exact-source line-backed candidates**, including one non-FTS-tokenizable front-matter delimiter in a diagnosed partial Markdown source; **91 blocks are lexical-searchable and all 92 have real model-backed dense vectors**. This fixes an FTS-dependent silent omission in dense admission. Independent lexical FTS5 ranking, dense cosine similarity over normalized BGE-M3 vectors and deterministic RRF (k=60) are queried separately, with the same path/Properties restrictions. Original source digest/bytes/line spans are reverified on every returned hit; failed FTS/model legs return typed errors and failed-leg readiness, never lexical success under a hybrid label. Source changes/deletes/renames suppress stale candidates. This does **not** implement durable storage or a plugin-native index.
 
 | Frozen split / mode | Recall@10 | nDCG@10 | MRR@10 |
 |---|---:|---:|---:|
 | Tuning — lexical | 1.0000 | 0.9900 | 1.0000 |
-| Tuning — dense | 0.9643 | 0.8919 | 0.8929 |
+| Tuning — dense | 0.9286 | 0.8862 | 0.8929 |
 | Tuning — hybrid | 1.0000 | 0.9821 | 1.0000 |
 | Held-out — lexical | 0.9667 | 0.9412 | 0.9444 |
 | Held-out — dense | 0.9667 | 0.9355 | 0.9429 |
@@ -25,7 +25,7 @@ The experimental index builds **91 exact-source line-backed candidate blocks**, 
 
 All frozen exact-ID queries found a grade-2 hit at K=10 in this small corpus. Hybrid's held-out nDCG gain over lexical (~0.0044) is **marginal**, not a statistical claim of superiority; it is worse than lexical on tuning, and one held-out unanswerable query still returns real but irrelevant evidence. A ranked retrieval hit is not an automatically justified answer.
 
-Index build was 19.76 s (model loading 11.55 s), with 91 real embeddings; full per-query timings and process/cgroup memory evidence are in results.json. There were **zero invalid original locators, zero failed/incomplete retrieval legs and zero generated evidence references** in the measured run. Freshness failure paths are exercised separately in deterministic tests.
+After the B4/B5 remediation, the bounded real-model re-run built **92 dense embeddings** in **14.13 s** (model loading **9.25 s**). The machine-readable results and 93 case observations were regenerated from this new execution, without changing frozen sources, query labels or judgments. A newly admitted non-lexical candidate changes one tuning dense query ranking; held-out quality aggregates remain unchanged. Per-query timings and resource evidence are in results.json. There were **zero invalid original locators, zero failed/incomplete retrieval legs and zero generated evidence references** in the measured run. Negative tests separately exercise FTS operational failures, model failure readiness, scope filters and source freshness.
 
 ## Experiment B: paired model-backed 02C chunk policies
 
@@ -41,7 +41,7 @@ The previous 02C **structure-aware** provisional choice excelled at source cover
 
 ## Runtime, privacy and limitations
 
-Both real retrieval runs exited cleanly; no external model/service contact, no production Vault sources and no code/model downloads were involved. No high/max/OOM/kill cgroup memory events. The primary retrieval trial's process peak was **2,185,684 KiB** (~2.08 GiB); the policy trial's peak was **2,186,752 KiB**. The enforced `memory.max` was 4,294,967,296 bytes, `memory.swap.max` 0. Cgroup `memory.peak` was ~0.9 GiB despite higher process RSS (different accounting/attribution); both counters are retained without conflation. CPU throttling events were recorded and must be considered in latency interpretation.
+Both real retrieval runs exited cleanly; no external model/service contact, no production Vault sources and no code/model downloads were involved. No high/max/OOM/kill cgroup memory events. The corrected direct retrieval trial's process peak was **2,194,716 KiB** (~2.09 GiB); the unchanged policy trial's peak was **2,186,752 KiB**. The enforced `memory.max` was 4,294,967,296 bytes, `memory.swap.max` 0. Cgroup `memory.peak` was ~0.9 GiB despite higher process RSS (different accounting/attribution); both counters are retained without conflation. CPU throttling events were recorded and must be considered in latency interpretation.
 
 A **separate lightweight cancellation/recovery integration proof** on 2026-11-22 used a disposable private systemd user scope with effective 128 MiB memory cap, zero swap, 50% CPU quota, 16-task cap and offline namespace. An intentionally long-running `sleep` command was terminated by a **2-second timeout** (exit code 124); the named scope became inactive, and a new recovery scope completed with exit code 0 and also became inactive. This verifies **scope lifecycle for a synthetic worker**, not model-inference cancellation under pressure. No unrelated process was touched.
 

@@ -10,6 +10,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from engine.embedding import EmbeddingUnavailable
 from engine.markdown import read_markdown
 from engine.retrieval import (
     Predicate, RetrievalError, RetrievalIndex, PropertyValue,
@@ -183,6 +184,101 @@ class RetrievalUnitTests(unittest.TestCase):
         for pred in bad:
             with self.subTest(pred=pred), self.assertRaises(RetrievalError):
                 self.index.search("zzzzunavailable", "lexical", predicates=(pred,))
+
+    def test_lexical_operational_failures_return_typed_leg_failed(self):
+        # Use a real RetrievalIndex and corrupt the live FTS table; the
+        # failure must not surface SQLite internals or produce hybrid hits.
+        class TestOnlyModel:
+            def embed(self, text):
+                return (1.0,) + (0.0,) * 1023
+
+        self.index._model = TestOnlyModel()
+        self.index._vectors = {
+            key: TestOnlyModel().embed("") for key in self.index._blocks
+        }
+        self.assertTrue(self.index.search("REQ-A-42", "dense").hits)
+        self.index.lexical.db.execute("DROP TABLE lexical")
+        for mode in ("lexical", "hybrid"):
+            for query in ("REQ-A-42", "🚀"):
+                with self.subTest(mode=mode, query=query):
+                    # Even a termless query must detect a broken lexical leg.
+                    result = self.index.search(query, mode)
+                    self.assertEqual(result.status, "failed")
+                    self.assertEqual(result.error, "LEG_FAILED")
+                    self.assertEqual(result.executed_mode, "none")
+                    self.assertEqual(result.requested_mode, mode)
+                    self.assertEqual(result.hits, ())
+                    self.assertEqual(result.lexical_readiness, "failed")
+                    self.assertEqual(result.dense_readiness, "ready")
+        # A failed lexical leg cannot affect the independent dense path.
+        self.assertTrue(self.index.search("REQ-A-42", "dense").hits)
+
+    def test_dense_runtime_failure_marks_dense_not_ready(self):
+        class TestOnlyFailedModel:
+            def embed(self, text):
+                raise EmbeddingUnavailable("RUNTIME_FAILED")
+
+        self.index._model = TestOnlyFailedModel()
+        for mode in ("dense", "hybrid"):
+            with self.subTest(mode=mode):
+                result = self.index.search("REQ-A-42", mode)
+                self.assertEqual(result.status, "failed")
+                self.assertEqual(result.error, "LEG_FAILED")
+                self.assertEqual(result.requested_mode, mode)
+                self.assertEqual(result.executed_mode, "none")
+                self.assertEqual(result.hits, ())
+                self.assertEqual(result.lexical_readiness, "ready")
+                self.assertEqual(result.dense_readiness, "failed")
+
+    def test_dense_indexes_canonical_blocks_without_fts_terms(self):
+        # This valid Markdown paragraph has no FTS terms. Its admission
+        # must not be gated on the lexical tokenizer, even in hybrid mode.
+        (self.root / "glyph.md").write_text(
+            "---\nstatus: target\n---\n🚀\n", encoding="utf-8")
+        doc = read_markdown(self.reader, "glyph.md")
+        index = RetrievalIndex(self.reader, (doc,), None)
+        self.addCleanup(index.close)
+        self.assertEqual(len(index.lexical.blocks), 0)
+        self.assertEqual(len(index._blocks), 1)
+        self.assertEqual(next(iter(index._blocks.values())).text, "🚀")
+
+        class TestOnlyVector:
+            def embed(self, text):
+                return (1.0,) + (0.0,) * 1023
+
+        # A test-only vector exercises ranking/scope/provenance; a fake
+        # model is still rejected by RetrievalIndex's constructor.
+        index._model = TestOnlyVector()
+        index._vectors = {
+            key: TestOnlyVector().embed("") for key in index._blocks
+        }
+        allowed = frozenset({"glyph.md"})
+        predicate = (Predicate("status", "string", "target"),)
+        for mode in ("dense", "hybrid"):
+            with self.subTest(mode=mode):
+                result = index.search(
+                    "rocket", mode, allowed_paths=allowed, predicates=predicate)
+                self.assertEqual(result.status, "ok")
+                self.assertEqual(result.executed_mode, mode)
+                self.assertEqual(len(result.hits), 1)
+                hit = result.hits[0]
+                self.assertEqual(hit.path, "glyph.md")
+                self.assertEqual(hit.excerpt, "🚀")
+                self.assertEqual(hit.dense_rank, 1)
+                self.assertIsNone(hit.lexical_rank)
+                self.assertEqual(
+                    (self.root / hit.path).read_bytes()[
+                        hit.byte_start:hit.byte_end].decode("utf-8"),
+                    hit.excerpt)
+                self.assertEqual(index.search(
+                    "rocket", mode, allowed_paths=frozenset()).hits, ())
+                self.assertEqual(index.search(
+                    "rocket", mode,
+                    predicates=(Predicate("status", "string", "other"),)).hits,
+                    ())
+        (self.root / "glyph.md").write_text("changed", encoding="utf-8")
+        for mode in ("dense", "hybrid"):
+            self.assertEqual(index.search("rocket", mode).hits, ())
 
     def test_source_mutation_rename_delete_suppressed_immediately(self):
         (self.root / "one.md").write_text("# changed\nREQ-A-42: no longer current", encoding="utf-8")

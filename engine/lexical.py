@@ -24,6 +24,18 @@ def _terms(text: str) -> list[str]:
     return ['x' + match.group().casefold().encode().hex() for match in TERM.finditer(text)]
 
 
+def searchable_blocks(doc: ParsedDocument) -> tuple[ParsedBlock, ...]:
+    """Canonical content candidates, independent of FTS term extraction."""
+    if doc.status not in ('ok', 'partial'):
+        return ()
+    malformed_front = 'unterminated-front-matter' in doc.diagnostics
+    return tuple(
+        block for block in doc.blocks
+        if block.kind not in EXCLUDED
+        or (block.kind == 'property' and malformed_front)
+    )
+
+
 class LexicalIndex:
     def __init__(self, reader: ScopedReader, documents: tuple[ParsedDocument, ...]):
         if len(documents) > MAX_SOURCES or sum(len(d.blocks) for d in documents) > MAX_BLOCKS:
@@ -48,11 +60,7 @@ class LexicalIndex:
                 # hierarchy, document status and diagnostics, against actual bytes.
                 if parse_markdown(doc.path, source.data) != doc:
                     raise ValueError('inconsistent canonical Markdown or locator')
-                malformed_front = 'unterminated-front-matter' in doc.diagnostics
-                for block in doc.blocks:
-                    if block.kind in EXCLUDED and not (
-                            block.kind == 'property' and malformed_front):
-                        continue
+                for block in searchable_blocks(doc):
                     terms = _terms(' '.join((*block.headings, block.text)))
                     if not terms:
                         continue
@@ -74,6 +82,9 @@ class LexicalIndex:
             raise ValueError('result bound')
         terms = list(dict.fromkeys(_terms(query)))
         if not terms:
+            # An empty lexical query is valid, but a broken FTS leg must not
+            # be reported healthy by a hybrid search that skips the MATCH SQL.
+            self.db.execute('SELECT rowid FROM lexical LIMIT 0')
             return ()
         expression = ' OR '.join('"' + item + '"' for item in terms)
         # Entire candidate set is bounded by MAX_BLOCKS. Check freshness before K.

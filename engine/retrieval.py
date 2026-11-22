@@ -12,13 +12,14 @@ from hashlib import sha256
 import json
 import math
 import re
+import sqlite3
 from typing import Literal
 
 from engine.document import ParsedBlock, ParsedDocument
 from engine.embedding import (
     EmbeddingUnavailable, OfflineDenseReference, validate_dense_vector,
 )
-from engine.lexical import LexicalIndex, MAX_QUERY_BYTES, MAX_RESULTS
+from engine.lexical import LexicalIndex, MAX_QUERY_BYTES, MAX_RESULTS, searchable_blocks
 from engine.scope import ScopedReader
 
 Mode = Literal["lexical", "dense", "hybrid"]
@@ -232,12 +233,17 @@ class RetrievalIndex:
                 raise RetrievalError("SOURCE_DUPLICATE")
             for doc in documents:
                 self._source_properties[doc.path] = parse_typed_properties(doc)
-            for block in self.lexical.blocks.values():
-                assert block.span is not None
-                key = self._key(block)
-                if key in self._blocks:
-                    raise RetrievalError("EVIDENCE_DUPLICATE")
-                self._blocks[key] = block
+            # FTS may omit valid non-lexical content (e.g. emoji-only
+            # paragraphs). Dense admission must use canonical source blocks,
+            # not the subset of blocks containing lexical search terms.
+            for doc in documents:
+                for block in searchable_blocks(doc):
+                    if block.span is None:
+                        raise RetrievalError("EVIDENCE_INCOMPLETE")
+                    key = self._key(block)
+                    if key in self._blocks:
+                        raise RetrievalError("EVIDENCE_DUPLICATE")
+                    self._blocks[key] = block
             if len(self._blocks) > MAX_RECORDS:
                 raise RetrievalError("INDEX_LIMIT")
             if model is not None:
@@ -263,7 +269,8 @@ class RetrievalIndex:
                 "sources": [(d.path, d.digest, d.status) for d in
                             sorted(documents, key=lambda x: x.path)],
                 "model": identity,
-                "lexical_records": sorted(self._blocks),
+                "lexical_records": sorted(
+                    self._key(block) for block in self.lexical.blocks.values()),
                 "dense_records": sorted(self._vectors),
             }
             self.generation_id = sha256(json.dumps(
@@ -312,9 +319,13 @@ class RetrievalIndex:
         }
         lex_blocks = ()
         if mode != "dense":
-            lex_blocks = self.lexical.search(
-                query, MAX_RESULTS,
-                candidate_filter=lambda block: self._key(block) in eligible)
+            try:
+                lex_blocks = self.lexical.search(
+                    query, MAX_RESULTS,
+                    candidate_filter=lambda block: self._key(block) in eligible)
+            except sqlite3.Error:
+                # Do not expose SQLite internals or return partial hybrid hits.
+                return self._failed(mode, "LEG_FAILED", failed_leg="lexical")
         lexical_keys = tuple(self._key(block) for block in lex_blocks)
         dense_scores: dict[str, float] = {}
         dense_keys: tuple[str, ...] = ()
@@ -326,7 +337,7 @@ class RetrievalIndex:
                                 for key, v in self._vectors.items() if key in eligible}
                 dense_keys = tuple(sorted(dense_scores, key=lambda x: (-dense_scores[x], x)))
             except (EmbeddingUnavailable, ValueError, RuntimeError):
-                return self._failed(mode, "LEG_FAILED")
+                return self._failed(mode, "LEG_FAILED", failed_leg="dense")
         if mode == "hybrid":
             ranked = rrf_fusion(lexical_keys, dense_keys)
         elif mode == "lexical":
@@ -360,6 +371,12 @@ class RetrievalIndex:
         return Response("ok", mode, mode, self.generation_id, tuple(hits), None,
                         "ready", "ready" if self._model else "unavailable", len(stale))
 
-    def _failed(self, mode: Mode, code: str) -> Response:
-        return Response("failed", mode, "none", self.generation_id, (), code,
-                        "ready", "ready" if self._model else "unavailable", 0)
+    def _failed(self, mode: Mode, code: str, *,
+                failed_leg: Literal["lexical", "dense"] | None = None) -> Response:
+        return Response(
+            "failed", mode, "none", self.generation_id, (), code,
+            "failed" if failed_leg == "lexical" else "ready",
+            "failed" if failed_leg == "dense" else (
+                "ready" if self._model is not None else "unavailable"),
+            0,
+        )

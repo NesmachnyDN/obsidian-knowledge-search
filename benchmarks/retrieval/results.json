@@ -1,12 +1,12 @@
 {
-  "block_count": 91,
+  "block_count": 92,
   "case_count": 93,
   "case_stream_path": "cases.ndjson",
-  "case_stream_sha256": "983d0e7e4a25d425023ec37a9cfb59915b0c47520d40014f488b0ceb0cf81ff4",
-  "dense_record_count": 91,
+  "case_stream_sha256": "d4dfbb97c85934b6973b219080ce977790404f2d7eac3f8d3e3cc2c87618bc34",
+  "dense_record_count": 92,
   "experimental_profile": "Python-reference-only",
-  "index_build_wall_seconds": 19.759970004000934,
-  "index_generation_id": "4ff7a862007d6ec6790660dbe13944941c0b660945058efb07f483795aac5da3",
+  "index_build_wall_seconds": 14.134796992999327,
+  "index_generation_id": "bdd76657fb9163f52ed36c7413627a5d81ff533f9cb690ae017ce1504e9c82a5",
   "judgment_sha256": {
     "held_out.json": "743bcd7bed8ab1551da833221343ecbdcb0cc527aa4f4af950d9f5b4a4840e52",
     "oracle.json": "2c65db81772c768bccc80f1c97990752ea643fda495b85e25430709e8a237c32",
@@ -28,21 +28,21 @@
     "transformers_version": "5.18.0",
     "weights_sha256": "b5e0ce3470abf5ef3831aa1bd5553b486803e83251590ab7ff35a117cf6aad38"
   },
-  "model_load_wall_seconds": 11.553806873998838,
+  "model_load_wall_seconds": 9.245818505994976,
   "mvp_accepted": false,
   "no_fake_embedding": true,
   "no_source_content_recorded": true,
   "offline": true,
   "phase": "OKS-03B",
-  "process_peak_rss_kib": 2185684,
+  "process_peak_rss_kib": 2194716,
   "provenance_error_count": 0,
   "query_mode_error_count": 0,
   "real_tokenizer_runtime_parity": true,
   "resource_evidence": {
     "cpu_stat": {
-      "nr_throttled": 39,
-      "throttled_usec": 24235,
-      "usage_usec": 73473024
+      "nr_throttled": 47,
+      "throttled_usec": 51240,
+      "usage_usec": 54797660
     },
     "memory_events": {
       "high": 0,
@@ -51,7 +51,7 @@
       "oom_kill": 0
     },
     "memory_max_bytes": 4294967296,
-    "memory_peak_bytes": 968630272,
+    "memory_peak_bytes": 977940480,
     "memory_swap_max_bytes": 0,
     "pids_max": 128
   },
@@ -224,9 +224,9 @@
               "exact_direct_hit": 1,
               "exact_query_count": 3,
               "mrr": 0.8928571428571429,
-              "ndcg": 0.8918620742949847,
-              "precision": 0.15714285714285714,
-              "recall": 0.9642857142857143
+              "ndcg": 0.8861755176840159,
+              "precision": 0.15,
+              "recall": 0.9285714285714286
             },
             "5": {
               "exact_direct_hit": 1,
@@ -338,41 +338,41 @@
   "timing": {
     "held_out": {
       "dense": {
-        "max_ms": 243.669826995756,
-        "median_ms": 158.40030899562407,
-        "p95_ms": 243.669826995756,
+        "max_ms": 146.86943199922098,
+        "median_ms": 136.03955099824816,
+        "p95_ms": 146.86943199922098,
         "queries": 16
       },
       "hybrid": {
-        "max_ms": 315.2949930008617,
-        "median_ms": 190.62878449767595,
-        "p95_ms": 315.2949930008617,
+        "max_ms": 151.39510400331346,
+        "median_ms": 136.04546550050145,
+        "p95_ms": 151.39510400331346,
         "queries": 16
       },
       "lexical": {
-        "max_ms": 0.9731190002639778,
-        "median_ms": 0.29046500276308507,
-        "p95_ms": 0.9731190002639778,
+        "max_ms": 0.9926849961630069,
+        "median_ms": 0.2671664988156408,
+        "p95_ms": 0.9926849961630069,
         "queries": 16
       }
     },
     "tuning": {
       "dense": {
-        "max_ms": 238.99175800033845,
-        "median_ms": 159.9275070038857,
-        "p95_ms": 238.99175800033845,
+        "max_ms": 143.3138440042967,
+        "median_ms": 132.19063600263325,
+        "p95_ms": 143.3138440042967,
         "queries": 15
       },
       "hybrid": {
-        "max_ms": 236.6528440034017,
-        "median_ms": 155.21580800123047,
-        "p95_ms": 236.6528440034017,
+        "max_ms": 161.01340100431116,
+        "median_ms": 134.13381300051697,
+        "p95_ms": 161.01340100431116,
         "queries": 15
       },
       "lexical": {
-        "max_ms": 1.426322000043001,
-        "median_ms": 0.7008219981798902,
-        "p95_ms": 1.426322000043001,
+        "max_ms": 0.7881060009822249,
+        "median_ms": 0.37768599577248096,
+        "p95_ms": 0.7881060009822249,
         "queries": 15
       }
     }
