@@ -26,8 +26,15 @@ Deliver accurate, inspectable, local retrieval over Obsidian vaults. The origina
 
 On the documented 16 GiB-class reference host: one heavy worker by default; target engine RSS <= 4 GiB in normal search, separate measured indexing peak, at least 3 GiB available system memory before starting heavy work, pause on pressure; no concurrent heavyweight parser/reranker by default. Provisional warm hybrid p95 <= 3 seconds on the pilot corpus; assess reranker separately. These are initial budgets, not achieved performance.
 
-Measure recall@10, nDCG@10, MRR, exact-ID hit rate, source-locator accuracy, chunk coverage, oversize/truncation counts, token duplication, time, RSS and recovery. Agree non-inferiority margins and sample sizes before opening held-out judgments. Require zero critical provenance, privacy and lifecycle violations. Require a demonstrated retrieval quality gain or other agreed material benefit without material regression against the baseline. See benchmarks/README.md.
+Measure Recall@K, Precision@K, nDCG@K, MRR, exact-ID hit rate, source-locator accuracy, chunk coverage, oversize/truncation counts, token duplication, time, RSS and recovery. Agree non-inferiority margins and sample sizes before opening held-out judgments. Require zero critical provenance, privacy and lifecycle violations. Require a demonstrated retrieval quality gain and operational stability without material regression against the incumbent Knowledge AI baseline. Where the incumbent cannot be tested comparably and safely, adoption remains blocked until the maintainer reviews an explicit alternative acceptance decision. See benchmarks/README.md.
+
+## Foundation vertical (partial capability proof)
+
+OKS-01A proves a real desktop command, bounded local process and typed synthetic evidence response without a search index. It partially exercises AC-06/07/09; it does not satisfy the full capability criteria or count as lexical/hybrid retrieval. The exact candidate tokenizer and serialized input policy must be verified before structural token-budget experiments; model inference parity is verified separately. See the roadmap and ADR-0002.
 
 ## Scope of MVP
 
 CAP-01 through CAP-10. Reranking and graph expansion are separate, conditional increments. Existing vault configuration and incumbent search remain unchanged until a controlled adoption decision. No claim of support for formats, hosts or distribution channels that have not been tested.
+
+
+Basic typed Properties filtering and preservation of resolvable Obsidian wiki-link metadata belong to MVP; link traversal and cross-source graph expansion are optional post-MVP. Same-source evidence must retain its anchor and original locators; a missing or failed leg is not a successful hybrid result. Confidentiality, provenance, source freshness, no-truncation and safe resource admission are hard gates, not quality trade-offs.

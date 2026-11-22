@@ -35,6 +35,15 @@ Desktop-only first. Evaluate child process over stdio or authenticated loopback;
 
 Bound queue, use a single heavy job at a time initially, enforce process-level limits and monitor memory/disk, stop or pause on pressure, keep search responsive. Avoid simultaneous full parser/embedding/reranker residency when possible. Persist transactional checkpoints, stage generation before activation, cancel safely and reconcile on startup. No source files removed on uninstall or rebuild. On errors keep last consistent index with explicit staleness or suppress affected hits.
 
+## First vertical and experiment ordering
+
+Use the bounded synthetic evidence probe in ADR-0002 and the OKS-01A execution contract to validate the plugin/process boundary without an index or ML dependency. Prototype single-shot stdio first; measure production IPC independently in OKS-01B. Before arbitrary-source processing, validate stronger filesystem and resource controls. Adopt native parser structure through an independent canonical mapping rather than reconstructing all hierarchy from flattened Markdown. Separate the candidate tokenizer-only validation/provisioning gate from full embedding runtime validation; count the exact contextualized input, including special tokens, and never infer compatibility from vector dimension alone. No prior application code or runtime dependency is required.
+
 ## Open decisions
 
 Exact parser/runtime versions and licenses, tokenizer integration, OCR fallback, index backend, IPC/packaging, resource budgets and Obsidian CLI access require prototypes. Linux is the first target. Public community distribution and cross-platform support need separate policy and packaging gates. See ADRs and roadmap.
+
+
+## Resource and freshness proof obligations
+
+Evaluate enforceable Linux process-tree resource controls (for example delegated cgroup v2) before arbitrary-source or ML workloads. Admission must cover startup peak, descendants, free memory/disk, CPU thread count and cancellation; fail safely if required isolation is unavailable. Keep the UI responsive and prioritize search between bounded background work units. Publish lexical/dense records and manifest as one visible generation, or prove an equivalent atomic commit protocol; on mutation or uncertain freshness, suppress affected hits rather than presenting old evidence as current. Keep typed Properties and resolvable wiki-link metadata in the derived source record; defer graph traversal to a measured optional stage.
