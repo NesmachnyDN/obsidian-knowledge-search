@@ -1,6 +1,8 @@
 ## Scope
 Roadmap slice / requirement IDs:
-Base SHA:
+Base develop SHA:
+Execution contract / issue (if applicable):
+Quality profile (ITERATION / PHASE_CLOSE):
 
 ## Changes and architecture
 Describe bounded implementation, decisions and non-goals.
@@ -12,4 +14,7 @@ Exact commands and outcomes; unrun checks; negative tests; benchmark manifest if
 Confirm no private artifacts or unreviewed code redistribution; resource/lifecycle impact; rollback and remaining risks.
 
 ## Review
-Ready for independent review? No merge without maintainer authorization.
+Independent review result and reviewed head SHA:
+Applicable CI/check conclusions:
+Authorization scope and remaining blockers (if any):
+Merge to develop only after required gates pass; main release requires separate authorization.
