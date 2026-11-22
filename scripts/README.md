@@ -1,3 +1,3 @@
 # Development tools
 
-Reproducible, explicit provisioning, packaging, benchmark and test helpers. No implicit model downloads, global changes, privileged operations or production vault mutations. Pin dependencies and document expected host requirements.
+`build.mjs` produces only main.js and manifest.json in dist, externalizes Obsidian and Node built-ins, and rejects any bundled third-party package. `test.mjs` runs the synthetic TypeScript tests with a 60-second suite timeout. `licenses.mjs` inventories all locked packages, checks reviewed license identifiers and hashes installed upstream license/notice files; optional non-host platform binaries are explicitly marked uninstalled. The esbuild platform binary uses the parent package's same-version upstream MIT license. No global setup, model download or vault installation is automated.
