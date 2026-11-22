@@ -72,12 +72,16 @@ async function readBounded(path: string, max: number): Promise<Buffer | null> {
     return content;
   } finally { await fd.close(); }
 }
-async function atomicFile(dir: string, dest: string, data: Buffer): Promise<void> {
+async function atomicFile(dir: string, dest: string, data: Buffer,
+  beforeRename?: () => void): Promise<void> {
   const temporary = join(dir, '.stage-' + randomUUID());
   const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   try {
     try { await handle.writeFile(data); await handle.sync(); }
     finally { await handle.close(); }
+    // Last cancellable boundary: no await between the guard and starting rename.
+    // A rename already started cannot be safely revoked by a later cancel.
+    beforeRename?.();
     await rename(temporary, join(dir, dest));
     await syncDir(dir);
   } catch (error) {
@@ -127,8 +131,11 @@ export class GenerationStore {
         const pointer = await this.readPointer(name);
         if (!pointer) continue;
         const generation = await this.generation(pointer);
-        if (name === 'CURRENT') this.currentPointer = pointer;
-        else { this.previousPointer = pointer; this.currentPointer = null; }
+        // A recovered PREVIOUS is the authoritative in-memory current snapshot.
+        // Its original pointer must survive the next commit as the new PREVIOUS;
+        // retaining a null currentPointer would garbage-collect its generation.
+        this.currentPointer = pointer;
+        this.previousPointer = null;
         return { generation, recovered: name === 'PREVIOUS', error: name === 'PREVIOUS' ? currentError : null };
       } catch (error) {
         if (error instanceof StandaloneError && error.code === 'VAULT_IDENTITY_CHANGED') throw error;
@@ -141,7 +148,8 @@ export class GenerationStore {
     const existing = directory.some(x => x === 'CURRENT' || x === 'PREVIOUS' || /^gen-[0-9a-f]{64}\.json$/.test(x));
     return { generation: null, recovered: false, error: currentError ?? (existing ? 'INDEX_CORRUPT' : null) };
   }
-  async commit(generation: IndexGeneration): Promise<IndexGeneration> {
+  async commit(generation: IndexGeneration,
+    beginPublication?: () => void): Promise<IndexGeneration> {
     validateGeneration(generation, this.rootId);
     let serialized: Buffer<ArrayBufferLike> = Buffer.from(JSON.stringify(generation), 'utf8');
     if (serialized.length > BOUNDS.generationBytes) throw new StandaloneError('INDEX_LIMIT');
@@ -167,7 +175,9 @@ export class GenerationStore {
     };
     // Safe rollback: preserve the old CURRENT snapshot while the next pointer is staged.
     if (this.currentPointer) await atomicFile(this.dir, 'PREVIOUS', Buffer.from(JSON.stringify(this.currentPointer)));
-    await atomicFile(this.dir, 'CURRENT', Buffer.from(JSON.stringify(pointer)));
+    // Stage and fsync CURRENT first. The owning engine may veto this commit
+    // until the final pointer-rename boundary, including during asynchronous I/O.
+    await atomicFile(this.dir, 'CURRENT', Buffer.from(JSON.stringify(pointer)), beginPublication);
     this.previousPointer = this.currentPointer;
     this.currentPointer = pointer;
     // Only unlink known derived generation filenames; never remove any Vault source.

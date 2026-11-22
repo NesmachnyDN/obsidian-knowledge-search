@@ -24,6 +24,8 @@ export class StandaloneEngine {
   private revision = 0;
   private stopped = false;
   private paused = false;
+  private publishing = false;
+  private recoveryNeedsPublication = false;
   private initialized = false;
   constructor(private readonly provider: SourceProvider, private readonly store: GenerationStore,
     private readonly parser: MarkdownParser,
@@ -47,6 +49,7 @@ export class StandaloneEngine {
       const result = await this.store.load();
       if (this.stopped) return;
       this.generation = result.generation;
+      this.recoveryNeedsPublication = result.recovered;
       this.recordState(!result.generation && result.error ? 'failed'
         : result.error || result.recovered ? 'degraded'
         : result.generation ? 'ready' : 'initializing', result.error);
@@ -80,11 +83,18 @@ export class StandaloneEngine {
     this.paused = false;
     this.reconcile();
   }
-  cancel(): void {
+  // Returns false if publication has crossed the irreversible CURRENT-rename
+  // boundary: pause later jobs, but never claim that committed work was canceled.
+  cancel(): boolean {
     this.paused = true;
-    this.revision++;
     this.pending.clear(); this.all = false;
+    if (this.publishing) {
+      this.recordState(this.generation ? 'degraded' : 'unavailable', 'CANCEL_DEFERRED');
+      return false;
+    }
+    this.revision++;
     this.recordState(this.generation ? 'degraded' : 'unavailable', 'CANCELLED');
+    return true;
   }
   resume(): void {
     if (this.stopped) throw new StandaloneError('LIFECYCLE_INVALID');
@@ -145,11 +155,31 @@ export class StandaloneEngine {
         throw new StandaloneError('SOURCE_CHANGED');
       if (this.stopped || this.paused || revision !== this.revision) return;
       const next = makeGeneration(this.provider.rootId, [...prior.values()]);
-      const committed = next.generationId !== this.generation?.generationId
-        ? await this.store.commit(next) : this.generation;
-      if (this.stopped || revision !== this.revision) return;
+      // Repair a corrupt CURRENT recovered from PREVIOUS even when the source
+      // content is unchanged, without risking deletion of the fallback snapshot.
+      const publish = this.recoveryNeedsPublication || next.generationId !== this.generation?.generationId;
+      let committed: IndexGeneration | null;
+      try {
+        committed = publish ? await this.store.commit(next, () => {
+          if (this.stopped || this.paused || revision !== this.revision)
+            throw new StandaloneError('CANCELLED');
+          // Commit has passed its last cancellable checkpoint. A later cancel
+          // is deferred; the durable result must also be reflected in memory.
+          this.publishing = true;
+        }) : this.generation;
+      } finally {
+        this.publishing = false;
+      }
       this.generation = committed;
-      this.recordState('ready', null);
+      if (publish) this.recoveryNeedsPublication = false;
+      if (this.stopped) return;
+      if (this.paused) {
+        this.recordState('degraded', 'CANCEL_DEFERRED');
+      } else if (revision !== this.revision) {
+        this.recordState('degraded', 'RECONCILING');
+      } else {
+        this.recordState('ready', null);
+      }
     } catch (error) {
       // An interrupted/failed update cannot promote a partially indexed dataset.
       this.recordState(this.generation ? 'degraded' : 'failed', code(error));

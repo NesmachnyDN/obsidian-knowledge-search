@@ -200,6 +200,93 @@ test('cancellation prevents publication; failed commit keeps committed generatio
     assert.equal((await engine.search(search('GPU'))).hits.length, 1);
   } finally { await engine.close(); await cleanup(); }
 });
+test('B1: cancel inside a pending store commit vetoes CURRENT and survives restart', async () => {
+  const { root, reader, store, cleanup } = await setup();
+  const original = (await store.load()).generation!;
+  const commit = store.commit.bind(store);
+  let entered: () => void = () => {};
+  let release: () => void = () => {};
+  const enteredCommit = new Promise<void>(resolve => { entered = resolve; });
+  const commitGate = new Promise<void>(resolve => { release = resolve; });
+  store.commit = async (next, beginPublication) => {
+    entered();
+    await commitGate; // Delayed asynchronous commit: not the earlier parser/yield gate.
+    return commit(next, beginPublication);
+  };
+  const engine = newEngine(reader, store);
+  try {
+    await engine.start(); await engine.whenIdle();
+    await writeFile(join(root, 'boreal.md'), FIXTURE.replace('SSD', 'GPU'));
+    engine.changed('boreal.md');
+    await enteredCommit;
+    assert.equal(engine.cancel(), true);
+    release(); await engine.whenIdle();
+    assert.equal(engine.status().error, 'CANCELLED');
+    assert.equal(engine.status().generationId, original.generationId);
+    const disk = await (await GenerationStore.open(store.dir, reader.rootId)).load();
+    assert.equal(disk.generation?.generationId, original.generationId);
+    const restarted = newEngine(reader, await GenerationStore.open(store.dir, reader.rootId));
+    try {
+      await restarted.start();
+      assert.equal((await restarted.search(search('SSD'))).hits.length, 0); // Stale SHA suppressed.
+      await restarted.whenIdle();
+      assert.equal((await restarted.search(search('GPU'))).hits.length, 1);
+    } finally { await restarted.close(); }
+  } finally { release(); await engine.close(); await cleanup(); }
+});
+
+test('B1: unload during delayed commit vetoes CURRENT before publication', async () => {
+  const { root, reader, store, cleanup } = await setup();
+  const original = (await store.load()).generation!;
+  const commit = store.commit.bind(store);
+  let entered: () => void = () => {};
+  let release: () => void = () => {};
+  const enteredCommit = new Promise<void>(resolve => { entered = resolve; });
+  const commitGate = new Promise<void>(resolve => { release = resolve; });
+  store.commit = async (next, beginPublication) => {
+    entered(); await commitGate;
+    return commit(next, beginPublication);
+  };
+  const engine = newEngine(reader, store);
+  try {
+    await engine.start(); await engine.whenIdle();
+    await writeFile(join(root, 'boreal.md'), FIXTURE.replace('SSD', 'GPU'));
+    engine.changed('boreal.md');
+    await enteredCommit;
+    const unloading = engine.close();
+    release(); await unloading;
+    const persisted = await (await GenerationStore.open(store.dir, reader.rootId)).load();
+    assert.equal(persisted.generation?.generationId, original.generationId);
+  } finally { release(); await engine.close(); await cleanup(); }
+});
+
+test('B1: cancel at CURRENT rename boundary is deferred, not falsely acknowledged', async () => {
+  const { root, reader, store, cleanup } = await setup();
+  const commit = store.commit.bind(store);
+  let engine: StandaloneEngine;
+  let observedBoundary = false;
+  store.commit = async (next, beginPublication) => commit(next, () => {
+    beginPublication?.(); // The actual store invokes this immediately before rename.
+    observedBoundary = true;
+    assert.equal(engine.cancel(), false);
+    assert.equal(engine.status().error, 'CANCEL_DEFERRED');
+  });
+  engine = newEngine(reader, store);
+  try {
+    await engine.start(); await engine.whenIdle();
+    await writeFile(join(root, 'boreal.md'), FIXTURE.replace('SSD', 'GPU'));
+    engine.changed('boreal.md'); await engine.whenIdle();
+    assert.equal(observedBoundary, true);
+    assert.equal(engine.status().status, 'degraded');
+    assert.equal(engine.status().error, 'CANCEL_DEFERRED');
+    const durable = await (await GenerationStore.open(store.dir, reader.rootId)).load();
+    assert.equal(engine.status().generationId, durable.generation?.generationId);
+    assert.equal((await engine.search(search('GPU'))).hits.length, 1);
+    engine.resume(); await engine.whenIdle();
+    assert.equal(engine.status().status, 'ready');
+  } finally { await engine.close(); await cleanup(); }
+});
+
 test('corrupt CURRENT falls back to previous full generation and suppresses superseded hits', async () => {
   const { root, engine, reader, store, cleanup } = await setup();
   try {
@@ -220,6 +307,51 @@ test('corrupt CURRENT falls back to previous full generation and suppresses supe
     await oldEngine.close();
   } finally { await cleanup(); }
 });
+test('B2: two consecutive corrupt CURRENT events preserve the recovered PREVIOUS generation', async () => {
+  const { reader, store, cleanup } = await setup();
+  try {
+    const a = (await store.load()).generation!;
+    const b = makeGeneration(reader.rootId, [parseMarkdown('b.md', Buffer.from('# B\nREQ-B-2'), reader.rootId)]);
+    const c = makeGeneration(reader.rootId, [parseMarkdown('c.md', Buffer.from('# C\nREQ-C-3'), reader.rootId)]);
+    await store.commit(b);
+    await writeFile(join(store.dir, 'CURRENT'), '{corrupt-1');
+    const afterFirstCrash = await GenerationStore.open(store.dir, reader.rootId);
+    const recovered = await afterFirstCrash.load();
+    assert.equal(recovered.recovered, true);
+    assert.equal(recovered.generation?.generationId, a.generationId);
+    await afterFirstCrash.commit(c);
+    const savedPrevious = JSON.parse(await readFile(join(store.dir, 'PREVIOUS'), 'utf8'));
+    assert.equal(savedPrevious.generationId, a.generationId);
+    assert.equal((await readFile(join(store.dir, 'gen-' + a.generationId + '.json'))).length > 0, true);
+    await writeFile(join(store.dir, 'CURRENT'), '{corrupt-2');
+    const afterSecondCrash = await (await GenerationStore.open(store.dir, reader.rootId)).load();
+    assert.equal(afterSecondCrash.recovered, true);
+    assert.equal(afterSecondCrash.generation?.generationId, a.generationId);
+    assert.equal(afterSecondCrash.error, 'INDEX_CORRUPT');
+  } finally { await cleanup(); }
+});
+
+test('B2: startup reconciliation repairs corrupt CURRENT even with unchanged source versions', async () => {
+  const { root, reader, store, engine, cleanup } = await setup();
+  let restart: StandaloneEngine | undefined;
+  try {
+    const original = (await store.load()).generation!;
+    await writeFile(join(root, 'boreal.md'), FIXTURE.replace('SSD', 'GPU'));
+    engine.changed('boreal.md'); await engine.whenIdle();
+    await writeFile(join(root, 'boreal.md'), FIXTURE);
+    await writeFile(join(store.dir, 'CURRENT'), '{corrupt');
+    restart = newEngine(reader, await GenerationStore.open(store.dir, reader.rootId));
+    await restart.start(); await restart.whenIdle();
+    assert.equal(restart.status().status, 'ready');
+    assert.equal(restart.status().generationId, original.generationId);
+    const verified = await (await GenerationStore.open(store.dir, reader.rootId)).load();
+    assert.equal(verified.recovered, false);
+    assert.equal(verified.error, null);
+    assert.equal(verified.generation?.generationId, original.generationId);
+    assert.equal((await restart.search(search('SSD'))).hits.length, 1);
+  } finally { await restart?.close(); await cleanup(); }
+});
+
 test('symlink source and foreign copied Vault cache fail closed; empty/emoji-only Markdown do not invent evidence', async () => {
   const { root, reader, store, engine, cleanup } = await setup();
   const external = join(root, 'outside.txt');
