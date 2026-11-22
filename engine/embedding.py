@@ -45,6 +45,7 @@ class ModelIdentity:
     transformers_version: str
     tokenizers_version: str
     effective_max_tokens: int
+    runtime_tokenizer_parity_verified: bool
 
 
 def _hash_file(path: Path) -> str:
@@ -175,13 +176,27 @@ class OfflineDenseReference:
             raise EmbeddingUnavailable("TOKENIZER_INCOMPATIBLE") from exc
         try:
             import torch
-            from transformers import AutoModel
+            from transformers import AutoModel, AutoTokenizer
         except ImportError as exc:
             raise EmbeddingUnavailable("RUNTIME_UNAVAILABLE") from exc
-        if not torch.backends.mkldnn.is_available():
-            # CPU still works without MKLDNN; identity records the installed runtime.
-            pass
         torch.set_num_threads(2)
+        # Verify that the 02C exact-token contract is also the actual model-runtime input.
+        try:
+            runtime_tokenizer = AutoTokenizer.from_pretrained(
+                str(snapshot), local_files_only=True, trust_remote_code=False,
+                use_fast=True,
+            )
+            for sample in ("ID-42 / RFC 9110", "Раздел: договор № АБ-17", "emoji 🚀 CRLF\\r\\n"):
+                actual = runtime_tokenizer(
+                    sample, add_special_tokens=True, truncation=False, padding=False,
+                )["input_ids"]
+                expected = counter._raw.encode(sample, add_special_tokens=True).ids
+                if actual != expected:
+                    raise EmbeddingUnavailable("TOKENIZER_INCOMPATIBLE")
+        except EmbeddingUnavailable:
+            raise
+        except Exception as exc:
+            raise EmbeddingUnavailable("TOKENIZER_INCOMPATIBLE") from exc
         try:
             model = AutoModel.from_pretrained(
                 str(snapshot), local_files_only=True, trust_remote_code=False,
@@ -206,6 +221,7 @@ class OfflineDenseReference:
             transformers_version=version("transformers"),
             tokenizers_version=version("tokenizers"),
             effective_max_tokens=max_tokens,
+            runtime_tokenizer_parity_verified=True,
         )
 
     def embed(self, text: str) -> tuple[float, ...]:
