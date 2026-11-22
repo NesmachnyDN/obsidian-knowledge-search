@@ -6,6 +6,8 @@ Status: OKS-00 design assessment for review. No prior application code, datasets
 
 The prior engineering implementation was inspected as a reference. No redistribution license was established for its source. Reimplement transferable algorithms from public specifications and independently authored requirements. No source, private repository identifiers, internal file paths, private evaluation reports or fixtures are published here. Maintainer-only provenance records remain outside public Git. If a later slice proposes direct reuse, require explicit written redistribution rights, exact source revision/path/symbol, author/copyright and third-party provenance, license compatibility, transitive dependency inventory, notices, and independent review before copying. A repository-level MIT license does not grant rights to third-party or private source. A blocked direct-copy decision does not block independently authored implementation.
 
+The proposed [ADR-0006](adr/0006-standalone-execution-profiles.md) retains the Python implementation as a measured reference and eligible opt-in backend, **not** a baseline installation dependency. The native plugin-side lexical implementation will reuse shared evidence semantics and independently reviewed algorithms, not private code or a Python interpreter. Any plugin-managed advanced runtime requires its own licensing and host-policy gate.
+
 ## Engineering dispositions
 
 | Component | Reference findings / transferable approach | Dependency concerns | Adaptation effort | Decision / gate |

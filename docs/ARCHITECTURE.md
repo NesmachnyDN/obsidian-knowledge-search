@@ -1,20 +1,25 @@
 # Architecture
 
-Status: initial design. Concrete libraries, packaging and thresholds are gated by OKS-01/02 experiments.
+Status: amended runtime/deployment architecture under ADR-0006. The existing Python probe and parsers are experiments, not an installable standalone search product.
 
-## Logical components
+## Logical components and deployment profiles
 
-Obsidian (authoritative files, links and Properties)
-  -> TypeScript vault adapter / UI / commands
-  -> versioned local IPC contract
-  -> isolated Python worker runtime
-     -> parse / OCR -> canonical source blocks -> chunk planning / token validation
-     -> local embeddings -> transactional derived index
-     -> lexical + dense retrieval -> rank fusion -> evidence / context expansion
-     -> optional rerank (post-MVP)
-  -> ranked evidence / diagnostics -> Obsidian or authorized local client.
+The **mandatory default** contains only Obsidian and the installed plugin:
 
-The plugin owns the user experience, scope, change-event reconciliation and runtime management. The engine owns parsing, indexing, search and resource arbitration. The contract carries opaque source IDs and scoped path references, never arbitrary execution requests. No service dependency on any other product. No required server database or external orchestrator.
+```text
+Obsidian authoritative Vault / Properties / MetadataCache / links
+    -> plugin adapter, search UI and capability/status controller
+    -> plugin-bundled native TS/JS search core (bounded asynchronous work)
+        -> Markdown canonical extraction -> lexical derived index
+        -> typed metadata/scope filter -> original-source evidence and navigation
+    -> local versioned index (candidate backend pending transaction/host PoC)
+```
+
+No Python, Node installation, Ollama, Docling, Docker, separate server or manual model installation is required from the user. Obsidian desktop may expose Node/Electron APIs inside its process; these **do not** imply a separately installed interpreter. Avoid heavyweight work on the UI thread; validate worker APIs and cooperative bounded scheduling in an isolated Obsidian PoC. The current TS plugin contains only a synthetic evidence probe that needs an operator-configured Python process and therefore does **not** implement this Standalone diagram.
+
+An **optional Bundled Advanced** profile can add plugin-supplied/managed WASM, a verified worker, licensed model artifacts and native processing. An **optional External Backend** can explicitly connect to an independently installed, authenticated **local** service for Docling/OCR/model inference, never as default. Disabling either keeps Standalone operational. No implicit cloud egress, service discovery, runtime download or unconfigured listener.
+
+Python-based extraction/chunking/SQLite/FTS5 and cgroup supervision already exist as bounded reference experiments. They remain candidates for the optional backend and retrieval benchmark in OKS-03A/B, not a mandatory plugin runtime. A future backend adapter converts through the **same** canonical source/chunk/evidence semantics, with an independently tested versioned wire contract; the prior `v1` fixture probe envelope is unaffected.
 
 ## Data and contracts
 
@@ -25,13 +30,21 @@ The plugin owns the user experience, scope, change-event reconciliation and runt
 - EvidenceHit: source reference, source hash, exact excerpt, original locator, rank, scores by leg, diagnostics; optional derived context explicitly distinguished from source evidence.
 - Request/response: protocol version, request ID, bounded query/scope/filter/limit, cancellation and typed error; health, search, reconcile, pause/resume/cancel and status. Define JSON Schema and contract tests before freezing wire format.
 
+## Readiness, algorithm identity and compatibility
+
+An observable feature matrix distinguishes `lexical`, `dense`, and `hybrid` requests and executed modes; leg readiness and errors are not implicit. Standalone defaults to lexical. Hybrid is valid only when independently ready lexical and real dense legs both run and deterministic rank fusion completes against one compatible source/index generation. An unavailable dense leg returns a typed error, **not** a disguised lexical result. Readiness progresses through disabled/unavailable/provisioning/initializing/ready/degraded/failed; failed advanced provisioning does not invalidate the standalone index.
+
+Use shared versioned, language-neutral contracts for source identity (vault-relative path/hash), extraction status, typed Properties and resolvable wiki-links, canonical blocks with original anchors, source slices and deterministic chunks, tokenizer/serialization identity, and evidence ranks/scores/diagnostics. Source-backed text is distinct from contextual embedding strings. For Markdown retain verifiable byte/line/character spans; binary formats use verified item/page/table/geometry anchors, never guessed file byte positions. Python structures in `engine/document.py` and `engine/chunking.py` are the current semantic reference. The [portable contract draft](../contracts/portable-model.md) records common semantics; a separate production schema/parity fixture gate precedes JS runtime adaptation; do not create a second incompatible evidence model.
+
+Standalone index persistence must be local, vault-isolated, transactional/recoverable and safe on reinstall/uninstall; candidate IndexedDB or plugin-managed bounded storage requires crash/quota/Obsidian lifecycle proof. Existing Python SQLite transactions prove only its optional backend path. Publish generation+source hashes atomically or prove equivalent visibility; verify current source before showing hits and suppress stale/deleted/renamed evidence, even between event processing and reconciliation. No production index format is selected by this doc-only PR.
+
 ## Technology candidates
 
-Docling native document hierarchy and HybridChunker for PDF/DOCX; lightweight Markdown parser with Obsidian-compatible boundaries; explicitly provisioned Russian/English OCR. Compare native model runtime with existing local embedding runtime candidates, with tokenizer identity and no silent truncation. BGE-M3 dense first; sparse/multi-vector only if justified. SQLite FTS5 with Russian exact-ID/tokenization tests is a lexical candidate. Compare embedded vector backends (e.g. exact NumPy baseline, sqlite-vec or embedded ANN) before committing. Do not copy a server-dependent storage stack. RRF is the initial fusion strategy. Optional BGE-reranker-v2-m3 conditioned on latency and evidence gain.
+Docling native document hierarchy and HybridChunker for PDF/DOCX; lightweight Markdown parser with Obsidian-compatible boundaries; explicitly provisioned Russian/English OCR. Compare native model runtime with existing local embedding runtime candidates, with tokenizer identity and no silent truncation. BGE-M3 dense first; sparse/multi-vector only if justified. SQLite FTS5 with Russian exact-ID/tokenization tests is a **Python backend** lexical candidate; plugin-native lexical index needs its own bounded storage and tokenizer evaluation. Compare embedded vector backends (e.g. exact NumPy baseline, sqlite-vec or embedded ANN) before committing. Do not copy a server-dependent storage stack. RRF is the initial fusion strategy. Optional BGE-reranker-v2-m3 conditioned on latency and evidence gain.
 
 ## Operational and trust boundaries
 
-Desktop-only first. Evaluate child process over stdio or authenticated loopback; stdio preferred if lifecycle/streaming tests pass. No open network listener by default. Model/parser runtime is an implementation dependency supervised by the plugin, not a separately administered knowledge system. Explicit installation/verification and version pinning; no auto-download or shell execution on untrusted document input. Redact diagnostics by default. Restrict file access to scoped roots; validate paths and symlinks in both layers. Do not include confidential content in development artifacts.
+Desktop-only first. Standalone native search owns its local processing and index, with no child process or listener requirement. The existing child-process stdio proof pertains to an optional Python backend only; authenticate any optional loopback API and require explicit user enablement. Bundled advanced workers need plugin-controlled lifecycle, permissions, verified artifacts and no manual dependency installation. No open network listener by default. No auto-download or shell execution on untrusted document input. Redact diagnostics by default. Restrict file access to scoped roots; validate paths and symlinks in both layers. Do not include confidential content in development artifacts.
 
 Bound queue, use a single heavy job at a time initially, enforce process-level limits and monitor memory/disk, stop or pause on pressure, keep search responsive. Avoid simultaneous full parser/embedding/reranker residency when possible. Persist transactional checkpoints, stage generation before activation, cancel safely and reconcile on startup. No source files removed on uninstall or rebuild. On errors keep last consistent index with explicit staleness or suppress affected hits.
 
@@ -41,7 +54,7 @@ Use the bounded synthetic evidence probe in ADR-0002 and the OKS-01A execution c
 
 ## Open decisions
 
-Exact parser/runtime versions and licenses, tokenizer integration, OCR fallback, index backend, IPC/packaging, resource budgets and Obsidian CLI access require prototypes. Linux is the first target. Public community distribution and cross-platform support need separate policy and packaging gates. See ADRs and roadmap.
+Exact plugin-native index/worker APIs, runtime host compatibility, parser/model licenses, tokenizer parity, advanced packaging and plugin release sizes, IPC/authentication, resource budgets and Obsidian CLI access require prototypes. Obsidian policy requires a valid manifest and minimum app version, and desktop-only declaration for Node/Electron; community release packages distribute main.js/manifest.json (and optional styles.css). These facts do not authorize bundling heavyweight runtimes. See ADR-0006. Linux is the first target. Public community distribution and cross-platform support need separate policy and packaging gates. See ADRs and roadmap.
 
 
 ## Resource and freshness proof obligations

@@ -1,6 +1,6 @@
 # Synthetic evidence probe (OKS-01A)
 
-This is a Linux desktop development prototype, not search or an index. No work starts on load. Use only a disposable synthetic vault. It partially exercises CAP-07/09, AC-07/09 and the evidence shape of AC-06.
+This is a Linux desktop development prototype, not search or an index. Its Python setup instructions are **only for the synthetic probe**, and are explicitly **not** the intended Standalone installation. See ADR-0006 for Obsidian + plugin only as the future mandatory baseline. No work starts on load. Use only a disposable synthetic vault. It partially exercises CAP-07/09, AC-07/09 and the evidence shape of AC-06.
 
 ## Build and install
 

@@ -11,3 +11,7 @@ python3 -c 'import json; print(json.dumps(json.load(open("contracts/fixtures/cas
 ```
 
 No Obsidian CLI or external-agent interface is claimed.
+
+## Future portable retrieval contract
+
+[Portable data and evidence semantics](portable-model.md) is the ADR-0006 architecture draft shared by the future plugin-native and optional backend implementations. It is **not** the active v1 synthetic-probe wire format. No production search format is frozen yet.
