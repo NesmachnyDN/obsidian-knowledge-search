@@ -20,7 +20,7 @@ On the ZenBook, an already locally cached BGE-M3 revision `5617a9f61b028005a4858
 | Plugin-managed Bundled Advanced | 2.27 GB reference weights plus library/runtime closure; no reviewed plugin-compatible package/asset distribution or lifecycle test | **Not selected**. Must verify Obsidian Community Plugin policies, release dimensions, offline asset provisioning and uninstall behavior before proposal |
 | Default Standalone | No external Python/service/model by design; lexical-only native plugin implementation occurs at 04A/04B | **Unaffected** by the experimental reference worker |
 
-## Prepared bounded experiment (not executed)
+## Guarded runner and authorization
 
 The optional [guarded runner](../../scripts/run_embedding_bounded.py) performs SHA-256 preflight and Foundation cgroup resource admission, denies concurrent experimental scopes, sets 4 GiB process-tree memory, zero swap, two logical CPUs, a bounded timeout, task limit and a network-isolated Linux namespace. The inner worker rechecks effective kernel resource limits and offline interfaces **before** importing the model. All text is fixed, synthetic and not copied into result files. Results would contain aggregate CPU/RSS, vector dimension, norm and repeatability, runtime identity, and explicitly false standalone/hybrid implementation claims.
 
@@ -50,6 +50,51 @@ A second independent bounded CPU run, after adding an in-process HuggingFace fas
 
 This proves only an isolated opt-in **Python reference CPU candidate**. It does not prove Bundled Advanced distribution, a JS/WASM runtime, Standalone search, retrieval-quality acceptance, or all error modes. The final independent reviewer must assess 03A and 03B in the same aggregate exact-HEAD diff.
 
+## B3 remediation — real model-worker cancellation and restart (2026-11-22)
+
+A separate, authorized **BGE-M3 lifecycle proof** uses [the guarded recovery
+orchestrator](../../scripts/run_embedding_recovery.py) and the same pinned cached
+weights/runtime under the identical enforced Linux envelope. Unlike the earlier
+lightweight `sleep` test, the first worker **loads real model weights**, verifies
+the actual fast tokenizer, performs an actual 1024-dimensional normalized
+embedding, and emits a single metadata-only readiness record. Only then does
+the bounded parent **inject a synthetic below-reserve pressure signal**, use
+the existing whole-cgroup cancellation/stop path, verify a nonzero worker
+termination and an inactive scope, and admit a second independent real model
+run. The restarted worker again produces three real embeddings with an exact
+repeat, and exits cleanly without an orphaned scope.
+
+The [recorded aggregate-only proof](results-recovery.json) captures both
+effective 4 GiB / zero-swap / at-most-two-CPU / 128-task offline scope limits,
+no high/max/OOM/kill events, consistent verified model identity, real inference
+before cancellation, the second successful run, and inactive scopes.
+**This is a controlled cancellation triggered by simulated pressure, not a
+test that induces physical low-memory conditions, live kernel OOM or production
+reliability.** It never reads production Vault content, downloads artifacts or
+substitutes fake vectors.
+
+With the same explicitly granted maintainer authorization, reproduce only
+after checking machine admission, no active heavy job and cached artifacts:
+
+```sh
+python3 -I -B scripts/run_embedding_recovery.py \
+  --python "$PINNED_CPU_PYTHON" \
+  --snapshot "$PINNED_BGE_M3_SNAPSHOT" \
+  --output "$UNIQUE_EXTERNAL_SYNTHETIC_RECOVERY_RESULT" \
+  --explicit-model-approval
+```
+
+The runner refuses an existing output, rejects unapproved launches, preserves
+scope isolation and does not publish a success record unless both stages pass.
+A separate independent **full-diff review of the updated PR HEAD** is still
+required before phase closure.
+
 ## Unmet adoption gates
 
-A successful phase exit now requires additional runtime/tokenizer parity and failure/pressure/cancellation evidence, 03B real-hybrid frozen-corpus retrieval quality and index-generation/provenance checks, host feasibility comparison, and **one final independent exact-HEAD full-phase review**. No current document, unit test or CI status shall be interpreted as satisfying these gates.
+The real model-worker cancellation/recovery proof above closes the specifically
+identified **simulation-based lifecycle** gap for this reference experiment;
+uncontrolled physical memory pressure/OOM, production Vault behavior and
+plugin-native distribution remain untested. The updated 03A/03B candidate still
+requires **one fresh independent exact-HEAD full-phase review**, including all
+mandatory failures, acceptance evidence and CI. No unit test or green CI alone
+establishes phase closure or a distributable advanced runtime.

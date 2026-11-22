@@ -96,6 +96,80 @@ class RetrievalUnitTests(unittest.TestCase):
             (PropertyValue("mixed", "list", (1,)),),
             (Predicate("mixed", "list", True, "contains"),)))
 
+    def test_list_equality_and_membership_preserve_scalar_types(self):
+        (self.root / "mixed.md").write_text(
+            '---\nflags: [1, true, 1.0, null, "1"]\n---\n# Mixed\nneedle\n',
+            encoding="utf-8")
+        doc = read_markdown(self.reader, "mixed.md")
+        index = RetrievalIndex(self.reader, (doc,), None)
+        self.addCleanup(index.close)
+        actual = (1, True, 1.0, None, "1")
+        correct = index.search("needle", "lexical", predicates=(
+            Predicate("flags", "list", actual),))
+        self.assertEqual([h.path for h in correct.hits], ["mixed.md"])
+        for unequal in (
+            (True, True, 1.0, None, "1"),
+            (1, 1, 1.0, None, "1"),
+            (1, True, True, None, "1"),
+            (1, True, 1, None, "1"),
+            (1, True, 1.0, "null", "1"),
+        ):
+            with self.subTest(unequal=unequal):
+                self.assertEqual(index.search("needle", "lexical", predicates=(
+                    Predicate("flags", "list", unequal),)).hits, ())
+        for item in actual:
+            self.assertEqual(
+                len(index.search("needle", "lexical", predicates=(
+                    Predicate("flags", "list", item, "contains"),)).hits), 1)
+        self.assertEqual(index.search("needle", "lexical", predicates=(
+            Predicate("flags", "list", False, "contains"),)).hits, ())
+        for invalid in (
+            ([], "eq"), ((float("nan"),), "eq"), ((float("inf"),), "eq"),
+            (({"nested": 1},), "eq"), (((1,),), "eq"),
+            (float("inf"), "contains"), ({"nested": 1}, "contains"),
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(RetrievalError):
+                index.search("needle", "lexical", predicates=(
+                    Predicate("flags", "list", invalid[0], invalid[1]),))
+
+    def test_filters_applied_before_candidate_top_k_for_all_modes(self):
+        # 70 matching sources > MAX_RESULTS=50; the only admissible file
+        # ranks strictly beyond the truncated unfiltered lexical candidates.
+        for i in range(70):
+            (self.root / f"bulk-{i:03d}.md").write_text(
+                "---\nstatus: " + ("target" if i == 69 else "other") +
+                "\n---\n# Header\nneedle alpha\n", encoding="utf-8")
+        docs = tuple(read_markdown(self.reader, f"bulk-{i:03d}.md")
+                     for i in range(70))
+        index = RetrievalIndex(self.reader, docs, None)
+        self.addCleanup(index.close)
+        target = "bulk-069.md"
+        self.assertEqual(len(index.lexical.search("needle", 50)), 50)
+        # Only the ranking logic is unit-tested with injected artificial
+        # vectors. This does NOT establish genuine model readiness, and the
+        # constructor still rejects fabricated embedding implementations.
+        class TestOnlyVector:
+            def embed(self, _text):
+                return (1.0,) + (0.0,) * 1023
+        index._model = TestOnlyVector()
+        index._vectors = {key: TestOnlyVector().embed("")
+                          for key in index._blocks}
+        variants = (
+            {"predicates": (Predicate("status", "string", "target"),)},
+            {"allowed_paths": frozenset({target})},
+            {"predicates": (Predicate("status", "string", "target"),),
+             "allowed_paths": frozenset({target})},
+        )
+        for mode in ("lexical", "dense", "hybrid"):
+            for filters in variants:
+                with self.subTest(mode=mode, filters=filters):
+                    result = index.search("needle", mode, limit=10, **filters)
+                    self.assertEqual(result.status, "ok")
+                    self.assertEqual(result.executed_mode, mode)
+                    self.assertTrue(result.hits)
+                    self.assertEqual({hit.path for hit in result.hits}, {target})
+                    self.assertEqual(result.hits[0].rank, 1)
+
     def test_typed_filter_malformed_rejected_even_when_no_candidates(self):
         bad = (
             Predicate("status", "nonsense", "accepted"),

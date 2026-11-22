@@ -83,6 +83,19 @@ class Response:
     stale_source_count: int
 
 
+def _valid_list_member(value: object) -> bool:
+    # JSON booleans and numbers are distinct types, despite True == 1 in Python.
+    return (value is None or type(value) in (str, int, bool)
+            or (type(value) is float and math.isfinite(value)))
+
+
+def _typed_list_equal(left: object, right: object) -> bool:
+    return (type(left) is tuple and type(right) is tuple
+            and len(left) == len(right)
+            and all(type(a) is type(b) and a == b
+                    for a, b in zip(left, right)))
+
+
 def parse_typed_properties(doc: ParsedDocument) -> tuple[PropertyValue, ...]:
     """Subset of canonical 02A scalars: reject ambiguous YAML, never coerce silently."""
     result: list[PropertyValue] = []
@@ -115,8 +128,7 @@ def parse_typed_properties(doc: ParsedDocument) -> tuple[PropertyValue, ...]:
                 raise RetrievalError("PROPERTY_INCOMPATIBLE") from exc
             if isinstance(value, list):
                 if len(value) > 64 or any(
-                        type(item) not in (str, int, float, bool) and item is not None
-                        for item in value):
+                        not _valid_list_member(item) for item in value):
                     raise RetrievalError("PROPERTY_INCOMPATIBLE")
                 result.append(PropertyValue(key, "list", tuple(value)))
             elif type(value) is str:
@@ -155,10 +167,10 @@ def validate_predicates(predicates: tuple[Predicate, ...]) -> None:
                 raise RetrievalError("FILTER_INVALID") from exc
         if predicate.value_type == "list":
             if predicate.operator == "eq" and (
-                    type(predicate.value) is not tuple or len(predicate.value) > 64):
+                    type(predicate.value) is not tuple or len(predicate.value) > 64
+                    or any(not _valid_list_member(v) for v in predicate.value)):
                 raise RetrievalError("FILTER_INVALID")
-            if predicate.operator == "contains" and type(predicate.value) not in (
-                    str, int, float, bool):
+            if predicate.operator == "contains" and not _valid_list_member(predicate.value):
                 raise RetrievalError("FILTER_INVALID")
         if predicate.value_type == "boolean" and type(predicate.value) is not bool:
             raise RetrievalError("FILTER_INVALID")
@@ -177,6 +189,9 @@ def matches_predicates(properties: tuple[PropertyValue, ...],
             if (actual.value_type != "list"
                     or not any(type(item) is type(predicate.value)
                                and item == predicate.value for item in actual.value)):
+                return False
+        elif actual.value_type == "list":
+            if not _typed_list_equal(actual.value, predicate.value):
                 return False
         elif actual.value != predicate.value or (
                 actual.value_type == "number" and type(actual.value) is bool):
@@ -287,9 +302,19 @@ class RetrievalIndex:
             raise RetrievalError("SCOPE_INVALID")
         if mode in ("dense", "hybrid") and self._model is None:
             return self._failed(mode, "CAPABILITY_UNAVAILABLE")
+        # Select a single admissible candidate universe *before* rank/Top-K.
+        # The unfiltered lexical index is still allowed to stream its bounded
+        # rows; dense similarity and RRF only see the same eligible sources.
+        eligible = {
+            key for key, block in self._blocks.items()
+            if (allowed_paths is None or block.path in allowed_paths)
+            and matches_predicates(self._source_properties[block.path], predicates)
+        }
         lex_blocks = ()
         if mode != "dense":
-            lex_blocks = self.lexical.search(query, MAX_RESULTS)
+            lex_blocks = self.lexical.search(
+                query, MAX_RESULTS,
+                candidate_filter=lambda block: self._key(block) in eligible)
         lexical_keys = tuple(self._key(block) for block in lex_blocks)
         dense_scores: dict[str, float] = {}
         dense_keys: tuple[str, ...] = ()
@@ -298,7 +323,7 @@ class RetrievalIndex:
                 assert self._model is not None
                 vector = self._model.embed(query)
                 dense_scores = {key: math.fsum(a * b for a, b in zip(vector, v))
-                                for key, v in self._vectors.items()}
+                                for key, v in self._vectors.items() if key in eligible}
                 dense_keys = tuple(sorted(dense_scores, key=lambda x: (-dense_scores[x], x)))
             except (EmbeddingUnavailable, ValueError, RuntimeError):
                 return self._failed(mode, "LEG_FAILED")
@@ -315,10 +340,6 @@ class RetrievalIndex:
         hits: list[Evidence] = []
         for key, lexical_rank, dense_rank, score in ranked:
             block = self._blocks[key]
-            if allowed_paths is not None and block.path not in allowed_paths:
-                continue
-            if not matches_predicates(self._source_properties[block.path], predicates):
-                continue
             if block.path not in checked:
                 checked[block.path] = self.reader.fresh(block.path, block.digest)
                 if not checked[block.path]:

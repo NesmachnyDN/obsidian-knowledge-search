@@ -4,6 +4,7 @@ No persistent index, fake dense records, network, or query-language execution.
 """
 import re
 import sqlite3
+from typing import Callable
 
 from engine.document import ParsedBlock, ParsedDocument
 from engine.markdown import parse_markdown
@@ -64,7 +65,9 @@ class LexicalIndex:
             self.db.close()
             raise
 
-    def search(self, query: str, limit: int = 10) -> tuple[ParsedBlock, ...]:
+    def search(self, query: str, limit: int = 10, *,
+               candidate_filter: Callable[[ParsedBlock], bool] | None = None
+               ) -> tuple[ParsedBlock, ...]:
         if type(query) is not str or len(query.encode()) > MAX_QUERY_BYTES:
             raise ValueError('query bound')
         if type(limit) is not int or not 1 <= limit <= MAX_RESULTS:
@@ -81,6 +84,10 @@ class LexicalIndex:
         results = []
         for (key,) in ranked:
             block = self.blocks[key]
+            # Apply caller-scoped metadata/path filters before the Top-K cutoff.
+            # Keeping this inside the ranked cursor avoids a lost hit at rank >50.
+            if candidate_filter is not None and not candidate_filter(block):
+                continue
             if block.path not in checked:
                 checked[block.path] = self.reader.fresh(block.path, block.digest)
             if checked[block.path]:

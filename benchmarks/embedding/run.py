@@ -101,8 +101,49 @@ def run(snapshot: Path) -> dict:
     }
 
 
+def run_cancel_ready_probe(snapshot: Path) -> None:
+    """Hold a *real loaded model* alive until the outer cgroup is cancelled.
+
+    The single stdout readiness message contains metadata only. The parent
+    must verify effective limits and stop the entire named scope; this worker
+    cannot mark its own cancellation as successful.
+    """
+    verify_active_experiment_guard()
+    model = OfflineDenseReference(snapshot)
+    vector = model.embed(SYNTHETIC_TEXTS[0])
+    norm = math.hypot(*vector)
+    if len(vector) != 1024 or abs(norm - 1.0) > 1e-5:
+        raise ValueError("real model not ready for cancellation")
+    resources = _resource_evidence()
+    if (resources["memory_max_bytes"] != 4 * 1024**3
+            or resources["memory_swap_max_bytes"] != 0
+            or resources["pids_max"] > 128
+            or resources["memory_peak_bytes"] > resources["memory_max_bytes"]
+            or any(resources["memory_events"].get(event, 0)
+                   for event in ("high", "max", "oom", "oom_kill"))):
+        raise ValueError("invalid model worker resource limit")
+    print(json.dumps({
+        "phase": "OKS-03A-MODEL-READY",
+        "model_backed": True,
+        "offline": True,
+        "identity": asdict(model.identity),
+        "dimension": 1024,
+        "unit_norm": norm,
+        "no_source_content_recorded": True,
+        "resource_evidence": resources,
+    }, sort_keys=True, separators=(",", ":")), flush=True)
+    # The model remains resident and its process deliberately stays alive;
+    # only the outer bounded runner may stop the scope.
+    while True:
+        time.sleep(0.5)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot", type=Path, required=True)
+    parser.add_argument("--cancel-ready-probe", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(run(args.snapshot), sort_keys=True, separators=(",", ":")))
+    if args.cancel_ready_probe:
+        run_cancel_ready_probe(args.snapshot)
+    else:
+        print(json.dumps(run(args.snapshot), sort_keys=True, separators=(",", ":")))

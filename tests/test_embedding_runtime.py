@@ -17,7 +17,10 @@ from engine.embedding import (
     EmbeddingUnavailable, OfflineDenseReference, validate_dense_vector,
     validate_input, verify_active_experiment_guard, verify_model_snapshot,
 )
-from scripts.run_embedding_bounded import run as guarded_runner
+from scripts.run_embedding_bounded import (
+    run as guarded_runner, validate_cancel_ready,
+)
+from scripts.run_embedding_recovery import exercise as recovery_runner
 
 
 class ModelArtifactTests(unittest.TestCase):
@@ -197,9 +200,103 @@ class GuardTests(unittest.TestCase):
         with self.assertRaises(EmbeddingUnavailable):
             self._verify()
 
+    def test_real_model_cancellation_requires_permission(self):
+        with self.assertRaisesRegex(RuntimeError, "APPROVAL_REQUIRED"):
+            guarded_runner(Path("/missing/python"), Path("/missing/model"),
+                           Path("/tmp/disallowed-cancel.json"),
+                           task="03a-cancel")
+        with self.assertRaisesRegex(RuntimeError, "APPROVAL_REQUIRED"):
+            recovery_runner(Path("/missing/python"), Path("/missing/model"),
+                            Path("/tmp/disallowed-recovery.json"))
+
+    def test_failed_recovery_retains_only_sanitized_partial(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "recovery.json"
+            with self.assertRaisesRegex(RuntimeError, "MODEL_UNAVAILABLE"):
+                recovery_runner(Path(temp) / "missing-python",
+                                Path(temp) / "missing-snapshot", output,
+                                explicitly_approved=True)
+            self.assertFalse(output.exists())
+            partial = output.with_suffix(".json.partial")
+            recorded = json.loads(partial.read_text())
+            self.assertEqual(recorded["status"], "incomplete")
+            self.assertEqual(recorded["failed_stage"], "cancel")
+            self.assertIs(recorded["model_recovery_proven"], False)
+            self.assertNotIn(str(temp), partial.read_text())
+
+    def test_model_ready_marker_validation_fails_closed(self):
+        # Synthetic metadata for validator unit tests only, NOT a real model.
+        ready = {
+            "phase": "OKS-03A-MODEL-READY", "model_backed": True,
+            "offline": True, "no_source_content_recorded": True,
+            "dimension": 1024, "unit_norm": 1.0,
+            "identity": {"dimension": 1024, "normalization": "l2-cls",
+                         "runtime_tokenizer_parity_verified": True},
+            "resource_evidence": {
+                "memory_max_bytes": 4 * 1024**3, "memory_swap_max_bytes": 0,
+                "pids_max": 128, "memory_peak_bytes": 1024**3,
+                "memory_events": {"high": 0, "max": 0, "oom": 0, "oom_kill": 0},
+            },
+        }
+        validate_cancel_ready(ready)
+        for path, value in (
+            (("phase",), "NOT_READY"),
+            (("model_backed",), False),
+            (("unit_norm",), 0.0),
+            (("identity", "runtime_tokenizer_parity_verified"), False),
+            (("resource_evidence", "memory_max_bytes"), 8 * 1024**3),
+            (("resource_evidence", "memory_swap_max_bytes"), 1),
+            (("resource_evidence", "pids_max"), 129),
+            (("resource_evidence", "memory_events"), {"high": 0, "max": 0, "oom": 1, "oom_kill": 0}),
+        ):
+            with self.subTest(path=path):
+                copy = json.loads(json.dumps(ready))
+                if len(path) == 1:
+                    copy[path[0]] = value
+                else:
+                    copy[path[0]][path[1]] = value
+                with self.assertRaisesRegex(RuntimeError, "MODEL_READY_PROOF_INVALID"):
+                    validate_cancel_ready(copy)
+
     def test_guarded_runner_refuses_unapproved_execution(self):
         with self.assertRaisesRegex(RuntimeError, "APPROVAL_REQUIRED"):
             guarded_runner(Path("/not/python"), Path("/missing"), Path("/tmp/out.json"))
+
+
+class MeasuredRecoveryEvidenceTests(unittest.TestCase):
+    def test_real_model_cancellation_and_restart_artifact(self):
+        root = Path(__file__).resolve().parents[1] / "benchmarks" / "embedding"
+        record = json.loads((root / "results-recovery.json").read_text())
+        parity = json.loads((root / "results-parity.json").read_text())
+        self.assertEqual(record["phase"], "OKS-03A-MODEL-RECOVERY")
+        self.assertIs(record["model_backed"], True)
+        self.assertIs(record["offline"], True)
+        self.assertEqual(record["initial_model_identity"], parity["identity"])
+        self.assertTrue(record["model_ready_before_stop"])
+        self.assertEqual(record["initial_vector_dimension"], 1024)
+        self.assertAlmostEqual(record["initial_vector_norm"], 1.0, places=5)
+        self.assertEqual(record["fault_injection"],
+                         "simulated-pressure-cancellation-not-live-oom")
+        self.assertIs(record["host_oom_induced"], False)
+        self.assertTrue(record["cancelled_worker_exit_nonzero"])
+        self.assertTrue(record["cancelled_scope_inactive"])
+        self.assertTrue(record["fresh_model_restart_success"])
+        self.assertTrue(record["model_identity_unchanged"])
+        self.assertTrue(record["scope_inactive_after_recovery"])
+        self.assertEqual(record["restart_embedding_test_count"], 3)
+        self.assertEqual(record["restart_repeat_max_abs_difference"], 0.0)
+        self.assertTrue(record["no_source_content_recorded"])
+        for name in ("cancelled_scope_resource_evidence", "restart_resource_evidence"):
+            envelope = record[name]
+            self.assertEqual(envelope["memory_max_bytes"], 4 * 1024**3)
+            self.assertEqual(envelope["memory_swap_max_bytes"], 0)
+            self.assertEqual(envelope["pids_max"], 128)
+            self.assertLessEqual(envelope["memory_peak_bytes"],
+                                 envelope["memory_max_bytes"])
+            self.assertEqual(
+                [envelope["memory_events"][n]
+                 for n in ("high", "max", "oom", "oom_kill")],
+                [0, 0, 0, 0])
 
 
 if __name__ == "__main__":

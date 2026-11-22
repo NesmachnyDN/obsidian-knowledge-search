@@ -1,0 +1,71 @@
+{
+  "cancelled_scope_inactive": true,
+  "cancelled_scope_resource_evidence": {
+    "cpu_stat": {
+      "nr_throttled": 1,
+      "throttled_usec": 288,
+      "usage_usec": 9887217
+    },
+    "memory_events": {
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0
+    },
+    "memory_max_bytes": 4294967296,
+    "memory_peak_bytes": 967897088,
+    "memory_swap_max_bytes": 0,
+    "pids_max": 128
+  },
+  "cancelled_worker_exit_nonzero": true,
+  "fault_injection": "simulated-pressure-cancellation-not-live-oom",
+  "fresh_model_restart_success": true,
+  "host_oom_induced": false,
+  "initial_model_identity": {
+    "dimension": 1024,
+    "effective_max_tokens": 256,
+    "normalization": "l2-cls",
+    "repository": "BAAI/bge-m3",
+    "revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "runtime_tokenizer_parity_verified": true,
+    "serialization_version": "bge-m3-heading-lines-v1",
+    "tokenizer_sha256": "21106b6d7dab2952c1d496fb21d5dc9db75c28ed361a05f5020bbba27810dd08",
+    "tokenizers_version": "0.23.3",
+    "torch_version": "2.14.1+cpu",
+    "transformers_version": "5.18.0",
+    "weights_sha256": "b5e0ce3470abf5ef3831aa1bd5553b486803e83251590ab7ff35a117cf6aad38"
+  },
+  "initial_vector_dimension": 1024,
+  "initial_vector_norm": 1.0,
+  "model_backed": true,
+  "model_identity_unchanged": true,
+  "model_ready_before_stop": true,
+  "no_source_content_recorded": true,
+  "offline": true,
+  "phase": "OKS-03A-MODEL-RECOVERY",
+  "profile": "python-reference-only",
+  "restart_embedding_test_count": 3,
+  "restart_process_peak_rss_kib": 2157180,
+  "restart_repeat_max_abs_difference": 0.0,
+  "restart_resource_evidence": {
+    "cpu_stat": {
+      "nr_throttled": 1,
+      "throttled_usec": 565,
+      "usage_usec": 10926206
+    },
+    "memory_events": {
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0
+    },
+    "memory_max_bytes": 4294967296,
+    "memory_peak_bytes": 968019968,
+    "memory_swap_max_bytes": 0,
+    "pids_max": 128
+  },
+  "schema_version": 1,
+  "scope_inactive_after_recovery": true,
+  "standalone_implemented": false,
+  "trigger": "controlled-injected-pressure-after-real-inference"
+}
