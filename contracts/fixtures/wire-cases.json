@@ -1,0 +1,272 @@
+[
+  {
+    "name": "numeric version 1",
+    "kind": "request",
+    "frame": "{\"version\":1,\"id\":\"case-01\",\"method\":\"probe\",\"source\":{\"id\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"text\":\"# Synthetic evidence / \u0421\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0441\u0432\u0438\u0434\u0435\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e\\n\\nEN: The cobalt lantern is a synthetic test object.\\nRU: \u041a\u043e\u0431\u0430\u043b\u044c\u0442\u043e\u0432\u044b\u0439 \u0444\u043e\u043d\u0430\u0440\u044c \u2014 \u0441\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u043e\u0431\u044a\u0435\u043a\u0442.\\nMATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\\nMATCH-01: This later line must not be selected / \u041d\u0435 \u0432\u044b\u0431\u0438\u0440\u0430\u0442\u044c.\\n\"},\"query\":\"MATCH-01:\"}\n",
+    "valid": true
+  },
+  {
+    "name": "numeric version 1.0",
+    "kind": "request",
+    "frame": "{\"version\":1.0,\"id\":\"case-01\",\"method\":\"probe\",\"source\":{\"id\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"text\":\"# Synthetic evidence / \u0421\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0441\u0432\u0438\u0434\u0435\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e\\n\\nEN: The cobalt lantern is a synthetic test object.\\nRU: \u041a\u043e\u0431\u0430\u043b\u044c\u0442\u043e\u0432\u044b\u0439 \u0444\u043e\u043d\u0430\u0440\u044c \u2014 \u0441\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u043e\u0431\u044a\u0435\u043a\u0442.\\nMATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\\nMATCH-01: This later line must not be selected / \u041d\u0435 \u0432\u044b\u0431\u0438\u0440\u0430\u0442\u044c.\\n\"},\"query\":\"MATCH-01:\"}\n",
+    "valid": true
+  },
+  {
+    "name": "numeric version 1e0",
+    "kind": "request",
+    "frame": "{\"version\":1e0,\"id\":\"case-01\",\"method\":\"probe\",\"source\":{\"id\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"text\":\"# Synthetic evidence / \u0421\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0441\u0432\u0438\u0434\u0435\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e\\n\\nEN: The cobalt lantern is a synthetic test object.\\nRU: \u041a\u043e\u0431\u0430\u043b\u044c\u0442\u043e\u0432\u044b\u0439 \u0444\u043e\u043d\u0430\u0440\u044c \u2014 \u0441\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u043e\u0431\u044a\u0435\u043a\u0442.\\nMATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\\nMATCH-01: This later line must not be selected / \u041d\u0435 \u0432\u044b\u0431\u0438\u0440\u0430\u0442\u044c.\\n\"},\"query\":\"MATCH-01:\"}\n",
+    "valid": true
+  },
+  {
+    "name": "invalid version true",
+    "kind": "request",
+    "frame": "{\"version\":true,\"id\":\"case-01\",\"method\":\"probe\",\"source\":{\"id\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"text\":\"# Synthetic evidence / \u0421\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0441\u0432\u0438\u0434\u0435\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e\\n\\nEN: The cobalt lantern is a synthetic test object.\\nRU: \u041a\u043e\u0431\u0430\u043b\u044c\u0442\u043e\u0432\u044b\u0439 \u0444\u043e\u043d\u0430\u0440\u044c \u2014 \u0441\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u043e\u0431\u044a\u0435\u043a\u0442.\\nMATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\\nMATCH-01: This later line must not be selected / \u041d\u0435 \u0432\u044b\u0431\u0438\u0440\u0430\u0442\u044c.\\n\"},\"query\":\"MATCH-01:\"}\n",
+    "valid": false
+  },
+  {
+    "name": "invalid version false",
+    "kind": "request",
+    "frame": "{\"version\":false,\"id\":\"case-01\",\"method\":\"probe\",\"source\":{\"id\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"text\":\"# Synthetic evidence / \u0421\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0441\u0432\u0438\u0434\u0435\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e\\n\\nEN: The cobalt lantern is a synthetic test object.\\nRU: \u041a\u043e\u0431\u0430\u043b\u044c\u0442\u043e\u0432\u044b\u0439 \u0444\u043e\u043d\u0430\u0440\u044c \u2014 \u0441\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u043e\u0431\u044a\u0435\u043a\u0442.\\nMATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\\nMATCH-01: This later line must not be selected / \u041d\u0435 \u0432\u044b\u0431\u0438\u0440\u0430\u0442\u044c.\\n\"},\"query\":\"MATCH-01:\"}\n",
+    "valid": false
+  },
+  {
+    "name": "invalid version null",
+    "kind": "request",
+    "frame": "{\"version\":null,\"id\":\"case-01\",\"method\":\"probe\",\"source\":{\"id\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"text\":\"# Synthetic evidence / \u0421\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0441\u0432\u0438\u0434\u0435\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e\\n\\nEN: The cobalt lantern is a synthetic test object.\\nRU: \u041a\u043e\u0431\u0430\u043b\u044c\u0442\u043e\u0432\u044b\u0439 \u0444\u043e\u043d\u0430\u0440\u044c \u2014 \u0441\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u043e\u0431\u044a\u0435\u043a\u0442.\\nMATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\\nMATCH-01: This later line must not be selected / \u041d\u0435 \u0432\u044b\u0431\u0438\u0440\u0430\u0442\u044c.\\n\"},\"query\":\"MATCH-01:\"}\n",
+    "valid": false
+  },
+  {
+    "name": "invalid version 1.5",
+    "kind": "request",
+    "frame": "{\"version\":1.5,\"id\":\"case-01\",\"method\":\"probe\",\"source\":{\"id\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"text\":\"# Synthetic evidence / \u0421\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0441\u0432\u0438\u0434\u0435\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e\\n\\nEN: The cobalt lantern is a synthetic test object.\\nRU: \u041a\u043e\u0431\u0430\u043b\u044c\u0442\u043e\u0432\u044b\u0439 \u0444\u043e\u043d\u0430\u0440\u044c \u2014 \u0441\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u043e\u0431\u044a\u0435\u043a\u0442.\\nMATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\\nMATCH-01: This later line must not be selected / \u041d\u0435 \u0432\u044b\u0431\u0438\u0440\u0430\u0442\u044c.\\n\"},\"query\":\"MATCH-01:\"}\n",
+    "valid": false
+  },
+  {
+    "name": "invalid version 1e400",
+    "kind": "request",
+    "frame": "{\"version\":1e400,\"id\":\"case-01\",\"method\":\"probe\",\"source\":{\"id\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"text\":\"# Synthetic evidence / \u0421\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0441\u0432\u0438\u0434\u0435\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e\\n\\nEN: The cobalt lantern is a synthetic test object.\\nRU: \u041a\u043e\u0431\u0430\u043b\u044c\u0442\u043e\u0432\u044b\u0439 \u0444\u043e\u043d\u0430\u0440\u044c \u2014 \u0441\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u043e\u0431\u044a\u0435\u043a\u0442.\\nMATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\\nMATCH-01: This later line must not be selected / \u041d\u0435 \u0432\u044b\u0431\u0438\u0440\u0430\u0442\u044c.\\n\"},\"query\":\"MATCH-01:\"}\n",
+    "valid": false
+  },
+  {
+    "name": "BOM",
+    "kind": "request",
+    "frame": "\ufeff{\"version\":1,\"id\":\"case-01\",\"method\":\"probe\",\"source\":{\"id\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"text\":\"# Synthetic evidence / \u0421\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0441\u0432\u0438\u0434\u0435\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e\\n\\nEN: The cobalt lantern is a synthetic test object.\\nRU: \u041a\u043e\u0431\u0430\u043b\u044c\u0442\u043e\u0432\u044b\u0439 \u0444\u043e\u043d\u0430\u0440\u044c \u2014 \u0441\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u043e\u0431\u044a\u0435\u043a\u0442.\\nMATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\\nMATCH-01: This later line must not be selected / \u041d\u0435 \u0432\u044b\u0431\u0438\u0440\u0430\u0442\u044c.\\n\"},\"query\":\"MATCH-01:\"}\n",
+    "valid": false
+  },
+  {
+    "name": "duplicate",
+    "kind": "request",
+    "frame": "{\"version\":1,\"version\":1,\"id\":\"case-01\",\"method\":\"probe\",\"source\":{\"id\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"text\":\"# Synthetic evidence / \u0421\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0441\u0432\u0438\u0434\u0435\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e\\n\\nEN: The cobalt lantern is a synthetic test object.\\nRU: \u041a\u043e\u0431\u0430\u043b\u044c\u0442\u043e\u0432\u044b\u0439 \u0444\u043e\u043d\u0430\u0440\u044c \u2014 \u0441\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u043e\u0431\u044a\u0435\u043a\u0442.\\nMATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\\nMATCH-01: This later line must not be selected / \u041d\u0435 \u0432\u044b\u0431\u0438\u0440\u0430\u0442\u044c.\\n\"},\"query\":\"MATCH-01:\"}\n",
+    "valid": false
+  },
+  {
+    "name": "escaped duplicate",
+    "kind": "request",
+    "frame": "{\"version\":1,\"vers\\u0069on\":1,\"id\":\"case-01\",\"method\":\"probe\",\"source\":{\"id\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"text\":\"# Synthetic evidence / \u0421\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0441\u0432\u0438\u0434\u0435\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e\\n\\nEN: The cobalt lantern is a synthetic test object.\\nRU: \u041a\u043e\u0431\u0430\u043b\u044c\u0442\u043e\u0432\u044b\u0439 \u0444\u043e\u043d\u0430\u0440\u044c \u2014 \u0441\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u043e\u0431\u044a\u0435\u043a\u0442.\\nMATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\\nMATCH-01: This later line must not be selected / \u041d\u0435 \u0432\u044b\u0431\u0438\u0440\u0430\u0442\u044c.\\n\"},\"query\":\"MATCH-01:\"}\n",
+    "valid": false
+  },
+  {
+    "name": "unknown",
+    "kind": "request",
+    "frame": "{\"version\":1,\"id\":\"case-01\",\"method\":\"probe\",\"source\":{\"id\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"text\":\"# Synthetic evidence / \u0421\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0441\u0432\u0438\u0434\u0435\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e\\n\\nEN: The cobalt lantern is a synthetic test object.\\nRU: \u041a\u043e\u0431\u0430\u043b\u044c\u0442\u043e\u0432\u044b\u0439 \u0444\u043e\u043d\u0430\u0440\u044c \u2014 \u0441\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u043e\u0431\u044a\u0435\u043a\u0442.\\nMATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\\nMATCH-01: This later line must not be selected / \u041d\u0435 \u0432\u044b\u0431\u0438\u0440\u0430\u0442\u044c.\\n\"},\"query\":\"MATCH-01:\",\"extra\":0}\n",
+    "valid": false
+  },
+  {
+    "name": "malformed",
+    "kind": "request",
+    "frame": "{\"version\":1,\"id\":\"case-01\",\"method\":\"probe\",\"source\":{\"id\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"text\":\"# Synthetic evidence / \u0421\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0441\u0432\u0438\u0434\u0435\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e\\n\\nEN: The cobalt lantern is a synthetic test object.\\nRU: \u041a\u043e\u0431\u0430\u043b\u044c\u0442\u043e\u0432\u044b\u0439 \u0444\u043e\u043d\u0430\u0440\u044c \u2014 \u0441\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u043e\u0431\u044a\u0435\u043a\u0442.\\nMATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\\nMATCH-01: This later line must not be selected / \u041d\u0435 \u0432\u044b\u0431\u0438\u0440\u0430\u0442\u044c.\\n\"},\"query\":\"MATCH-01:\",}\n",
+    "valid": false
+  },
+  {
+    "name": "comma key",
+    "kind": "request",
+    "frame": "{\"version\":1,\"id,ok,evidence\":null}\n",
+    "valid": false
+  },
+  {
+    "name": "newline id",
+    "kind": "request",
+    "frame": "{\"version\":1,\"id\":\"bad\\n\",\"oldId\":\"case-01\",\"method\":\"probe\",\"source\":{\"id\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"text\":\"# Synthetic evidence / \u0421\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0441\u0432\u0438\u0434\u0435\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e\\n\\nEN: The cobalt lantern is a synthetic test object.\\nRU: \u041a\u043e\u0431\u0430\u043b\u044c\u0442\u043e\u0432\u044b\u0439 \u0444\u043e\u043d\u0430\u0440\u044c \u2014 \u0441\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u043e\u0431\u044a\u0435\u043a\u0442.\\nMATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\\nMATCH-01: This later line must not be selected / \u041d\u0435 \u0432\u044b\u0431\u0438\u0440\u0430\u0442\u044c.\\n\"},\"query\":\"MATCH-01:\"}\n",
+    "valid": false
+  },
+  {
+    "name": "nested duplicate",
+    "kind": "request",
+    "frame": "{\"version\":1,\"id\":\"case-01\",\"method\":\"probe\",\"source\":{\"id\":\"oks-01a-note\",\"digest\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"text\":\"# Synthetic evidence / \u0421\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0441\u0432\u0438\u0434\u0435\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e\\n\\nEN: The cobalt lantern is a synthetic test object.\\nRU: \u041a\u043e\u0431\u0430\u043b\u044c\u0442\u043e\u0432\u044b\u0439 \u0444\u043e\u043d\u0430\u0440\u044c \u2014 \u0441\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u043e\u0431\u044a\u0435\u043a\u0442.\\nMATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\\nMATCH-01: This later line must not be selected / \u041d\u0435 \u0432\u044b\u0431\u0438\u0440\u0430\u0442\u044c.\\n\"},\"query\":\"MATCH-01:\"}\n",
+    "valid": false
+  },
+  {
+    "name": "numeric version 1",
+    "kind": "response",
+    "frame": "{\"version\":1,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":5,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": true
+  },
+  {
+    "name": "numeric version 1.0",
+    "kind": "response",
+    "frame": "{\"version\":1.0,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":5,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": true
+  },
+  {
+    "name": "numeric version 1e0",
+    "kind": "response",
+    "frame": "{\"version\":1e0,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":5,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": true
+  },
+  {
+    "name": "invalid version true",
+    "kind": "response",
+    "frame": "{\"version\":true,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":5,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "invalid version false",
+    "kind": "response",
+    "frame": "{\"version\":false,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":5,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "invalid version null",
+    "kind": "response",
+    "frame": "{\"version\":null,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":5,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "invalid version 1.5",
+    "kind": "response",
+    "frame": "{\"version\":1.5,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":5,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "invalid version 1e400",
+    "kind": "response",
+    "frame": "{\"version\":1e400,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":5,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "BOM",
+    "kind": "response",
+    "frame": "\ufeff{\"version\":1,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":5,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "duplicate",
+    "kind": "response",
+    "frame": "{\"version\":1,\"version\":1,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":5,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "escaped duplicate",
+    "kind": "response",
+    "frame": "{\"version\":1,\"vers\\u0069on\":1,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":5,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "unknown",
+    "kind": "response",
+    "frame": "{\"version\":1,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":5,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"},\"extra\":0}\n",
+    "valid": false
+  },
+  {
+    "name": "malformed",
+    "kind": "response",
+    "frame": "{\"version\":1,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":5,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"},}\n",
+    "valid": false
+  },
+  {
+    "name": "comma key",
+    "kind": "response",
+    "frame": "{\"version\":1,\"id,ok,evidence\":null}\n",
+    "valid": false
+  },
+  {
+    "name": "newline id",
+    "kind": "response",
+    "frame": "{\"version\":1,\"id\":\"bad\\n\",\"oldId\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":5,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "nested duplicate",
+    "kind": "response",
+    "frame": "{\"version\":1,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":5,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "integer line 5.0",
+    "kind": "response",
+    "frame": "{\"version\":1,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":5.0,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": true
+  },
+  {
+    "name": "integer line 5e0",
+    "kind": "response",
+    "frame": "{\"version\":1,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":5e0,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": true
+  },
+  {
+    "name": "invalid line true",
+    "kind": "response",
+    "frame": "{\"version\":1,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":true,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "invalid line false",
+    "kind": "response",
+    "frame": "{\"version\":1,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":false,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "invalid line 5.5",
+    "kind": "response",
+    "frame": "{\"version\":1,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":5.5,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "invalid line 0",
+    "kind": "response",
+    "frame": "{\"version\":1,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":0,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "invalid line 8194",
+    "kind": "response",
+    "frame": "{\"version\":1,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":8194,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "invalid line 1e400",
+    "kind": "response",
+    "frame": "{\"version\":1,\"id\":\"case-01\",\"ok\":true,\"evidence\":{\"sourceId\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"line\":1e400,\"excerpt\":\"MATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "embedded BOM preserved",
+    "kind": "request",
+    "frame": "{\"version\":1,\"id\":\"case-01\",\"method\":\"probe\",\"source\":{\"id\":\"oks-01a-note\",\"digest\":\"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\",\"text\":\"# Synthetic evidence / \u0421\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0441\u0432\u0438\u0434\u0435\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e\\n\\nEN: The cobalt lantern is a synthetic test object.\\nRU: \u041a\u043e\u0431\u0430\u043b\u044c\u0442\u043e\u0432\u044b\u0439 \u0444\u043e\u043d\u0430\u0440\u044c \u2014 \u0441\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u043e\u0431\u044a\u0435\u043a\u0442.\\n\ufeffMATCH-01: The light is blue / \u0421\u0432\u0435\u0442 \u0441\u0438\u043d\u0438\u0439.\\n\ufeffMATCH-01: This later line must not be selected / \u041d\u0435 \u0432\u044b\u0431\u0438\u0440\u0430\u0442\u044c.\\n\"},\"query\":\"\ufeffMATCH-01:\"}\n",
+    "valid": true
+  },
+  {
+    "name": "newline id",
+    "kind": "request",
+    "frame": "{\"version\": 1, \"id\": \"bad\\n\", \"method\": \"probe\", \"source\": {\"id\": \"oks-01a-note\", \"digest\": \"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\", \"text\": \"# Synthetic evidence / \\u0421\\u0438\\u043d\\u0442\\u0435\\u0442\\u0438\\u0447\\u0435\\u0441\\u043a\\u043e\\u0435 \\u0441\\u0432\\u0438\\u0434\\u0435\\u0442\\u0435\\u043b\\u044c\\u0441\\u0442\\u0432\\u043e\\n\\nEN: The cobalt lantern is a synthetic test object.\\nRU: \\u041a\\u043e\\u0431\\u0430\\u043b\\u044c\\u0442\\u043e\\u0432\\u044b\\u0439 \\u0444\\u043e\\u043d\\u0430\\u0440\\u044c \\u2014 \\u0441\\u0438\\u043d\\u0442\\u0435\\u0442\\u0438\\u0447\\u0435\\u0441\\u043a\\u0438\\u0439 \\u0442\\u0435\\u0441\\u0442\\u043e\\u0432\\u044b\\u0439 \\u043e\\u0431\\u044a\\u0435\\u043a\\u0442.\\nMATCH-01: The light is blue / \\u0421\\u0432\\u0435\\u0442 \\u0441\\u0438\\u043d\\u0438\\u0439.\\nMATCH-01: This later line must not be selected / \\u041d\\u0435 \\u0432\\u044b\\u0431\\u0438\\u0440\\u0430\\u0442\\u044c.\\n\"}, \"query\": \"MATCH-01:\"}\n",
+    "valid": false
+  },
+  {
+    "name": "newline digest",
+    "kind": "request",
+    "frame": "{\"version\": 1, \"id\": \"case-01\", \"method\": \"probe\", \"source\": {\"id\": \"oks-01a-note\", \"digest\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n\", \"text\": \"# Synthetic evidence / \\u0421\\u0438\\u043d\\u0442\\u0435\\u0442\\u0438\\u0447\\u0435\\u0441\\u043a\\u043e\\u0435 \\u0441\\u0432\\u0438\\u0434\\u0435\\u0442\\u0435\\u043b\\u044c\\u0441\\u0442\\u0432\\u043e\\n\\nEN: The cobalt lantern is a synthetic test object.\\nRU: \\u041a\\u043e\\u0431\\u0430\\u043b\\u044c\\u0442\\u043e\\u0432\\u044b\\u0439 \\u0444\\u043e\\u043d\\u0430\\u0440\\u044c \\u2014 \\u0441\\u0438\\u043d\\u0442\\u0435\\u0442\\u0438\\u0447\\u0435\\u0441\\u043a\\u0438\\u0439 \\u0442\\u0435\\u0441\\u0442\\u043e\\u0432\\u044b\\u0439 \\u043e\\u0431\\u044a\\u0435\\u043a\\u0442.\\nMATCH-01: The light is blue / \\u0421\\u0432\\u0435\\u0442 \\u0441\\u0438\\u043d\\u0438\\u0439.\\nMATCH-01: This later line must not be selected / \\u041d\\u0435 \\u0432\\u044b\\u0431\\u0438\\u0440\\u0430\\u0442\\u044c.\\n\"}, \"query\": \"MATCH-01:\"}\n",
+    "valid": false
+  },
+  {
+    "name": "newline id",
+    "kind": "response",
+    "frame": "{\"version\": 1, \"id\": \"bad\\n\", \"ok\": true, \"evidence\": {\"sourceId\": \"oks-01a-note\", \"digest\": \"30e43a740cf91aaa7873fb97e6527e773d729ec21c5e7770decbce1695f9a360\", \"line\": 5, \"excerpt\": \"MATCH-01: The light is blue / \\u0421\\u0432\\u0435\\u0442 \\u0441\\u0438\\u043d\\u0438\\u0439.\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "newline digest",
+    "kind": "response",
+    "frame": "{\"version\": 1, \"id\": \"case-01\", \"ok\": true, \"evidence\": {\"sourceId\": \"oks-01a-note\", \"digest\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n\", \"line\": 5, \"excerpt\": \"MATCH-01: The light is blue / \\u0421\\u0432\\u0435\\u0442 \\u0441\\u0438\\u043d\\u0438\\u0439.\"}}\n",
+    "valid": false
+  }
+]

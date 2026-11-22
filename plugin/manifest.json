@@ -1,0 +1,9 @@
+{
+  "id": "oks-synthetic-evidence",
+  "name": "OKS Synthetic Evidence",
+  "version": "0.1.0",
+  "minAppVersion": "1.8.0",
+  "description": "Explicit, bounded local evidence probe using only a pinned synthetic note.",
+  "author": "OKS contributors",
+  "isDesktopOnly": true
+}

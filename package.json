@@ -1,0 +1,19 @@
+{
+  "name": "oks-synthetic-evidence-probe",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/test.mjs",
+    "test:python": "python3 -I -B -m unittest discover -s tests -p 'test_*.py'",
+    "licenses": "node scripts/licenses.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.0",
+    "esbuild": "0.28.2",
+    "obsidian": "1.14.4",
+    "typescript": "5.9.3"
+  }
+}

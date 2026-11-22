@@ -31,3 +31,9 @@ artifacts/
 *.pem
 *.key
 .DS_Store
+
+node_modules/
+.npm-cache/
+dist/
+.test-build/
+__pycache__/

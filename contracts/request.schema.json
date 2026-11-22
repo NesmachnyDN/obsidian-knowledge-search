@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/oks/v1/request.schema.json",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,64}(?![\\s\\S])"
+    },
+    "method": {
+      "const": "probe"
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "const": "oks-01a-note"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 8192,
+          "description": "Valid Unicode scalar values only; additionally at most 8192 UTF-8 bytes."
+        }
+      },
+      "required": [
+        "id",
+        "digest",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "query": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Valid Unicode scalar values only; additionally at most 256 UTF-8 bytes. Case-sensitive literal substring."
+    }
+  },
+  "required": [
+    "version",
+    "id",
+    "method",
+    "source",
+    "query"
+  ],
+  "additionalProperties": false
+}

@@ -1,3 +1,7 @@
-# Tests
+# Synthetic acceptance tests
 
-Integration, contract, filesystem lifecycle, offline and crash/recovery tests. Unit tests may live beside component packages. Synthetic fixtures only; never use a real vault in CI. Test harness and CI arrive with implementation, not bootstrap.
+`npm test` bundles tests with esbuild and runs Node's test runner serially. Contract tests exercise shared cases; fixture/controller tests create and remove isolated generated directories under `.test-build`; process tests launch the real Python entry point and tiny failure workers. Tests cover exact RU/EN evidence, no-match, pinned identity, malformed/oversized data, extra output, invalid UTF-8, correlation, crash, configuration, busy, timeout, cancel, unload, actual PID death and restart. Filesystem tests cover missing/wrong/oversized fixture, traversal, noncanonical roots and symlinks at root/ancestor/target. Controller tests exercise opt-in and change-before-display suppression.
+
+`npm run test:python` uses unittest only, exercising the same shared cases and real CLI. An isolated Python audit-hook test rejects socket and child-process operations while executing the real entry point. This is application-level enforcement, not an OS egress sandbox or enforcement on the Node/Obsidian host. Runtime code review finds no network or model code. Actual Obsidian smoke and hosted CI remain distinct required gates.
+
+Reload regression bundles the actual supervisor separately and evicts its CommonJS module between instances. A real worker signals readiness after installing a SIGTERM-ignore handler. The test checks active-owner BUSY, cancellation/unload of waiting instances, no spawn during disposal, competing reload admission, predecessor PID death, recovery and shared-slot cleanup. Shared raw wire cases preserve numeric spellings, duplicate/escaped keys, malformed fields and BOMs for both languages.

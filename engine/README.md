@@ -1,3 +1,3 @@
-# Local retrieval engine
+# Local synthetic worker
 
-Reserved for standalone Python runtime. Planned boundaries: extraction, canonical source blocks, chunking, model adapters, storage/index lifecycle, retrieval, evidence and resource controls. Final package layout follows the measured first slice. No dependency on a previous application or a separate manually managed search server.
+`probe.py` is a one-shot Python 3.12 standard-library entry point. It reads bounded JSON Lines from stdin, independently validates the pinned synthetic identity and returns exact literal evidence. No file-content access, subprocesses, socket/listener, model, telemetry, download or persistent state exists in this runtime. Invoke only with a trusted configured interpreter and entry point. See [setup and smoke](../plugin/README.md) and [protocol](../contracts/README.md).
