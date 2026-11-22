@@ -79,3 +79,11 @@ context; do not use this small synthetic experiment as proof of production
 quality. Section classification and chunk-policy comparison belong to 02C
 after this slice passes independent review. No retrieval-quality choice until 03B. Do not distribute model or
 runtime binaries without a separate distribution/license review.
+
+## Empty successful document clarification
+
+When a native conversion succeeds but yields no meaningful text, the status
+`empty` takes precedence over nonfatal profile warnings; such warnings remain
+in diagnostics. `partial` describes recovered text with incomplete semantics
+or provenance. A blank model-free PDF regression establishes this distinction.
+The decision remains provisional until the independent exact-head review.

@@ -111,6 +111,26 @@ class ExtractionIntegration(unittest.TestCase):
             finally:
                 reader.close()
 
+    def test_blank_native_pdf_is_empty_despite_profile_warning(self):
+        from pypdf import PdfWriter
+        output = BytesIO()
+        writer = PdfWriter()
+        writer.add_blank_page(width=300, height=200)
+        writer.write(output)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'blank.pdf').write_bytes(output.getvalue())
+            reader = ScopedReader(root)
+            try:
+                parsed = extract(reader, 'blank.pdf', PDF)
+                self.assertEqual(parsed.status, 'empty')
+                self.assertEqual(parsed.page_count, 1)
+                self.assertEqual(parsed.blocks, ())
+                self.assertIn('no-extracted-text', parsed.diagnostics)
+                self.assertIn('native-pdf-layout-tables-reading-order-not-inferred', parsed.diagnostics)
+            finally:
+                reader.close()
+
     def test_archive_expansion_and_pdf_page_bounds(self):
         from pypdf import PdfWriter
         from zipfile import ZIP_DEFLATED

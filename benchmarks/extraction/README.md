@@ -215,3 +215,14 @@ not replacements for the originally published run JSON or confidence intervals.
 Both 02A splits reproduced config, corpus/judgment/manifest identity, all
 per-query ranks, structure and aggregate metrics with zero deterministic changes.
 The unresolved Russian numbered heading remains 2/3 native heading coverage.
+
+## Empty native PDF status correction
+
+A fresh independent review of the previous exact HEAD found that model-free
+PDF extraction returned `partial` for a genuinely blank, successfully
+converted PDF because the profile's always-present structural warning took
+precedence over absence of text. The canonical mapper now reports `empty`
+while retaining both the profile warning and `no-extracted-text` diagnostics.
+A separate generated blank PDF integration test reproduces this case.
+Existing frozen corpus and benchmark result files were not changed.
+This does not alter the known Russian heading classification limitation.

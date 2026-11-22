@@ -147,7 +147,9 @@ def map_document(document, path, digest, profile, diagnostics=(), *,
     if sum(len(b.text) for b in blocks) > MAX_CHARS:
         raise ValueError('native text bound')
     meaningful = any(block.text.strip() for block in blocks)
-    status = 'partial' if issues else 'ok' if meaningful else 'empty'
+    # A successfully processed textless source is empty even when the chosen
+    # extraction profile reports structural limitations or other warnings.
+    status = ('empty' if not meaningful else 'partial' if issues else 'ok')
     if not meaningful:
         issues.add('no-extracted-text')
     return ParsedDocument(path, digest, status, tuple(blocks), tuple(sorted(issues)),
