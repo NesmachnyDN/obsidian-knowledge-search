@@ -16,7 +16,7 @@ function object(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 function keys(value: Record<string, unknown>, names: string[]): boolean {
-  return Object.keys(value).sort().join(',') === names.sort().join(',');
+  return Object.keys(value).length === names.length && names.every(name => Object.hasOwn(value, name));
 }
 export function utf8(value: unknown, max: number, nonempty = false): value is string {
   return typeof value === 'string' && (!nonempty || value.length > 0)
@@ -24,10 +24,10 @@ export function utf8(value: unknown, max: number, nonempty = false): value is st
     && Buffer.from(value, 'utf8').toString('utf8') === value;
 }
 function id(value: unknown): value is string {
-  return typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value);
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}(?![\s\S])/.test(value);
 }
 function digest(value: unknown): value is string {
-  return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+  return typeof value === 'string' && /^[a-f0-9]{64}(?![\s\S])/.test(value);
 }
 export function isRequest(value: unknown): value is Request {
   if (!object(value) || !keys(value, ['version', 'id', 'method', 'source', 'query'])) return false;
@@ -56,8 +56,25 @@ export function encodeFrame(value: Request | Response): Buffer {
 export function decodeFrame(data: Buffer): unknown {
   if (!data.length || data.length > LIMITS.frame || data[data.length - 1] !== 10
       || data.subarray(0, -1).includes(10)) throw new Error('INVALID_FRAME');
-  const text = new TextDecoder('utf-8', { fatal: true }).decode(data);
-  return JSON.parse(text);
+  const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data);
+  const value: unknown = JSON.parse(text); // Validate syntax before scanning keys.
+  // JSON.parse discards duplicate fields. Scan structural tokens while preserving
+  // escaped strings, so duplicate decoded names are rejected at every depth.
+  const stack: (Set<string> | null)[] = [];
+  const tokens = /"(?:[^"\\]|\\.)*"|[{}\[\]:]/g;
+  for (const token of text.matchAll(tokens)) {
+    const word = token[0];
+    if (word === '{') stack.push(new Set());
+    else if (word === '[') stack.push(null);
+    else if (word === '}' || word === ']') stack.pop();
+    else if (word.startsWith('"') && /^\s*:/.test(text.slice(token.index + word.length))) {
+      const key = JSON.parse(word) as string;
+      const keys = stack.at(-1);
+      if (!keys || keys.has(key)) throw new Error('DUPLICATE_FIELD');
+      keys.add(key);
+    }
+  }
+  return value;
 }
 // CRLF, LF and CR delimit lines; a trailing delimiter does not create evidence.
 export function firstMatch(text: string, query: string): { line: number; excerpt: string } | null {

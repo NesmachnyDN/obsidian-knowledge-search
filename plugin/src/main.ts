@@ -17,10 +17,12 @@ class ResultModal extends Modal {
 }
 export default class SyntheticEvidencePlugin extends Plugin {
   settings: ProbeConfig = { ...DEFAULTS };
+  private unloaded = false;
   private controller?: ProbeController;
   private resultModal?: ResultModal;
   async onload(): Promise<void> {
     const saved: unknown = await this.loadData();
+    if (this.unloaded) return;
     if (typeof saved === 'object' && saved !== null) {
       const data = saved as Record<string, unknown>;
       this.settings = { fixtureMode: data.fixtureMode === true,
@@ -56,7 +58,13 @@ export default class SyntheticEvidencePlugin extends Plugin {
       },
     });
   }
-  onunload(): void { this.resultModal?.close(); void this.controller?.unload(); }
+  onunload(): void {
+    this.unloaded = true;
+    this.resultModal?.close();
+    this.resultModal = undefined;
+    void this.controller?.unload();
+    this.controller = undefined;
+  }
 }
 class ProbeSettings extends PluginSettingTab {
   constructor(app: App, private readonly plugin: SyntheticEvidencePlugin) { super(app, plugin); }

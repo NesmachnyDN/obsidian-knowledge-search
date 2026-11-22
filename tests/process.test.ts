@@ -63,3 +63,54 @@ test('incremental stdout accepts split UTF-8 and rejects delayed extra output',a
   if(extra) await assert.rejects(pending,/EXTRA_OUTPUT/);else assert.deepEqual(await pending,response);
  });
 });
+
+test('module reload waits for SIGTERM-resistant predecessor close; waiting unload/cancel cannot spawn', async () => {
+  const modulePath = resolve('.test-build/reload-supervisor.cjs');
+  const fresh = (): Supervisor => {
+    delete require.cache[modulePath];
+    const module = require(modulePath) as { Supervisor: typeof Supervisor };
+    return new module.Supervisor({ deadlineMs: 5000, graceMs: 1000 });
+  };
+  await worker('', async entry => {
+    const ready = entry + '.ready';
+    await writeFile(entry, `import sys, signal, time\nsys.stdin.buffer.read()\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nopen(${JSON.stringify(ready)}, 'w').close()\ntime.sleep(30)`);
+    const old = fresh();
+    const r = await request();
+    const pending = old.run({...config, entry}, r);
+    const rejected = assert.rejects(pending, /CANCELLED/);
+    const pid = await started(old);
+    let isReady = false;
+    for (let i = 0; i < 400; i++) {
+      try { await readFile(ready); isReady = true; break; } catch { await new Promise(resolve => setTimeout(resolve, 5)); }
+    }
+    assert.equal(isReady, true, 'worker installed SIGTERM handler');
+    await assert.rejects(fresh().run(config, r), /BUSY/);
+    const disposal = old.dispose();
+    process.kill(pid, 0); // Demonstrably alive during the real one-second grace.
+    for (const action of ['cancel', 'dispose'] as const) {
+      const waiting = fresh();
+      const run = waiting.run(config, r);
+      const cancelled = assert.rejects(run, /CANCELLED/);
+      assert.equal(waiting.pid, undefined);
+      if (action === 'cancel') waiting.cancel(); else await waiting.dispose();
+      await cancelled;
+      assert.equal(waiting.pid, undefined);
+    }
+    const next = fresh();
+    const restarted = next.run(config, r);
+    const contender = assert.rejects(fresh().run(config, r), /BUSY/);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(next.pid, undefined);
+    process.kill(pid, 0);
+    await disposal;
+    await rejected;
+    dead(pid);
+    assert.equal((await restarted).ok, true);
+    await contender;
+    assert.equal(next.pid, undefined);
+    // No stale shared slot after normal completion or preflight failure.
+    const last = fresh();
+    await assert.rejects(last.run({...config, entry: 'relative'}, r), /CONFIGURE_ENGINE/);
+    assert.equal((await fresh().run(config, r)).ok, true);
+  });
+});

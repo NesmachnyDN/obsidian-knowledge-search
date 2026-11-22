@@ -10,7 +10,7 @@
         },
         "id": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+          "pattern": "^[A-Za-z0-9_-]{1,64}(?![\\s\\S])"
         },
         "ok": {
           "const": true
@@ -28,7 +28,7 @@
                 },
                 "digest": {
                   "type": "string",
-                  "pattern": "^[a-f0-9]{64}$"
+                  "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
                 },
                 "line": {
                   "type": "integer",
@@ -71,7 +71,7 @@
           "oneOf": [
             {
               "type": "string",
-              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+              "pattern": "^[A-Za-z0-9_-]{1,64}(?![\\s\\S])"
             },
             {
               "type": "null"

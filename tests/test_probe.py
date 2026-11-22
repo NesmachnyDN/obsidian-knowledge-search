@@ -2,6 +2,7 @@
 import copy
 import importlib.util
 import json
+import io
 from pathlib import Path
 import subprocess
 import sys
@@ -63,3 +64,32 @@ runpy.run_path(sys.argv[1], run_name='__main__')
             input=(json.dumps(CASES[0]['value'])+'\n').encode(), capture_output=True, timeout=3)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stdout), CASES[1]['value'])
+
+    def test_shared_wire(self):
+        cases = json.loads((ROOT / 'contracts/fixtures/wire-cases.json').read_text())
+        for case in cases:
+            with self.subTest(case=case['name'], kind=case['kind']):
+                data = case['frame'].encode('utf-8')
+                try:
+                    value = probe.read_frame(io.BytesIO(data))
+                    valid = (probe.is_request if case['kind'] == 'request' else probe.is_response)(value)
+                except (ValueError, UnicodeError):
+                    valid = False
+                self.assertEqual(valid, case['valid'])
+                if case['kind'] == 'request':
+                    response = self.cli(data)
+                    if case['name'] == 'embedded BOM preserved':
+                        self.assertEqual(response['error']['code'], 'FIXTURE_REJECTED')
+                    else:
+                        self.assertEqual(response['ok'], case['valid'])
+
+    def test_exact_shapes(self):
+        for case in CASES:
+            if not case['valid']:
+                continue
+            validator = probe.is_request if case['kind'] == 'request' else probe.is_response
+            for key in case['value']:
+                value = copy.deepcopy(case['value'])
+                del value[key]
+                self.assertFalse(validator(value))
+            self.assertFalse(validator(dict(case['value'], extra=None)))

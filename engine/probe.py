@@ -1,6 +1,7 @@
 """One-shot, stdlib-only synthetic probe. No paths or execution requests on wire."""
 import hashlib
 import json
+import math
 import re
 import sys
 
@@ -33,11 +34,15 @@ def digest(value):
     return type(value) is str and re.fullmatch(r"[a-f0-9]{64}", value) is not None
 
 
+def integer(value):
+    return type(value) is int or (type(value) is float and math.isfinite(value) and value.is_integer())
+
+
 def is_request(value):
     if not exact(value, ("version", "id", "method", "source", "query")):
         return False
     source = value["source"]
-    return (type(value["version"]) is int and value["version"] == 1
+    return (integer(value["version"]) and value["version"] == 1
             and request_id(value["id"]) and value["method"] == "probe"
             and exact(source, ("id", "digest", "text")) and source["id"] == FIXTURE_ID
             and digest(source["digest"]) and utf8(source["text"], SOURCE_LIMIT)
@@ -45,7 +50,7 @@ def is_request(value):
 
 
 def is_response(value):
-    if type(value) is not dict or type(value.get("version")) is not int or value["version"] != 1:
+    if type(value) is not dict or not integer(value.get("version")) or value["version"] != 1:
         return False
     if value.get("ok") is False:
         return (exact(value, ("version", "id", "ok", "error"))
@@ -56,7 +61,7 @@ def is_response(value):
     evidence = value["evidence"]
     return evidence is None or (exact(evidence, ("sourceId", "digest", "line", "excerpt"))
         and evidence["sourceId"] == FIXTURE_ID and digest(evidence["digest"])
-        and type(evidence["line"]) is int and 1 <= evidence["line"] <= SOURCE_LIMIT + 1
+        and integer(evidence["line"]) and 1 <= evidence["line"] <= SOURCE_LIMIT + 1
         and utf8(evidence["excerpt"], SOURCE_LIMIT) and not re.search(r"[\r\n]", evidence["excerpt"]))
 
 
@@ -83,12 +88,21 @@ def handle(value):
     return {"version": 1, "id": identity, "ok": True, "evidence": evidence}
 
 
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("DUPLICATE_FIELD")
+        result[key] = value
+    return result
+
+
 def read_frame(stream):
     # One bounded allocation, then at most one byte to reject trailing output.
     data = stream.readline(FRAME_LIMIT + 1)
     if len(data) > FRAME_LIMIT or not data.endswith(b"\n") or stream.read(1):
         raise ValueError("INVALID_FRAME")
-    return json.loads(data.decode("utf-8"), parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+    return json.loads(data.decode("utf-8"), object_pairs_hook=unique_object, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
 
 
 def main():

@@ -22,3 +22,20 @@ test('evidence verification rejects forged locator, excerpt, digest, source and 
   assert.throws(() => verifyResponse({...response,evidence:null}, request));
   assert.deepEqual(firstMatch('a\r\nb\rc\n', 'b'), {line:2,excerpt:'b'});
 });
+const wireCases = JSON.parse(readFileSync('contracts/fixtures/wire-cases.json', 'utf8')) as {name:string; kind:string; frame:string; valid:boolean}[];
+for (const c of wireCases) test(`shared wire ${c.kind}: ${c.name}`, () => {
+  let valid = false;
+  try { valid = (c.kind === 'request' ? isRequest : isResponse)(decodeFrame(Buffer.from(c.frame))); } catch { /* rejected wire */ }
+  assert.equal(valid, c.valid);
+});
+test('exact shapes reject every missing/extra field and comma-joined key collision', () => {
+  for (const c of cases.filter(c => c.valid)) {
+    const value = c.value as Record<string, unknown>;
+    const validator = c.kind === 'request' ? isRequest : isResponse;
+    for (const key of Object.keys(value)) {
+      const copy = {...value}; delete copy[key]; assert.equal(validator(copy), false);
+    }
+    assert.equal(validator({...value, extra: null}), false);
+  }
+  assert.equal(isRequest({version:1, 'id,method':'x', source:request.source, query:request.query}), false);
+});

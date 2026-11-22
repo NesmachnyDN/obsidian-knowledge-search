@@ -29,7 +29,7 @@ export class ProbeController {
       if (current()) this.view.result(response);
     } catch (error) {
       // Only locally authored codes; never forward filesystem/child exception text.
-      const known = ['CONFIGURE_ENGINE', 'ENGINE_UNAVAILABLE', 'UNSUPPORTED_PLATFORM', 'TIMEOUT',
+      const known = ['BUSY', 'CONFIGURE_ENGINE', 'ENGINE_UNAVAILABLE', 'UNSUPPORTED_PLATFORM', 'TIMEOUT',
         'STDOUT_LIMIT', 'STDERR_LIMIT', 'EXTRA_OUTPUT', 'ENGINE_EXIT', 'INVALID_RESPONSE',
         'SPAWN_FAILED', 'INPUT_FAILED', 'FIXTURE_REJECTED', 'FIXTURE_CHANGED', 'CANCELLED'];
       if (current()) this.view.status(error instanceof Error && known.includes(error.message) ? error.message : 'PROBE_FAILED');

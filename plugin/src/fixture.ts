@@ -73,7 +73,7 @@ export async function readFixture(access: FixtureAccess, path = FIXTURE_PATH): P
         length += result.bytesRead;
       }
       if (length > LIMITS.source || sha256(bytes.subarray(0, length)) !== FIXTURE_DIGEST) throw new Error();
-      text = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, length));
+      text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes.subarray(0, length));
     } finally { await handle.close(); }
     if (await checkedPath(access.root, path) !== before) throw new Error();
     access.verifyNote();

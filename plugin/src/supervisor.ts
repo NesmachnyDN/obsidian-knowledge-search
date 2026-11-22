@@ -8,12 +8,19 @@ export type EngineConfig = { interpreter: string; entry: string };
 export type Timing = { deadlineMs: number; graceMs: number };
 const DEFAULT_TIMING: Timing = { deadlineMs: 10000, graceMs: 1000 };
 
+// Symbol.for survives CommonJS bundle eviction in the same Obsidian renderer.
+// The slot holds only a completion signal, never a plugin/controller/child.
+const LIFETIME = Symbol.for('oks-synthetic-evidence.worker-lifetime.v1');
+type Lifetime = { closed: Promise<void>; disposing: boolean };
+const shared = globalThis as typeof globalThis & { [LIFETIME]?: Lifetime };
+
 export class Supervisor {
   private active = false;
   private child?: ChildProcessWithoutNullStreams;
   private stop?: (reason: string) => void;
   private cancelled = false;
   private disposed = false;
+  private lifetime?: Lifetime;
   private completion?: Promise<Response>;
   constructor(private readonly timing: Timing = DEFAULT_TIMING) {}
 
@@ -27,6 +34,7 @@ export class Supervisor {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    if (this.lifetime) this.lifetime.disposing = true;
     this.cancel();
     await this.completion?.catch(() => undefined);
   }
@@ -36,13 +44,40 @@ export class Supervisor {
     if (this.active) return Promise.reject(new Error('BUSY'));
     this.active = true;
     this.cancelled = false;
-    const task = this.execute(config, request).finally(() => {
+    const task = this.runExclusive(config, request).finally(() => {
       this.active = false;
       this.child = undefined;
       this.stop = undefined;
+      this.completion = undefined;
     });
     this.completion = task;
     return task;
+  }
+
+  private async runExclusive(config: EngineConfig, request: Request): Promise<Response> {
+    const previous = shared[LIFETIME];
+    if (previous) {
+      if (!previous.disposing) throw new Error('BUSY');
+      // A waiting reload can be cancelled/unloaded without retaining its view
+      // until the old child closes. The old slot remains authoritative.
+      await new Promise<void>((resolve, reject) => {
+        this.stop = () => reject(new Error('CANCELLED'));
+        previous.closed.then(resolve);
+      });
+      this.stop = undefined;
+    }
+    if (this.cancelled || this.disposed) throw new Error('CANCELLED');
+    if (shared[LIFETIME]) throw new Error('BUSY');
+    let release!: () => void;
+    const lifetime: Lifetime = { closed: new Promise<void>(resolve => { release = resolve; }), disposing: false };
+    shared[LIFETIME] = lifetime;
+    this.lifetime = lifetime;
+    try { return await this.execute(config, request); }
+    finally {
+      if (shared[LIFETIME] === lifetime) delete shared[LIFETIME];
+      this.lifetime = undefined;
+      release();
+    }
   }
 
   private async execute(config: EngineConfig, request: Request): Promise<Response> {

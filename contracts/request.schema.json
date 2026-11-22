@@ -8,7 +8,7 @@
     },
     "id": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9_-]{1,64}$"
+      "pattern": "^[A-Za-z0-9_-]{1,64}(?![\\s\\S])"
     },
     "method": {
       "const": "probe"
@@ -21,7 +21,7 @@
         },
         "digest": {
           "type": "string",
-          "pattern": "^[a-f0-9]{64}$"
+          "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
         },
         "text": {
           "type": "string",
