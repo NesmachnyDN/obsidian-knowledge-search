@@ -88,6 +88,13 @@ class RetrievalUnitTests(unittest.TestCase):
         self.assertEqual(data["optional"], PropertyValue("optional", "null", None))
         self.assertFalse(matches_predicates(tuple(data.values()), (
             Predicate("priority", "boolean", True),)))
+        # Python's True == 1 must not collapse typed YAML/JSON list members.
+        typed = (PropertyValue("mixed", "list", (1, True, "1")),)
+        self.assertTrue(matches_predicates(typed, (
+            Predicate("mixed", "list", True, "contains"),)))
+        self.assertFalse(matches_predicates(
+            (PropertyValue("mixed", "list", (1,)),),
+            (Predicate("mixed", "list", True, "contains"),)))
 
     def test_typed_filter_malformed_rejected_even_when_no_candidates(self):
         bad = (

@@ -174,7 +174,9 @@ def matches_predicates(properties: tuple[PropertyValue, ...],
         if actual is None or actual.value_type != predicate.value_type:
             return False
         if predicate.operator == "contains":
-            if actual.value_type != "list" or predicate.value not in actual.value:
+            if (actual.value_type != "list"
+                    or not any(type(item) is type(predicate.value)
+                               and item == predicate.value for item in actual.value)):
                 return False
         elif actual.value != predicate.value or (
                 actual.value_type == "number" and type(actual.value) is bool):
