@@ -42,3 +42,8 @@ Use the bounded synthetic evidence probe in ADR-0002 and the OKS-01A execution c
 ## Open decisions
 
 Exact parser/runtime versions and licenses, tokenizer integration, OCR fallback, index backend, IPC/packaging, resource budgets and Obsidian CLI access require prototypes. Linux is the first target. Public community distribution and cross-platform support need separate policy and packaging gates. See ADRs and roadmap.
+
+
+## Resource and freshness proof obligations
+
+Evaluate enforceable Linux process-tree resource controls (for example delegated cgroup v2) before arbitrary-source or ML workloads. Admission must cover startup peak, descendants, free memory/disk, CPU thread count and cancellation; fail safely if required isolation is unavailable. Keep the UI responsive and prioritize search between bounded background work units. Publish lexical/dense records and manifest as one visible generation, or prove an equivalent atomic commit protocol; on mutation or uncertain freshness, suppress affected hits rather than presenting old evidence as current. Keep typed Properties and resolvable wiki-link metadata in the derived source record; defer graph traversal to a measured optional stage.

@@ -34,7 +34,9 @@ Historical experiments are design inputs, not OKS benchmarks. In particular, nat
 | [BGE-M3](https://huggingface.co/BAAI/bge-m3) | MIT model card; 1024 dense dimensions, upstream maximum sequence length 8192. | 02C/03A: separately pin tokenizer and actual artifact/license; selected max input is benchmarked, not automatically 8192. |
 | [BGE-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3) | Apache-2.0 model card. | 06A: verify revision, weights, notices, runtime, token limit and bounded CPU comparison. |
 | [SQLite FTS5](https://www.sqlite.org/fts5.html), [SQLite copyright](https://www.sqlite.org/copyright.html) | SQLite public domain; builds/extensions carry their own dependencies/terms. | 01B/02A: verify local build support, exact-ID punctuation and Russian morphology behavior; no external database. |
-| Embedded vector backends / model runtimes / OCR | Not yet selected or transitively audited. | Separate dependency closure and license check before installation or production selection. |
+| [sqlite-vec](https://github.com/asg017/sqlite-vec), exact dense baseline | sqlite-vec declares MIT OR Apache-2.0; pre-v1 API may change. | 01B: compare exact search, filter correctness, atomic publication, extension loading, bounded memory and pinned compatibility. Do not assume ANN or transactional cross-store guarantees. |
+| [Tesseract](https://github.com/tesseract-ocr/tesseract), [tessdata](https://github.com/tesseract-ocr/tessdata) | Apache-2.0 engine and language data declarations. | 02B: compare local rus+eng recognition, coverage, table/number fidelity, explicit offline provisioning and resource limits. |
+| Model runtimes / other OCR | Not yet selected or transitively audited. | Separate dependency closure and license check before installation or production selection. |
 
 Upstream declarations reviewed at assessment time; exact versioned package/artifact terms, dependency closure and notices remain implementation gates. No external model, parser or database is required in OKS-01A.
 
@@ -45,3 +47,19 @@ Upstream declarations reviewed at assessment time; exact versioned package/artif
 - A model's card, architecture or single synthetic inference cannot replace measured end-to-end evaluation. Compare runtime profiles and use one active compatible embedding space; do not mix vectors from different artifacts or pipelines.
 - No private host capacity, benchmark or legacy deployment figures are transferred to public Git. All OKS measurements must be generated independently on authorized synthetic inputs.
 - See the roadmap and ADR-0002 for experiment order, boundaries and acceptance gates.
+
+
+## Risk and PoC register (design hypotheses, not completed experiments)
+
+| Risk | Proof required | Slice / stop condition |
+|---|---|---|
+| Host resource exhaustion or orphan worker | Admission before allocation, one heavy job, enforce process-tree memory/CPU and thread limits (evaluate Linux cgroup v2 delegation); measure entire worker tree, pressure, disk reserve and cancellation; fail closed if controls are unavailable. | 01A lifecycle; 01B enforceable isolation before arbitrary/heavy workloads. |
+| Loss of structural evidence | Native item-to-block-to-chunk span mapping; synthetic nested clauses, exceptions, multi-page tables, duplicated headers, OCR numeric and unit accuracy; record missing locator/coverage rather than invent spans. | 02B/C: reject policies with critical loss or unverifiable provenance. |
+| Token and model identity drift | Pin tokenizer, serialization, special tokens, effective input limit, weights and runtime; count serialized input without truncation; reject same-dimension incompatible vectors. | 02C/03A: no activation on mismatch. |
+| False exact matches or missed identifiers | Exercise Cyrillic morphology, mixed script, punctuation, hyphens, dots, clause IDs; separate exact identifier field from full-text analysis; compare lexical, dense and fusion results. | 02A/03B: no critical exact-ID regression. |
+| Stale or mixed-generation results | Single publication boundary for manifest, lexical and dense records; fault injection between writes, rename/delete, source hash verification, cleanup, disk-full and process kill. | 01B/04A: no stale or mixed evidence advertised as current. |
+| Silent degraded retrieval | Explicit component readiness, skipped/failed stages, mode requested vs executed; no lexical-only result labeled hybrid. | 03B: failure-path checks before activation. |
+| Local interface or parser crosses trust boundary | Bounded framing, restricted roots and untrusted parser inputs; no shell interpolation, runtime egress or default listener; evaluate authenticated local client access and actual Obsidian CLI affordances. | 01A/B, 02B, 04B: deny unsupported boundary. |
+| Benchmark bias / incumbent incomparable | Freeze independent judgments and run manifest; distinguish retrieval hits from generated answers; capture incumbent version/settings and unavailable metrics; report paired deltas including negative cases. | 02A/05: no adoption claim on incomparable evidence. |
+
+Historical synthetic evaluations motivate an optional reranking stage: a potential small gain in top-rank quality must be weighed against CPU latency and memory cost. Prior fusion comparisons likewise motivate rank-based fusion but do not establish the optimal production strategy. Earlier native-chunking and source-expansion research remains incomplete. No prior numeric results or private references are included; reproduce the relevant comparisons independently.
