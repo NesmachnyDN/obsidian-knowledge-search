@@ -33,3 +33,32 @@ class NativeBoundaryTests(unittest.TestCase):
                     self.assertEqual(extract(reader,path,PDF).status,'failed')
             finally:
                 reader.close()
+
+    def test_full_profile_does_not_fallback(self):
+        from engine.extraction import STRUCTURED_PDF
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'bad.pdf').write_bytes(b'%PDF-1.7\ninvalid')
+            reader = ScopedReader(root)
+            try:
+                doc = extract(reader, 'bad.pdf', STRUCTURED_PDF, artifacts=root)
+                self.assertEqual(doc.status, 'failed')
+                self.assertEqual(doc.extraction_profile, STRUCTURED_PDF)
+                self.assertEqual(doc.blocks, ())
+            finally:
+                reader.close()
+
+    def test_model_artifact_validation(self):
+        from engine.model_artifacts import verify_artifacts, verify_file
+        from hashlib import sha256
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            p = root / 'model.safetensors'
+            p.write_bytes(b'abc')
+            record = {'bytes': 3, 'sha256': sha256(b'abc').hexdigest()}
+            verify_file(p, record)
+            p.write_bytes(b'xyz')
+            with self.assertRaises(ValueError):
+                verify_file(p, record)
+            with self.assertRaises(ValueError):
+                verify_artifacts(root)

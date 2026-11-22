@@ -1,0 +1,456 @@
+{
+  "platform": "Linux x86_64 Python 3.12.3",
+  "lock_sha256": "22a02f1b337f45c9a550319365d45be639aa16ad116e18342ac3b5f0861cfb09",
+  "installed_distributions": [
+    {
+      "package": "accelerate",
+      "version": "1.15.0",
+      "declared_license": "Apache",
+      "notice_count": 1
+    },
+    {
+      "package": "annotated-doc",
+      "version": "0.0.7",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "annotated-types",
+      "version": "0.8.0",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "anyio",
+      "version": "4.16.0",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "attrs",
+      "version": "26.1.0",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "certifi",
+      "version": "2026.11.20",
+      "declared_license": "MPL-2.0",
+      "notice_count": 1
+    },
+    {
+      "package": "charset-normalizer",
+      "version": "3.5.2",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "click",
+      "version": "8.5.1",
+      "declared_license": "BSD-3-Clause",
+      "notice_count": 1
+    },
+    {
+      "package": "defusedxml",
+      "version": "0.7.1",
+      "declared_license": "PSFL",
+      "notice_count": 1
+    },
+    {
+      "package": "doclang",
+      "version": "0.10.1",
+      "declared_license": "Apache-2.0",
+      "notice_count": 1
+    },
+    {
+      "package": "docling-core",
+      "version": "2.108.0",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "docling-ibm-models",
+      "version": "4.0.4",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "docling-parse",
+      "version": "7.27.1",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "docling-slim",
+      "version": "2.151.1",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "filelock",
+      "version": "4.3.0",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "filetype",
+      "version": "1.2.0",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "fsspec",
+      "version": "2026.9.0",
+      "declared_license": "BSD-3-Clause",
+      "notice_count": 1
+    },
+    {
+      "package": "h11",
+      "version": "0.16.0",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "hf-xet",
+      "version": "1.8.0",
+      "declared_license": "Apache-2.0",
+      "notice_count": 1
+    },
+    {
+      "package": "httpcore",
+      "version": "1.0.9",
+      "declared_license": "BSD-3-Clause",
+      "notice_count": 1
+    },
+    {
+      "package": "httpx",
+      "version": "0.28.1",
+      "declared_license": "BSD-3-Clause",
+      "notice_count": 1
+    },
+    {
+      "package": "huggingface_hub",
+      "version": "1.33.0",
+      "declared_license": "Apache-2.0",
+      "notice_count": 1
+    },
+    {
+      "package": "idna",
+      "version": "3.20",
+      "declared_license": "BSD-3-Clause",
+      "notice_count": 1
+    },
+    {
+      "package": "Jinja2",
+      "version": "3.1.6",
+      "declared_license": "BSD License",
+      "notice_count": 1
+    },
+    {
+      "package": "jsonref",
+      "version": "1.1.0",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "jsonschema",
+      "version": "4.26.0",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "jsonschema-specifications",
+      "version": "2025.9.1",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "langcodes",
+      "version": "3.5.1",
+      "declared_license": "MIT License",
+      "notice_count": 1
+    },
+    {
+      "package": "latex2mathml",
+      "version": "3.81.1",
+      "declared_license": "MIT",
+      "notice_count": 0
+    },
+    {
+      "package": "lxml",
+      "version": "6.1.3",
+      "declared_license": "BSD-3-Clause",
+      "notice_count": 2
+    },
+    {
+      "package": "markdown-it-py",
+      "version": "4.3.0",
+      "declared_license": "MIT License",
+      "notice_count": 2
+    },
+    {
+      "package": "MarkupSafe",
+      "version": "3.0.4",
+      "declared_license": "BSD-3-Clause",
+      "notice_count": 1
+    },
+    {
+      "package": "mdurl",
+      "version": "0.1.2",
+      "declared_license": "MIT License",
+      "notice_count": 1
+    },
+    {
+      "package": "mpmath",
+      "version": "1.3.0",
+      "declared_license": "BSD",
+      "notice_count": 1
+    },
+    {
+      "package": "networkx",
+      "version": "3.7",
+      "declared_license": "BSD-3-Clause",
+      "notice_count": 1
+    },
+    {
+      "package": "numpy",
+      "version": "2.5.5",
+      "declared_license": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+      "notice_count": 17
+    },
+    {
+      "package": "opencv-python-headless",
+      "version": "4.14.0.94",
+      "declared_license": "Apache 2.0",
+      "notice_count": 2
+    },
+    {
+      "package": "packaging",
+      "version": "26.3",
+      "declared_license": "Apache-2.0 OR BSD-2-Clause",
+      "notice_count": 3
+    },
+    {
+      "package": "pandas",
+      "version": "3.1.1",
+      "declared_license": "BSD-3-Clause",
+      "notice_count": 19
+    },
+    {
+      "package": "pillow",
+      "version": "13.0.0",
+      "declared_license": "MIT-CMU",
+      "notice_count": 1
+    },
+    {
+      "package": "pluggy",
+      "version": "1.7.0",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "psutil",
+      "version": "7.2.2",
+      "declared_license": "BSD-3-Clause",
+      "notice_count": 1
+    },
+    {
+      "package": "pydantic",
+      "version": "2.14.4",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "pydantic-settings",
+      "version": "2.16.3",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "pydantic_core",
+      "version": "2.50.5",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "Pygments",
+      "version": "2.21.0",
+      "declared_license": "BSD-2-Clause",
+      "notice_count": 2
+    },
+    {
+      "package": "pypdf",
+      "version": "7.1.1",
+      "declared_license": "BSD-3-Clause",
+      "notice_count": 1
+    },
+    {
+      "package": "pypdfium2",
+      "version": "5.14.0",
+      "declared_license": "BSD-3-Clause, Apache-2.0, dependency licenses",
+      "notice_count": 18
+    },
+    {
+      "package": "python-dateutil",
+      "version": "4.0.0",
+      "declared_license": "BSD-3-Clause",
+      "notice_count": 2
+    },
+    {
+      "package": "python-docx",
+      "version": "1.2.0",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "python-dotenv",
+      "version": "1.2.4",
+      "declared_license": "BSD-3-Clause",
+      "notice_count": 1
+    },
+    {
+      "package": "PyYAML",
+      "version": "6.0.4",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "referencing",
+      "version": "0.37.0",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "regex",
+      "version": "2026.11.19",
+      "declared_license": "Apache-2.0 AND CNRI-Python",
+      "notice_count": 1
+    },
+    {
+      "package": "reportlab",
+      "version": "5.1.0",
+      "declared_license": "BSD license (see license.txt for details), Copyright (c) 2000-2025, ReportLab Inc.",
+      "notice_count": 1
+    },
+    {
+      "package": "requests",
+      "version": "2.34.2",
+      "declared_license": "Apache-2.0",
+      "notice_count": 2
+    },
+    {
+      "package": "rich",
+      "version": "15.0.0",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "rpds-py",
+      "version": "2026.9.1",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "rtree",
+      "version": "1.4.1",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "safetensors",
+      "version": "0.8.0",
+      "declared_license": "Apache Software License",
+      "notice_count": 1
+    },
+    {
+      "package": "scipy",
+      "version": "1.18.1",
+      "declared_license": "Copyright (c) 2001-2002 Enthought, Inc. 2003, SciPy Developers.",
+      "notice_count": 1
+    },
+    {
+      "package": "setuptools",
+      "version": "84.2.1",
+      "declared_license": "MIT",
+      "notice_count": 15
+    },
+    {
+      "package": "shellingham",
+      "version": "1.5.4",
+      "declared_license": "ISC License",
+      "notice_count": 1
+    },
+    {
+      "package": "sympy",
+      "version": "1.14.0",
+      "declared_license": "BSD",
+      "notice_count": 2
+    },
+    {
+      "package": "tabulate",
+      "version": "0.10.0",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "tokenizers",
+      "version": "0.23.3",
+      "declared_license": "Apache Software License",
+      "notice_count": 0
+    },
+    {
+      "package": "torch",
+      "version": "2.14.1+cpu",
+      "declared_license": "Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND MIT",
+      "notice_count": 86
+    },
+    {
+      "package": "torchvision",
+      "version": "0.29.1+cpu",
+      "declared_license": "BSD",
+      "notice_count": 1
+    },
+    {
+      "package": "tqdm",
+      "version": "4.70.1",
+      "declared_license": "MPL-2.0 AND MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "transformers",
+      "version": "5.18.0",
+      "declared_license": "Apache 2.0 License",
+      "notice_count": 1
+    },
+    {
+      "package": "typer",
+      "version": "0.27.3",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "typing-inspection",
+      "version": "0.4.5",
+      "declared_license": "MIT",
+      "notice_count": 1
+    },
+    {
+      "package": "typing_extensions",
+      "version": "4.16.0",
+      "declared_license": "PSF-2.0",
+      "notice_count": 1
+    },
+    {
+      "package": "tzdata",
+      "version": "2026.6",
+      "declared_license": "Apache-2.0",
+      "notice_count": 2
+    },
+    {
+      "package": "urllib3",
+      "version": "2.8.0",
+      "declared_license": "MIT",
+      "notice_count": 1
+    }
+  ]
+}

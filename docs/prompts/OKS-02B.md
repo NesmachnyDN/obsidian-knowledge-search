@@ -19,3 +19,20 @@ Base: `8ed92e370010e9857f08d2757f0dd9cd885b26ea`. Profile: ITERATION, with Docum
 - V02B-05: existing baseline invariants unchanged; focused negative/regression tests, full lightweight suite, license/type/build checks, exact-head independent review and hosted CI before verified squash merge. Actual OCR and extraction evidence required; an unprovisioned heavyweight artifact requires maintainer authorization and blocks this slice if no safe sufficient alternative is demonstrated.
 
 No unrelated refactoring, new service, production data, heavy artifact download, embedding, tokenizer changes, or changes to Obsidian configuration. Implementation worker must not push, approve or merge. English public artifacts only.
+
+## Authorized full pipeline follow-up
+
+The maintainer authorized explicit provisioning of the Heron layout and
+TableFormer Fast weights and their verified CPU-only runtime for this slice.
+The authorization does not extend to other model families, GPU packages, runtime
+downloads, or production data. Record exact model revisions, file sizes/digests
+and upstream license identifiers in the engine artifact manifest. Resolve and
+review the CPU wheel lock before installation; enforce the 4 GiB memory,
+two-CPU, zero-swap process-tree budget and the 3 GiB free-memory reserve.
+Run structured PDF and scanned-PDF experiments in a network namespace with no
+external interfaces; keep the previous model-free results and the frozen
+fixture/hash sets. Reclassify DOCX furniture using native group ancestry rather
+than text-based guesses. The separate pre-model geometry oracle records
+source-coordinate regions and table topology. Do not claim full coverage if
+the measured results do not demonstrate it. Independent review and CI remain
+mandatory.

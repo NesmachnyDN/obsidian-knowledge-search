@@ -91,3 +91,45 @@ exact-head review and CI, and the preceding gates; a local test pass is not
 approval. Continue with the reviewed artifact budget and full offline layout
 experiment after explicit permission, then broaden negative/structural tests.
 No production indexing, automatic fallback or changes to 02A metrics.
+
+## Authorized full CPU profile provisioning (pre-measurement)
+
+- [Pinned model artifact manifest](../../engine/extraction-model-artifacts.json).
+  Heron source: https://huggingface.co/docling-project/docling-layout-heron
+  (Apache-2.0). TableFormer Fast source:
+  https://huggingface.co/docling-project/docling-models (CDLA-Permissive-2.0).
+  Exact resolved upstream commits, sizes and weight SHA-256 values were checked
+  through repository metadata; small configs were additionally verified against
+  Git blob IDs. No alternate weights, pickle checkpoints or model code required.
+- [CPU wheel lock](requirements-full-cpu-linux-py312.txt),
+  [preflight wheel inventory](full-cpu-wheel-preflight.json) and
+  [installed package inventory](full-cpu-installed-inventory.json).
+  Linux x86_64 / CPython 3.12; PyTorch 2.14.1+cpu and torchvision 0.29.1+cpu,
+  Docling IBM Models 4.0.4, Transformers 5.18.0, headless OpenCV 4.14.0.94.
+  Resolved 75 installed distributions; no CUDA/NVIDIA packages. Additional
+  wheel budget 294,039,877 bytes (including 61,960,165 bytes OpenCV, required
+  by the table predictor); model artifacts 317,123,044 bytes. The full isolated
+  environment occupies about 1.4 GiB. Reserve 8 GiB free disk for installation,
+  cache and model artifacts. Dependency notices stay with the installed wheels;
+  no binary redistribution is proposed.
+- Operator provisions explicitly (outside the repository):
+  `python3 -I -B scripts/provision_extraction_models.py "$MODEL_DIR"`.
+  The directory must be private, canonical, and contain the exact reviewed
+  artifact set. Downloads are HTTPS-only; each file is size/hash-verified
+  before activation. Provisioning is separate from extraction.
+- Tesseract scans use the pinned eng/rus assets above and the host's TSV config
+  (SHA-256 `59d079bb75d8b3d7c839a3564580cb559e362c93a9d70f234e421c0c3e767e04`)
+  copied to the experiment tessdata directory. No system-level install.
+- Full pipeline evaluation uses
+  `benchmarks/extraction/run_structured.py` with one fixture per process,
+  explicit artifact/tessdata directories and an isolated network namespace.
+  Run under cgroup v2 limits (4 GiB MemoryMax, 0 MemorySwapMax,
+  200% CPUQuota, bounded TasksMax, explicit timeout), with admission and
+  pressure checks. Set `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1` and restrict
+  OpenMP/BLAS threads.
+- [Independent geometry/topology expectations](expected-layout.json) were
+  committed before structured model execution. Previous corpus and oracle
+  files remain unchanged. Before model evaluation two actual native
+  extraction integration tests and 53 dependency-free Python tests passed;
+  native DOCX furniture classification now matches the header/footer groups.
+  These tests do not demonstrate structured PDF model accuracy.

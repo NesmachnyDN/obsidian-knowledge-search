@@ -40,6 +40,25 @@ def _locations(item, document):
     return tuple(result)
 
 
+def furniture_kind(item, document):
+    """Resolve Docling's native header/footer group, not text heuristics."""
+    if item.content_layer.value != 'furniture':
+        return None
+    parent = item.parent
+    seen = set()
+    while parent is not None:
+        ref = parent.cref
+        if ref in seen or len(seen) >= 64:
+            raise ValueError('invalid native parent chain')
+        seen.add(ref)
+        node = parent.resolve(document)
+        name = getattr(node, 'name', None)
+        if name in ('page header', 'page footer'):
+            return name.replace(' ', '_')
+        parent = node.parent
+    return None
+
+
 def map_document(document, path, digest, profile, diagnostics=()):
     from docling_core.types.doc import ContentLayer, SectionHeaderItem, TableItem, TextItem
 
@@ -82,6 +101,8 @@ def map_document(document, path, digest, profile, diagnostics=()):
             kind = {'section_header': 'heading', 'title': 'heading',
                     'page_header': 'page_header', 'page_footer': 'page_footer',
                     'list_item': 'list_item'}.get(label, 'paragraph')
+            if label not in ('page_header', 'page_footer'):
+                kind = furniture_kind(item, document) or kind
             if isinstance(item, SectionHeaderItem) and layer == 'body':
                 level = item.level
                 headings = [(k, v) for k, v in headings if k < level]

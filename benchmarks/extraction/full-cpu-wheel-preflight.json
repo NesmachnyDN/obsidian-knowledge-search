@@ -1,0 +1,236 @@
+[
+  {
+    "package": "accelerate",
+    "version": "1.15.0",
+    "file": "accelerate-1.15.0-py3-none-any.whl",
+    "sha256": "97eacca0b73e45cb867dbf8c5d5d4dc32219544300e0c8992c7334dc2ef33cec",
+    "bytes": 394295,
+    "origin": "pypi.org",
+    "license": "Apache"
+  },
+  {
+    "package": "anyio",
+    "version": "4.16.0",
+    "file": "anyio-4.16.0-py3-none-any.whl",
+    "sha256": "c66ae634e0b8228396b801741beb3294326d4b6102f7bba4041c0dfb58c29026",
+    "bytes": 134521,
+    "origin": "pypi.org",
+    "license": "MIT"
+  },
+  {
+    "package": "click",
+    "version": "8.5.1",
+    "file": "click-8.5.1-py3-none-any.whl",
+    "sha256": "8bb5376d2006950386f8c6427613334a2acadc5f559cb80e638d00b4df957e37",
+    "bytes": 126163,
+    "origin": "pypi.org",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "package": "docling-ibm-models",
+    "version": "4.0.4",
+    "file": "docling_ibm_models-4.0.4-py3-none-any.whl",
+    "sha256": "5236a13d440135aa074e211981529424f7fd15acf7938c38431381e623430a3e",
+    "bytes": 69401,
+    "origin": "pypi.org",
+    "license": "MIT"
+  },
+  {
+    "package": "filelock",
+    "version": "4.3.0",
+    "file": "filelock-4.3.0-py3-none-any.whl",
+    "sha256": "f933f39f7e01249a4a49b9abab30edc6d4b874624c3de5dd0b0d137aa8adb979",
+    "bytes": 244553,
+    "origin": "pypi.org",
+    "license": "MIT"
+  },
+  {
+    "package": "fsspec",
+    "version": "2026.9.0",
+    "file": "fsspec-2026.9.0-py3-none-any.whl",
+    "sha256": "8dd6e646e99ea382bd85f97a45e6b526a442d79423a7dc673f1e2756d05fcb5f",
+    "bytes": 221738,
+    "origin": "pypi.org",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "package": "h11",
+    "version": "0.16.0",
+    "file": "h11-0.16.0-py3-none-any.whl",
+    "sha256": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86",
+    "bytes": 37515,
+    "origin": "pypi.org",
+    "license": "MIT"
+  },
+  {
+    "package": "hf-xet",
+    "version": "1.8.0",
+    "file": "hf_xet-1.8.0-cp38-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+    "sha256": "29dab7c904cd1914a0439c6e1306c12c7497c8bd32290fbe563ebf51ca4b6d6d",
+    "bytes": 4292483,
+    "origin": "pypi.org",
+    "license": "Apache-2.0"
+  },
+  {
+    "package": "httpcore",
+    "version": "1.0.9",
+    "file": "httpcore-1.0.9-py3-none-any.whl",
+    "sha256": "2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55",
+    "bytes": 78784,
+    "origin": "pypi.org",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "package": "httpx",
+    "version": "0.28.1",
+    "file": "httpx-0.28.1-py3-none-any.whl",
+    "sha256": "d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad",
+    "bytes": 73517,
+    "origin": "pypi.org",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "package": "huggingface-hub",
+    "version": "1.33.0",
+    "file": "huggingface_hub-1.33.0-py3-none-any.whl",
+    "sha256": "04e434b06e100eddbce9a6e817d72693a7884b10a79bd67ab48080d5c07eb899",
+    "bytes": 846435,
+    "origin": "pypi.org",
+    "license": "Apache-2.0"
+  },
+  {
+    "package": "jinja2",
+    "version": "3.1.6",
+    "file": "jinja2-3.1.6-py3-none-any.whl",
+    "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67",
+    "bytes": 134899,
+    "origin": "pypi.org",
+    "license": "BSD License"
+  },
+  {
+    "package": "markupsafe",
+    "version": "3.0.4",
+    "file": "markupsafe-3.0.4-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+    "sha256": "8e124f974786f831d6043728e38296969d3579db8896fe004682f5758e613581",
+    "bytes": 22985,
+    "origin": "pypi.org",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "package": "mpmath",
+    "version": "1.3.0",
+    "file": "mpmath-1.3.0-py3-none-any.whl",
+    "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c",
+    "bytes": 536198,
+    "origin": "pypi.org",
+    "license": "BSD"
+  },
+  {
+    "package": "networkx",
+    "version": "3.7",
+    "file": "networkx-3.7-py3-none-any.whl",
+    "sha256": "e3fd2c13a7814cee3746340d8d7f8598a67f16a58bf47fb7f8793fab6efca1b0",
+    "bytes": 2142205,
+    "origin": "pypi.org",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "package": "packaging",
+    "version": "26.3",
+    "file": "packaging-26.3-py3-none-any.whl",
+    "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c",
+    "bytes": 129956,
+    "origin": "pypi.org",
+    "license": "Apache-2.0 OR BSD-2-Clause"
+  },
+  {
+    "package": "psutil",
+    "version": "7.2.2",
+    "file": "psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl",
+    "sha256": "076a2d2f923fd4821644f5ba89f059523da90dc9014e85f8e45a5774ca5bc6f9",
+    "bytes": 155560,
+    "origin": "pypi.org",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "package": "regex",
+    "version": "2026.11.19",
+    "file": "regex-2026.11.19-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+    "sha256": "8a966a5afe94ed9fb06deeecd9e3e51c3a5ab7d920e13f8128338e3fcdfed2b0",
+    "bytes": 809234,
+    "origin": "pypi.org",
+    "license": "Apache-2.0 AND CNRI-Python"
+  },
+  {
+    "package": "safetensors",
+    "version": "0.8.0",
+    "file": "safetensors-0.8.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+    "sha256": "fd6f3f93c9a0a7cc2788ee63fb763353d4bd2e89b0751bc78fcf7dda00bea774",
+    "bytes": 516040,
+    "origin": "pypi.org",
+    "license": "Apache Software License"
+  },
+  {
+    "package": "setuptools",
+    "version": "84.2.1",
+    "file": "setuptools-84.2.1-py3-none-any.whl",
+    "sha256": "ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2",
+    "bytes": 876263,
+    "origin": "pypi.org",
+    "license": "MIT"
+  },
+  {
+    "package": "sympy",
+    "version": "1.14.0",
+    "file": "sympy-1.14.0-py3-none-any.whl",
+    "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5",
+    "bytes": 6299353,
+    "origin": "pypi.org",
+    "license": "BSD"
+  },
+  {
+    "package": "tokenizers",
+    "version": "0.23.3",
+    "file": "tokenizers-0.23.3-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+    "sha256": "376851d22bcf9d650a5c3090bb83e6cf9e895fbf0595369fa4cd43c1f69b5f87",
+    "bytes": 3396193,
+    "origin": "pypi.org",
+    "license": "Apache Software License"
+  },
+  {
+    "package": "torch",
+    "version": "2.14.1+cpu",
+    "file": "torch-2.14.1+cpu-cp312-cp312-manylinux_2_28_x86_64.whl",
+    "sha256": "5a6363570c753812540a05eb82380e329469cbe668643e88111414c12627711f",
+    "bytes": 196253677,
+    "origin": "download.pytorch.org/whl/cpu",
+    "license": "Apache-2.0 and bundled notices (torch)"
+  },
+  {
+    "package": "torchvision",
+    "version": "0.29.1+cpu",
+    "file": "torchvision-0.29.1+cpu-cp312-cp312-manylinux_2_28_x86_64.whl",
+    "sha256": "ef220d4b21878c58947851beb7337382897159105f012f0c9c07bf7e84174d7e",
+    "bytes": 1708098,
+    "origin": "download.pytorch.org/whl/cpu",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "package": "transformers",
+    "version": "5.18.0",
+    "file": "transformers-5.18.0-py3-none-any.whl",
+    "sha256": "d79e5a515a572ee3deb33eb0d578be47d91e70c75d54cf21bf6eede6edef14a9",
+    "bytes": 12579646,
+    "origin": "pypi.org",
+    "license": "Apache 2.0 License"
+  },
+  {
+    "package": "opencv-python-headless",
+    "version": "4.14.0.94",
+    "file": "opencv_python_headless-4.14.0.94-cp37-abi3-manylinux_2_28_x86_64.whl",
+    "sha256": "211e581f5a4670acbbe08fff36a35e9946039d2eea28b80394632d036d1be527",
+    "bytes": 61960165,
+    "origin": "pypi.org",
+    "license": "Apache-2.0 and bundled notices"
+  }
+]

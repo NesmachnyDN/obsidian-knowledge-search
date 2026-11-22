@@ -10,7 +10,7 @@ import stat
 from zipfile import ZipFile
 
 from engine.document import ParsedDocument
-from engine.native_document import map_document
+from engine.native_document import furniture_kind, map_document
 from engine.scope import ScopedReader
 
 # PoC input budget matches the existing scoped-reader ceiling, not a proposed
@@ -23,6 +23,8 @@ MAX_ZIP_EXPANDED = 8 * 1024 * 1024
 DOCX = 'docling-docx-2.151.1'
 PDF = 'docling-native-pdf-2.151.1'
 OCR = 'tesseract-cli-5.3.4-eng-rus'
+STRUCTURED_PDF = 'docling-heron-tableformer-fast-2.151.1'
+STRUCTURED_SCAN = 'docling-heron-tableformer-fast-tesseract-2.151.1'
 
 
 def _docx_preflight(data):
@@ -67,7 +69,7 @@ def _pdf_preflight(data):
     return len(reader.pages)
 
 
-def _docling(data, path, digest, profile):
+def _docling(data, path, digest, profile, artifacts=None, tessdata=None):
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import NativePdfPipelineOptions
     from docling.document_converter import DocumentConverter, NativePdfFormatOption
@@ -78,6 +80,10 @@ def _docling(data, path, digest, profile):
     if profile == DOCX:
         has_furniture = _docx_preflight(data)
         converter = DocumentConverter(allowed_formats=[InputFormat.DOCX])
+    elif profile in (STRUCTURED_PDF, STRUCTURED_SCAN):
+        from engine.structured_pdf import structured_converter
+        page_count = _pdf_preflight(data)
+        converter = structured_converter(artifacts, tessdata, profile == STRUCTURED_SCAN)
     else:
         page_count = _pdf_preflight(data)
         diagnostics.append('native-pdf-layout-tables-reading-order-not-inferred')
@@ -95,17 +101,17 @@ def _docling(data, path, digest, profile):
                               extraction_profile=profile)
     if status == 'partial_success' or result.errors:
         diagnostics.append('docling-partial-or-diagnostics')
-    if profile == PDF and len(result.document.pages) != page_count:
+    if profile != DOCX and len(result.document.pages) != page_count:
         diagnostics.append('pdf-page-count-mismatch')
     if profile == DOCX and has_furniture:
-        labels = {item.label.value for item, _ in result.document.iterate_items(
+        labels = {furniture_kind(item, result.document) or item.label.value for item, _ in result.document.iterate_items(
             included_content_layers=set(ContentLayer))}
         if not {'page_header', 'page_footer'} <= labels:
             diagnostics.append('docx-furniture-not-fully-classified')
     return map_document(result.document, path, digest, profile, diagnostics)
 
 
-def extract(reader: ScopedReader, path: str, profile: str, tessdata=None) -> ParsedDocument:
+def extract(reader: ScopedReader, path: str, profile: str, tessdata=None, artifacts=None) -> ParsedDocument:
     """Never implicitly downgrade a requested extraction profile."""
     try:
         source = reader.read(path, MAX_BYTES)
@@ -113,8 +119,8 @@ def extract(reader: ScopedReader, path: str, profile: str, tessdata=None) -> Par
         return ParsedDocument(path, None, 'failed', (), ('source-read-rejected',),
                               extraction_profile=profile)
     if (profile == DOCX and not path.lower().endswith('.docx')
-            or profile in (PDF, OCR) and not path.lower().endswith('.pdf')
-            or profile not in (DOCX, PDF, OCR)):
+            or profile in (PDF, OCR, STRUCTURED_PDF, STRUCTURED_SCAN) and not path.lower().endswith('.pdf')
+            or profile not in (DOCX, PDF, OCR, STRUCTURED_PDF, STRUCTURED_SCAN)):
         return ParsedDocument(path, source.digest, 'unsupported', (), ('format-profile-mismatch',),
                               extraction_profile=profile)
     try:
@@ -122,7 +128,7 @@ def extract(reader: ScopedReader, path: str, profile: str, tessdata=None) -> Par
             from engine.ocr import extract_scan
             _pdf_preflight(source.data)
             return extract_scan(source.data, path, source.digest, profile, tessdata)
-        return _docling(source.data, path, source.digest, profile)
+        return _docling(source.data, path, source.digest, profile, artifacts, tessdata)
     except Exception as exc:
         # A bounded worker owns resource failures. Do not publish stack traces,
         # filenames or document text from third-party exceptions.

@@ -40,3 +40,14 @@ stop on pressure. These are proposed limits, not measured full-pipeline costs.
 Do not enable default downloads, alter the Vault or reuse a private application's
 runtime. Continue with language/furniture/complex layout coverage, independent
 review and CI before acceptance. No chunking or retrieval-quality decision yet.
+
+## Controlled structured profile (experiment in progress)
+
+Explicit provisioning is now authorized within the CPU-only resource envelope.
+[Artifact manifest](../../engine/extraction-model-artifacts.json) pins Heron
+(Apache-2.0) and TableFormer Fast (CDLA-Permissive-2.0) to immutable upstream
+revisions and exact SHA-256/size for each required SafeTensors/config file.
+Separate the operator provisioning command from conversion. The structured
+profile must fail if the local artifact set is absent, altered or unexpected;
+no implicit transition to an earlier model-free profile. Full structural quality
+and resource measurements remain open until the actual experiments finish.
