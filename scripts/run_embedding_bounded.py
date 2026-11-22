@@ -31,7 +31,10 @@ OTHER = (
 LIMIT_SECONDS = 180
 
 
-def run(python: Path, snapshot: Path, output: Path, *, explicitly_approved: bool = False) -> None:
+def run(python: Path, snapshot: Path, output: Path, *,
+        explicitly_approved: bool = False, task: str = "03a") -> None:
+    if task not in ("03a", "03b", "03b-chunks"):
+        raise RuntimeError("TASK_INVALID")
     if not explicitly_approved:
         raise RuntimeError("APPROVAL_REQUIRED: explicit heavy-inference authorization absent")
     if not python.is_file() or not snapshot.is_dir():
@@ -61,7 +64,12 @@ def run(python: Path, snapshot: Path, output: Path, *, explicitly_approved: bool
         "TOKENIZERS_PARALLELISM=false",
         "HF_HUB_OFFLINE=1", "TRANSFORMERS_OFFLINE=1",
         "HF_HUB_DISABLE_TELEMETRY=1", "CUDA_VISIBLE_DEVICES=",
-        str(python), "-I", "-B", str(ROOT / "benchmarks/embedding/run.py"),
+        str(python), "-I", "-B",
+        str(ROOT / {
+            "03a": "benchmarks/embedding/run.py",
+            "03b": "benchmarks/retrieval/run.py",
+            "03b-chunks": "benchmarks/retrieval/chunk_policy_run.py",
+        }[task]),
         "--snapshot", str(snapshot),
     ]
     partial = output.with_suffix(output.suffix + ".partial")
@@ -85,11 +93,31 @@ def run(python: Path, snapshot: Path, output: Path, *, explicitly_approved: bool
             if scope_active(UNIT):
                 raise RuntimeError("unable to prove scope teardown")
     evidence = json.loads(partial.read_text(encoding="utf-8"))
-    if (evidence.get("model_backed") is not True
-            or evidence.get("dimension") != 1024
-            or evidence.get("offline") is not True
-            or evidence.get("test_count", 0) < 2):
+    if evidence.get("model_backed") is not True or evidence.get("offline") is not True:
         raise RuntimeError("invalid model measurement; no benchmark published")
+    if task == "03a":
+        if evidence.get("dimension") != 1024 or evidence.get("test_count", 0) < 2:
+            raise RuntimeError("invalid 03A model measurement")
+    elif task == "03b":
+        if (evidence.get("phase") != "OKS-03B"
+                or evidence.get("real_tokenizer_runtime_parity") is not True
+                or evidence.get("no_fake_embedding") is not True
+                or evidence.get("dense_record_count", 0) == 0
+                or evidence.get("query_mode_error_count") != 0
+                or evidence.get("provenance_error_count") != 0
+                or evidence.get("leg_consistency_error_count") != 0
+                or set(evidence.get("split_metrics", {})) != {"tuning", "held_out"}):
+            raise RuntimeError("invalid 03B retrieval measurement")
+    else:
+        if (evidence.get("phase") != "OKS-03B-CHUNKS"
+                or evidence.get("no_fake_embedding") is not True
+                or set(evidence.get("quality", {})) != {"tuning", "held_out"}
+                or evidence.get("comparison_policies") !=
+                ["fixed-window", "paragraph", "structure"]
+                or any(row.get("source_coverage_failures") != 0 or
+                       row.get("token_budget_violations") != 0
+                       for row in evidence.get("policy_record_counts", {}).values())):
+            raise RuntimeError("invalid 03B structural-policy measurement")
     partial.replace(output)
 
 
@@ -99,7 +127,8 @@ if __name__ == "__main__":
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--explicit-model-approval", action="store_true",
-                        help="requires separate maintainer permission and resource preflight")
+                        help="requires recorded maintainer permission and resource preflight")
+    parser.add_argument("--task", choices=["03a", "03b", "03b-chunks"], default="03a")
     args = parser.parse_args()
     run(args.python, args.snapshot, args.output,
-        explicitly_approved=args.explicit_model_approval)
+        explicitly_approved=args.explicit_model_approval, task=args.task)
