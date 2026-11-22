@@ -19,3 +19,7 @@ Before held-out testing, specify per-query relevance grades, counting unit (dedu
 ## OKS-02A baseline
 
 See [frozen corpus v1](corpus/v1/README.md) and [baseline evidence](oks-02a.md). Run the synthetic-only benchmark with `python3 -I -B benchmarks/oks02a.py --split tuning` or `--split held_out`; the latter is for the frozen implementation evaluation, not tuning.
+
+## OKS-02B experiment (incomplete)
+
+See [native extraction and offline OCR evidence](extraction/README.md). The model-free PDF profile is not a full semantic layout extraction strategy.

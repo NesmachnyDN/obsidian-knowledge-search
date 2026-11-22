@@ -6,3 +6,5 @@
 - Future ADRs: parsing/chunking, model/runtime identity, storage, IPC/distribution, resource controls, adoption. Choose after evidence; document alternatives, consequences and supersession.
 
 Use states Proposed, Accepted, Superseded or Rejected. Do not mark an experiment as implemented or accepted merely because it is listed.
+
+- [ADR-0004](0004-native-extraction-profiles.md) — Proposed native extraction profiles; structural PDF evaluation and acceptance pending.

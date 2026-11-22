@@ -1,0 +1,213 @@
+{
+  "cgroup_memory_peak_bytes": 175538176,
+  "network_interfaces": [
+    "lo"
+  ],
+  "peak_child_rss_kib": 215636,
+  "peak_rss_kib": 215636,
+  "profiles": {
+    "malformed.pdf::docling-native-pdf-2.151.1": {
+      "diagnostics": [
+        "extraction-error:PdfReadError"
+      ],
+      "process_cpu_seconds": 0.00010609000000005864,
+      "seconds": 0.00010617299994919449,
+      "source_digest": "fdb1d2a2b0b97713b2d78e2883ebae8660af974760188ca01919d263d02a08af",
+      "status": "failed"
+    },
+    "policy.docx::docling-docx-2.151.1": {
+      "alternative_seconds": 0.007881986000029428,
+      "alternative_text": {
+        "matched": 12,
+        "missing": [],
+        "total": 12
+      },
+      "blocks": 11,
+      "diagnostics": [
+        "docx-furniture-not-fully-classified"
+      ],
+      "headings": {
+        "matched": 3,
+        "missing": [],
+        "total": 3
+      },
+      "merged_cell_correct": true,
+      "native_anchors": 11,
+      "native_page_locations": 0,
+      "page_count": null,
+      "process_cpu_seconds": 2.707324059,
+      "seconds": 2.7079511510000884,
+      "source_digest": "aca912bc63baa793f79e5e8a787e8c9d8d934a2a0a76295d5be79d677b6f807c",
+      "status": "partial",
+      "table_cells": {
+        "matched": 5,
+        "missing": [],
+        "total": 5
+      },
+      "text": {
+        "matched": 12,
+        "missing": [],
+        "total": 12
+      }
+    },
+    "policy.pdf::docling-native-pdf-2.151.1": {
+      "alternative_seconds": 0.008009316000425315,
+      "alternative_text": {
+        "matched": 11,
+        "missing": [],
+        "total": 11
+      },
+      "blocks": 13,
+      "diagnostics": [
+        "native-pdf-layout-tables-reading-order-not-inferred"
+      ],
+      "headings": {
+        "matched": 0,
+        "missing": [
+          "Synthetic control policy",
+          "1. Storage",
+          "2. Восстановление"
+        ],
+        "total": 3
+      },
+      "native_anchors": 13,
+      "native_page_locations": 13,
+      "page_anchors": {
+        "1": {
+          "matched": 2,
+          "missing": [],
+          "total": 2
+        },
+        "2": {
+          "matched": 2,
+          "missing": [],
+          "total": 2
+        }
+      },
+      "page_count": 2,
+      "process_cpu_seconds": 0.2111937450000001,
+      "seconds": 0.21046541400028218,
+      "source_digest": "6d36ed05151b90aa4e8e5f3caf5283eff50fafc6a7c754f28244b1ddea686be7",
+      "status": "partial",
+      "table_cells": {
+        "matched": 0,
+        "missing": [
+          "Control",
+          "Limit",
+          "Retention",
+          "30 days"
+        ],
+        "total": 4
+      },
+      "text": {
+        "matched": 11,
+        "missing": [],
+        "total": 11
+      }
+    },
+    "scan.pdf::docling-native-pdf-2.151.1": {
+      "alternative_seconds": 0.0062963620002847165,
+      "alternative_text": {
+        "matched": 0,
+        "missing": [
+          "REQ-OCR-301: Keep records for 30 days.",
+          "REQ-OCR-302: Хранить записи 15 суток."
+        ],
+        "total": 2
+      },
+      "blocks": 0,
+      "diagnostics": [
+        "native-pdf-layout-tables-reading-order-not-inferred",
+        "no-extracted-text",
+        "unmapped-native-item:picture"
+      ],
+      "headings": {
+        "matched": 0,
+        "missing": [],
+        "total": 0
+      },
+      "native_anchors": 0,
+      "native_page_locations": 0,
+      "page_anchors": {
+        "1": {
+          "matched": 0,
+          "missing": [
+            "REQ-OCR-301: Keep records for 30 days.",
+            "REQ-OCR-302: Хранить записи 15 суток."
+          ],
+          "total": 2
+        }
+      },
+      "page_count": 1,
+      "process_cpu_seconds": 0.002737223000000011,
+      "seconds": 0.0027577319997362792,
+      "source_digest": "6bfe0ed877419c3377b06b53e5a395dc538f398b71441344b07055f37c1548fc",
+      "status": "partial",
+      "table_cells": {
+        "matched": 0,
+        "missing": [],
+        "total": 0
+      },
+      "text": {
+        "matched": 0,
+        "missing": [
+          "REQ-OCR-301: Keep records for 30 days.",
+          "REQ-OCR-302: Хранить записи 15 суток."
+        ],
+        "total": 2
+      }
+    },
+    "scan.pdf::tesseract-cli-5.3.4-eng-rus": {
+      "alternative_seconds": 0.006356965999657405,
+      "alternative_text": {
+        "matched": 0,
+        "missing": [
+          "REQ-OCR-301: Keep records for 30 days.",
+          "REQ-OCR-302: Хранить записи 15 суток."
+        ],
+        "total": 2
+      },
+      "blocks": 2,
+      "cer": 0.0,
+      "diagnostics": [
+        "ocr-layout-and-table-structure-not-inferred"
+      ],
+      "expected_lines": 2,
+      "headings": {
+        "matched": 0,
+        "missing": [],
+        "total": 0
+      },
+      "native_anchors": 2,
+      "native_page_locations": 2,
+      "page_anchors": {
+        "1": {
+          "matched": 2,
+          "missing": [],
+          "total": 2
+        }
+      },
+      "page_count": 1,
+      "process_cpu_seconds": 0.05873449999999991,
+      "recognized_lines": [
+        "REQ-OCR-301: Keep records for 30 days.",
+        "REQ-OCR-302: Хранить записи 15 суток."
+      ],
+      "seconds": 0.2100930589995187,
+      "source_digest": "6bfe0ed877419c3377b06b53e5a395dc538f398b71441344b07055f37c1548fc",
+      "status": "partial",
+      "table_cells": {
+        "matched": 0,
+        "missing": [],
+        "total": 0
+      },
+      "text": {
+        "matched": 2,
+        "missing": [],
+        "total": 2
+      },
+      "wer": 0.0
+    }
+  },
+  "version": 1
+}
