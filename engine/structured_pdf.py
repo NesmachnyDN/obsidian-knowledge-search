@@ -1,8 +1,9 @@
 """Explicit CPU-only native layout/table pipeline; no model provisioning."""
 from pathlib import Path
+import os
 import socket
 
-from engine.model_artifacts import verify_artifacts
+from engine.model_artifacts import verify_artifacts, verify_file
 
 
 def structured_converter(artifacts: Path, tessdata: Path | None, scanned: bool):
@@ -36,6 +37,15 @@ def structured_converter(artifacts: Path, tessdata: Path | None, scanned: bool):
     if scanned:
         if not isinstance(tessdata, Path) or not tessdata.is_absolute():
             raise ValueError('explicit local tessdata directory required')
+        if os.environ.get('TESSDATA_PREFIX') != str(tessdata):
+            raise ValueError('explicit tessdata environment required')
+        for relative, size, digest in (
+            ('eng.traineddata', 4113088, '7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2'),
+            ('rus.traineddata', 3861738, 'e16e5e036cce1d9ec2b00063cf8b54472625b9e14d893a169e2b0dedeb4df225'),
+            ('osd.traineddata', 10562727, '9cf5d576fcc47564f11265841e5ca839001e7e6f38ff7f7aacf46d15a96b00ff'),
+            ('configs/tsv', 22, '59d079bb75d8b3d7c839a3564580cb559e362c93a9d70f234e421c0c3e767e04'),
+        ):
+            verify_file(tessdata / relative, {'bytes': size, 'sha256': digest})
         options.ocr_options = TesseractCliOcrOptions(
             lang=['eng', 'rus'], tesseract_cmd='/usr/bin/tesseract',
             path=str(tessdata), force_full_page_ocr=True, psm=6)

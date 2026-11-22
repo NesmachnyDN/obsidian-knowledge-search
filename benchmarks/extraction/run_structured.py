@@ -1,5 +1,6 @@
 """Run one structured extraction case in a bounded, offline process."""
 import argparse
+from contextlib import redirect_stdout
 import hashlib
 import json
 import os
@@ -85,5 +86,6 @@ if __name__ == '__main__':
     parser.add_argument('--artifacts', type=Path, required=True)
     parser.add_argument('--tessdata', type=Path, required=True)
     args = parser.parse_args()
-    print(json.dumps(run(args.fixture, args.artifacts, args.tessdata),
-                     ensure_ascii=False, indent=2, sort_keys=True))
+    with redirect_stdout(sys.stderr):
+        result = run(args.fixture, args.artifacts, args.tessdata)
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))

@@ -43,7 +43,7 @@ def run(interpreter, fixture, artifacts, tessdata):
         'env', 'OMP_NUM_THREADS=2', 'OPENBLAS_NUM_THREADS=1',
         'MKL_NUM_THREADS=2', 'OMP_THREAD_LIMIT=2', 'HF_HUB_OFFLINE=1',
         'TRANSFORMERS_OFFLINE=1', 'HF_HUB_DISABLE_TELEMETRY=1',
-        'CUDA_VISIBLE_DEVICES=', str(interpreter), '-I', '-B',
+        'CUDA_VISIBLE_DEVICES=', 'TESSDATA_PREFIX='+str(tessdata), str(interpreter), '-I', '-B',
         str(ROOT/'benchmarks/extraction/run_structured.py'), fixture,
         '--artifacts', str(artifacts), '--tessdata', str(tessdata),
     ]

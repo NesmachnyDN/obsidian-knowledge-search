@@ -1,6 +1,6 @@
 # OKS-02B model-free native extraction and offline OCR evidence
 
-Status: partial experiment; NOT a full extraction acceptance or a merge approval.
+Status: measured native and structured extraction PoC; independent review and exact-head CI required. Not production acceptance.
 
 The synthetic four-file corpus and labels were frozen at `f86d0ba` before
 executing extraction. A second generation matched the manifest byte-for-byte.
@@ -92,7 +92,7 @@ approval. Continue with the reviewed artifact budget and full offline layout
 experiment after explicit permission, then broaden negative/structural tests.
 No production indexing, automatic fallback or changes to 02A metrics.
 
-## Authorized full CPU profile provisioning (pre-measurement)
+## Authorized full CPU profile provisioning
 
 - [Pinned model artifact manifest](../../engine/extraction-model-artifacts.json).
   Heron source: https://huggingface.co/docling-project/docling-layout-heron
@@ -133,3 +133,62 @@ No production indexing, automatic fallback or changes to 02A metrics.
   extraction integration tests and 53 dependency-free Python tests passed;
   native DOCX furniture classification now matches the header/footer groups.
   These tests do not demonstrate structured PDF model accuracy.
+
+## Measured structured extraction (CPU-only, offline)
+
+Both pinned model sets were downloaded and their exact files verified outside Git.
+Both runs used the bounded wrapper with 4 GiB memory.max, zero swap.max,
+200% CPU quota, an affinity mask of two logical CPUs, pids.max=128,
+one active heavyweight job, a 3 GiB host RAM reserve and loopback-only network
+namespace. The wrapper rejects active provisioning or insufficient resources.
+All scopes exited. No production Vault activity.
+
+The initial runs are retained as [PDF](results-structured-policy-initial.json)
+and [scan](results-structured-scan-initial.json). The first PDF run revealed
+Docling list marker normalization (10/11 text fragments) and a requirement
+misclassified as a heading, affecting ancestor context. The initial scan
+recognized both lines but logged missing OSD data. We preserved ListItem.orig
+where it differs from text, recorded its distinct representation, gave explicit
+requirement identifiers precedence over conflicting native labels, and surfaced
+ambiguity rather than silently guessing a heading. Added a checked copy of the
+already installed Apache-2.0 tesseract-ocr-osd 1:4.1.0-2 asset (10,562,727 bytes,
+SHA-256 `9cf5d576fcc47564f11265841e5ca839001e7e6f38ff7f7aacf46d15a96b00ff`).
+No additional download or host-level install.
+
+Final runs: [PDF](results-structured-policy.json) and
+[scan](results-structured-scan.json). Frozen oracle and source hashes stayed
+unchanged. Text counts are expected fragment matches, not broad accuracy scores.
+
+| Profile | Text | Headings | Cells | Region text/page | Region kind | Region geometry | Cell topology / geometry | Status |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| Structured PDF | 11/11 | 2/3 | 4/4 | 9/9 | 8/9 | 9/9 | 4/4 / 4/4 | partial |
+| Structured scan | 2/2 | n/a | n/a | 2/2 | 2/2 | 2/2 | n/a | ok |
+
+The Russian numbered heading is still labeled as a list item by Heron.
+Its full original text and geometry remain available; the previous heading
+context is not a verified section assignment. Both requirement IDs and both
+pages' header/footer instances are recognized. PDF has 11 native page
+locations (table row locations refer to the table, with separate cell bounds).
+Geometry means center inside each independently authored region, not IoU.
+Scan text matches exactly after whitespace normalization; no OSD errors on
+the repeat run. Native DOCX furniture groups now map to page_header/page_footer
+and the integration fixture status is ok. No claims for arbitrary layouts,
+rotated/noisy scans, cross-page tables or larger-than-PoC documents.
+
+| Profile | Wall seconds | Process CPU seconds | cgroup peak bytes |
+|---|---:|---:|---:|
+| Structured PDF | 11.186 | see JSON | 794161152 |
+| Structured scan | 10.291 | see JSON | 770428928 |
+
+The recorded cgroup CPU usage and process RSS are in each JSON, not estimates.
+One run per fixture, not a latency percentile. Resource limits are verified
+inside the worker before loading Torch; provisioning and conversion are separate.
+The measured model-free/structured trade-off supports a provisional structured
+profile for native PDF tables when explicitly enabled, retaining model-free
+and OCR-text profiles as distinct partial alternatives, never silent fallbacks.
+
+V02B-01 through V02B-04 have empirical evidence at PoC scope, including the
+documented unresolved semantic classification limitation. Decision acceptance
+and V02B-05 require a fresh independent full-diff review and exact-head hosted
+checks. No chunking, retrieval policy, production deployment or phase closure
+is asserted by these measurements.

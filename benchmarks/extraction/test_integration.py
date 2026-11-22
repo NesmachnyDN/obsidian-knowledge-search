@@ -47,6 +47,35 @@ class ExtractionIntegration(unittest.TestCase):
             finally:
                 reader.close()
 
+    def test_native_list_marker_and_clause_label_conflict(self):
+        from docling_core.types.doc import DoclingDocument
+        from engine.native_document import map_document
+        doc = DoclingDocument(name='synthetic')
+        doc.add_heading(text='Section', level=1)
+        doc.add_heading(text='REQ-SYN-100: Keep evidence.', level=2)
+        doc.add_list_item(text='Evidence', orig='2. Evidence', marker='2.', enumerated=True)
+        parsed = map_document(doc, 'synthetic.pdf', 'digest', STRUCTURED_PDF)
+        self.assertEqual(parsed.status, 'partial')
+        self.assertIn('native-clause-label-conflict', parsed.diagnostics)
+        self.assertEqual(parsed.blocks[1].kind, 'clause')
+        self.assertEqual(parsed.blocks[1].clause, 'REQ-SYN-100')
+        self.assertEqual(parsed.blocks[2].headings, ('Section',))
+        self.assertEqual(parsed.blocks[2].text, '2. Evidence')
+        self.assertEqual(parsed.blocks[2].native.representation, 'native-original-text')
+
+    def test_empty_native_document_is_explicit(self):
+        from docx import Document
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            Document().save(root / 'empty.docx')
+            reader = ScopedReader(root)
+            try:
+                doc = extract(reader, 'empty.docx', DOCX)
+                self.assertEqual(doc.status, 'empty')
+                self.assertIn('no-extracted-text', doc.diagnostics)
+            finally:
+                reader.close()
+
     def test_docx_rejects_traversal_and_external_relationship(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

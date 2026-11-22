@@ -1,6 +1,6 @@
 # ADR-0004: Explicit native extraction profiles and structural limitations
 
-Status: Proposed; incomplete OKS-02B experiment, not an accepted extraction strategy.
+Status: Proposed; measured OKS-02B experiment, pending independent review and merge.
 
 ## Evidence and decision proposal
 
@@ -23,7 +23,7 @@ scan lines exactly with page geometry; this is a separate OCR-text profile,
 not a semantic layout model or an automatic fallback. See measured evidence in
 [the experiment report](../../benchmarks/extraction/README.md).
 
-## Open gate
+## Initial open gate (historical)
 
 Do not select the model-free PDF or scan profile as sufficient for full
 structural extraction. The full Docling layout/table pipeline has no verified
@@ -41,7 +41,7 @@ Do not enable default downloads, alter the Vault or reuse a private application'
 runtime. Continue with language/furniture/complex layout coverage, independent
 review and CI before acceptance. No chunking or retrieval-quality decision yet.
 
-## Controlled structured profile (experiment in progress)
+## Controlled structured profile
 
 Explicit provisioning is now authorized within the CPU-only resource envelope.
 [Artifact manifest](../../engine/extraction-model-artifacts.json) pins Heron
@@ -51,3 +51,28 @@ Separate the operator provisioning command from conversion. The structured
 profile must fail if the local artifact set is absent, altered or unexpected;
 no implicit transition to an earlier model-free profile. Full structural quality
 and resource measurements remain open until the actual experiments finish.
+
+## Measured outcome and provisional decision
+
+Select native structured PDF as the *candidate* layout/table profile, not a
+production default. The frozen two-page fixture recovered 11/11 text
+fragments, 4/4 cell texts and topology/geometry matches, 9/9 region text/page
+and geometry matches, but only 2/3 headings and 8/9 region labels. The
+Russian numbered heading remains misclassified; preserve original list text
+and report partial rather than invent a hierarchy. The explicit clause-label
+conflict repair avoids treating a requirement as a section ancestor. Native
+DOCX furniture classification now uses group ancestry. The scan recovered
+both bilingual lines and both authored source geometry regions; local OSD,
+English and Russian assets and configuration are hash-checked. No remote
+interfaces beyond loopback, no implicit fallback, and no new Vault writes.
+
+Peak charged cgroup memory was 794161152 and 770428928 bytes for the final
+PDF and scan runs, respectively, below the 4 GiB admitted limit. Wall times
+were 11.186 and 10.291 seconds. See the linked measured report for full
+reproducibility, source/weight hashes, dependencies and exact limitations.
+Model classification and reading order remain fallible. Keep native source
+anchors distinct from derived context; do not use this small synthetic
+experiment as proof of production quality. Section classification and
+chunk-policy comparison belong to 02C after this slice passes independent
+review. No retrieval-quality choice until 03B. Do not distribute model or
+runtime binaries without a separate distribution/license review.

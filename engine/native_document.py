@@ -61,7 +61,7 @@ def furniture_kind(item, document):
 
 def map_document(document, path, digest, profile, diagnostics=(), *,
                  text_representation='native-text'):
-    from docling_core.types.doc import ContentLayer, SectionHeaderItem, TableItem, TextItem
+    from docling_core.types.doc import ContentLayer, ListItem, SectionHeaderItem, TableItem, TextItem
 
     blocks, headings, issues = [], [], set(diagnostics)
     table_number = 0
@@ -107,17 +107,29 @@ def map_document(document, path, digest, profile, diagnostics=(), *,
                     'list_item': 'list_item'}.get(label, 'paragraph')
             if label not in ('page_header', 'page_footer'):
                 kind = furniture_kind(item, document) or kind
-            if isinstance(item, SectionHeaderItem) and layer == 'body':
+            # Docling removes list markers from text while retaining orig.
+            # Preserve its actual evidence, not an invented bullet or number.
+            if isinstance(item, ListItem) and item.orig != item.text:
+                text = item.orig
+                anchor = replace(anchor, representation=(
+                    'ocr-native-original-text' if text_representation == 'ocr-native-text'
+                    else 'native-original-text'))
+                if item.enumerated and locations:
+                    issues.add('numbered-list-heading-ambiguous')
+            clause = CLAUSE.match(text)
+            if clause and layer == 'body' and kind in ('heading', 'paragraph', 'list_item'):
+                if kind != 'paragraph':
+                    issues.add('native-clause-label-conflict')
+                kind = 'clause'
+            # Do not allow a misclassified requirement to become a section ancestor.
+            if kind == 'heading' and isinstance(item, SectionHeaderItem) and layer == 'body':
                 level = item.level
                 headings = [(k, v) for k, v in headings if k < level]
                 headings.append((level, text))
                 hierarchy = tuple(v for _, v in headings)
-            elif label == 'title' and layer == 'body':
+            elif kind == 'heading' and label == 'title' and layer == 'body':
                 headings = [(0, text)]
                 hierarchy = (text,)
-            clause = CLAUSE.match(text)
-            if clause and kind == 'paragraph':
-                kind = 'clause'
             blocks.append(ParsedBlock(path, digest, len(blocks), kind, text, None, hierarchy,
                                       clause=clause[1] if clause else None, page=page, bbox=bbox,
                                       native=replace(anchor, original_text=item.orig)))
@@ -127,8 +139,9 @@ def map_document(document, path, digest, profile, diagnostics=(), *,
             raise ValueError('native block bound')
     if sum(len(b.text) for b in blocks) > MAX_CHARS:
         raise ValueError('native text bound')
-    if not blocks:
+    meaningful = any(block.text.strip() for block in blocks)
+    status = 'partial' if issues else 'ok' if meaningful else 'empty'
+    if not meaningful:
         issues.add('no-extracted-text')
-    status = 'partial' if issues else 'ok'
     return ParsedDocument(path, digest, status, tuple(blocks), tuple(sorted(issues)),
                           extraction_profile=profile, page_count=len(document.pages) or None)
