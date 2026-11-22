@@ -1,6 +1,6 @@
 # ADR-0006: Obsidian-native Standalone baseline and explicit advanced execution profiles
 
-Status: Proposed — architecture-alignment candidate; effective only after independent SDD review and merge.
+Status: Accepted architectural baseline — independently reviewed and merged to develop in PR #9 (2026-11-22). Concrete runtime, storage, model packaging and host API selections remain conditional on later measured ADRs.
 
 ## Context and supersession
 
