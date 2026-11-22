@@ -1,6 +1,6 @@
 # OKS-03A — BGE-M3 real dense inference experiment
 
-**Status: candidate implementation and read-only artifact preflight; real model inference not executed, CAP-04 not accepted.** This is **not** an Obsidian-native search runtime, an installed model, CAP-05 retrieval, or permission to activate heavy inference. Consult [the execution contract](../../docs/prompts/OKS-03A.md) and [ADR-0006](../../docs/adr/0006-standalone-execution-profiles.md).
+**Status: candidate implementation and read-only artifact preflight; real model inference not yet executed at this checkpoint, CAP-04 not accepted.** This is **not** an Obsidian-native search runtime, an installed model, CAP-05 retrieval, or permission to activate heavy inference. Consult [the execution contract](../../docs/prompts/OKS-03A.md) and [ADR-0006](../../docs/adr/0006-standalone-execution-profiles.md).
 
 ## Local artifact preflight (metadata/hashes only)
 
@@ -24,10 +24,10 @@ On the ZenBook, an already locally cached BGE-M3 revision `5617a9f61b028005a4858
 
 The optional [guarded runner](../../scripts/run_embedding_bounded.py) performs SHA-256 preflight and Foundation cgroup resource admission, denies concurrent experimental scopes, sets 4 GiB process-tree memory, zero swap, two logical CPUs, a bounded timeout, task limit and a network-isolated Linux namespace. The inner worker rechecks effective kernel resource limits and offline interfaces **before** importing the model. All text is fixed, synthetic and not copied into result files. Results would contain aggregate CPU/RSS, vector dimension, norm and repeatability, runtime identity, and explicitly false standalone/hybrid implementation claims.
 
-Running it requires separately granted permission for **this heavy model experiment**, an approved resource envelope and a unique operator-owned output path outside the repository. In the absence of those gates, the code fails closed with `APPROVAL_REQUIRED`. The `--explicit-model-approval` switch is only the operator's technical acknowledgement **after** obtaining authorization, not a substitute for authorization.
+**The maintainer granted that specific permission on 2026-11-22**, as documented in [OKS-03A](../../docs/prompts/OKS-03A.md#maintainer-authorization--2026-11-22): only cached BGE-M3 CPU inference, <=4 GiB RAM process tree, <=2 logical CPUs, no swap/network, <=180 seconds, single managed job, synthetic data. Each attempt still requires a freshly verified resource preflight and a unique scratch output path outside the repo. In the absence of either authorization or host guards, the code fails closed with `APPROVAL_REQUIRED` or a guard failure. The `--explicit-model-approval` switch acknowledges this specific recorded authorization, not unlimited permission.
 
 ```sh
-# PROTOCOL ONLY — not authorized or executed in this slice:
+# AUTHORIZED envelope (2026-11-22); actual execution status must be measured separately:
 python3 -I -B scripts/run_embedding_bounded.py \
   --python "$PINNED_CPU_PYTHON" \
   --snapshot "$PINNED_BGE_M3_SNAPSHOT" \
