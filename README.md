@@ -6,7 +6,7 @@ OKS is a planned local-first hybrid search and retrieval plugin for Obsidian, de
 
 ## Project status
 
-Architecture / pre-alpha. No installable plugin or production search engine exists yet. The capabilities below are goals, not claims of implemented functionality.
+Pre-alpha. The repository includes a synthetic TypeScript-to-Python evidence probe and a measured, separate Python experimental engine; **neither is a standalone installable search plugin**. The target mandatory base is **Obsidian + OKS plugin only**, without additional software, network or manual runtime setup. Real search UI, native index and clean-install acceptance are not yet delivered.
 
 ## Goals
 
@@ -15,9 +15,17 @@ Architecture / pre-alpha. No installable plugin or production search engine exis
 - Use multilingual embeddings, lexical retrieval and rank fusion; evaluate local reranking.
 - Return inspectable, source-grounded evidence for users and AI agents.
 - Automatically maintain a rebuildable local index, without a second knowledge base.
-- Keep indexing and retrieval offline after explicit dependency/model provisioning.
+- Keep baseline Markdown lexical indexing and retrieval offline **without** dependency/model provisioning; advanced offline model capabilities require explicit, separately measured provisioning.
 
 Desktop Linux is the first supported target. Other desktop platforms and Obsidian Community Plugins distribution are later work, subject to packaging and policy verification.
+
+## Execution profiles (planned)
+
+- **Standalone (default, mandatory):** plugin-native Markdown lexical search, typed Properties and link metadata, source navigation, local index/freshness, offline with no Python/server/Ollama/Docker.
+- **Bundled Advanced (optional):** plugin-managed, licensed local processing/real embeddings, only if distribution/host/resource experiments pass.
+- **External Backend (optional):** explicitly configured authenticated local processing service, never required for Standalone; no source egress by default.
+
+Dense search and true hybrid lexical+dense retrieval remain separate capabilities. CAP-04/05 are still MVP-wide acceptance gates in a demonstrated local/offline advanced profile, not claims that Standalone already performs embeddings. See [ADR-0006](docs/adr/0006-standalone-execution-profiles.md) and the [roadmap](docs/ROADMAP.md).
 
 ## Project documentation
 
