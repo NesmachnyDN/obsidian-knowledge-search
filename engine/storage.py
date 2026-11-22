@@ -35,6 +35,8 @@ def identity_json(identity: dict) -> str:
 class Store:
     def __init__(self, cache: Path, source_root: Path, identity: dict):
         root = source_root
+        if not root.is_absolute() or str(root.resolve(strict=True)) != str(root):
+            raise ValueError('noncanonical root')
         root_stamp = root_identity(root)
         if not cache.is_absolute() or cache.parent.resolve(strict=True) != cache.parent:
             raise ValueError('noncanonical cache directory')
@@ -54,6 +56,20 @@ class Store:
         fingerprint = hashlib.sha256(json.dumps([str(root), *root_stamp]).encode()).hexdigest()
         self.identity = json.dumps([identity_json(identity), fingerprint])
         self.dimension = identity['dimension']
+        if cache.exists():
+            # Admission must precede writable opening, journal changes and DDL.
+            existing = sqlite3.connect(cache.as_uri() + '?mode=ro', uri=True, timeout=1)
+            try:
+                try:
+                    rows = existing.execute('SELECT generation, identity FROM manifest').fetchall()
+                except sqlite3.DatabaseError as error:
+                    raise ValueError('unbound or foreign cache') from error
+                if len(rows) != 1:
+                    raise ValueError('unbound or foreign cache')
+                if rows[0][1] != self.identity:
+                    raise ValueError('incompatible identity')
+            finally:
+                existing.close()
         self.db = sqlite3.connect(cache, timeout=1, isolation_level=None)
         try:
             self.db.execute('PRAGMA journal_mode=WAL')

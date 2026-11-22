@@ -14,7 +14,13 @@ root (one database and its SQLite sidecars only). Reject symlinks, nonregular
 files and multiply linked cache files/sidecars before SQLite opens them. Bind
 manifest identity to a local SHA-256 fingerprint of canonical source-root path,
 device and inode; reject cross-root reuse and replaced roots. The fingerprint
-is local metadata, never benchmark output. Existing unbound caches are rejected. This is a bounded prototype,
+is local metadata, never benchmark output. Existing foreign or unbound caches are rejected before journal or schema changes,
+without changing existing database or source bytes. This includes a newly created
+cache closed or interrupted before its first generation is published. Recovery
+requires the caller to stop all cache users, explicitly discard only the known
+derived cache database and its sidecars, and rebuild; opening never automatically
+deletes or adopts an unbound database. Source files must be preserved.
+This is a bounded prototype,
 not ingestion, embeddings or a production retrieval engine.
 
 Compare packed records with normalized SQLite coordinates on the same tiny exact

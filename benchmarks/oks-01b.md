@@ -17,8 +17,8 @@ Final candidate rerun: Python 3.12.3, SQLite 3.45.1, Ubuntu 24.04, systemd 255. 
 
 | Storage (32 records × 4 coordinates, 60 queries) | Bytes | Median ms | p95 ms |
 |---|---:|---:|---:|
-| Packed float32 | 36864 | 0.2152 | 0.4725 |
-| Normalized coordinates | 45056 | 0.2708 | 0.5502 |
+| Packed float32 | 36864 | 0.0887 | 0.1414 |
+| Normalized coordinates | 45056 | 0.1105 | 0.1719 |
 
 Both layouts use the same deterministic mathematical vectors, scoped exact scores
 and stable ties; the benchmark asserts parity. These are not embeddings. FTS5
@@ -26,13 +26,13 @@ availability and transaction recovery are also covered by acceptance tests.
 
 | Health IPC (20 messages) | Median ms | p95 ms | Total ms |
 |---|---:|---:|---:|
-| One-shot stdio (20 processes) | 20.6032 | 22.8321 | 418.631 |
-| Persistent stdio (1 process) | 0.0589 | 0.1476 | 21.453 including stop |
-| Authenticated isolated loopback (1 process) | 0.0493 | 0.1608 | 55.439 including stop |
+| One-shot stdio (20 processes) | 20.6648 | 21.639 | 416.105 |
+| Persistent stdio (1 process) | 0.0535 | 0.1901 | 20.87 including stop |
+| Authenticated isolated loopback (1 process) | 0.0496 | 0.122 | 56.854 including stop |
 
 Actual final host proof: PASS, kernel memory/swap/CPU/pids limits verified,
 both members of the transient process tree stopped and explicit restart proved
-in two cycles. Portable isolated Python regression: 34/34 passed; existing
+in two cycles. Portable isolated Python regression: 36/36 passed; existing
 TypeScript regression: 101/101 passed. Typecheck, dependency/license checks
 and build passed; no dependency or v1/plugin changes. Exact-head hosted CI
 and fresh independent review remain delivery gates.

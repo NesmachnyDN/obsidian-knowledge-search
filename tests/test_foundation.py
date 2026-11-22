@@ -36,6 +36,60 @@ class StorageTests(unittest.TestCase):
         self.addCleanup(self.store.close)
         self.store.publish(1, [record(), record('b', 'other')])
 
+    def test_double_slash_source_cannot_contain_cache(self):
+        directory = self.source / 'private-cache'
+        directory.mkdir(mode=0o700)
+        cache = directory / 'data.db'
+        alias = Path('/' + str(self.source))
+        self.assertEqual(alias.stat().st_ino, self.source.stat().st_ino)
+        self.assertNotEqual(str(alias), str(self.source))
+        with self.assertRaisesRegex(ValueError, 'noncanonical root'):
+            Store(cache, alias, IDENTITY)
+        self.assertFalse(cache.exists())
+        self.assertEqual(list(directory.iterdir()), [])
+        self.assertEqual((self.source / 'note').read_bytes(), b'synthetic')
+
+    def test_existing_unbound_cache_rejected_without_mutation(self):
+        for kind in ('empty', 'foreign', 'unpublished', 'crashed'):
+            with self.subTest(kind=kind):
+                directory = self.root / kind
+                directory.mkdir(mode=0o700)
+                cache = directory / 'data.db'
+                if kind == 'empty':
+                    cache.touch()
+                elif kind == 'foreign':
+                    with sqlite3.connect(cache) as db:
+                        db.execute('CREATE TABLE private_data (value TEXT)')
+                        db.execute("INSERT INTO private_data VALUES ('synthetic')")
+                elif kind == 'unpublished':
+                    Store(cache, self.source, IDENTITY).close()
+                else:
+                    import json
+                    code = ('import os,json,sys; from pathlib import Path; '
+                            'from engine.storage import Store; '
+                            's=Store(Path(sys.argv[1]),Path(sys.argv[2]),json.loads(sys.argv[3])); '
+                            'os._exit(0)')
+                    subprocess.run([sys.executable, '-B', '-c', code, str(cache),
+                                    str(self.source), json.dumps(IDENTITY)], check=True, timeout=3)
+                before = cache.read_bytes()
+                with self.assertRaisesRegex(ValueError, 'unbound or foreign'):
+                    Store(cache, self.source, IDENTITY)
+                self.assertEqual(cache.read_bytes(), before)
+                self.assertEqual((self.source / 'note').read_bytes(), b'synthetic')
+                # Explicitly discard only this known synthetic cache, then rebuild.
+                for entry in directory.iterdir():
+                    entry.unlink()
+                rebuilt = Store(cache, self.source, IDENTITY)
+                try:
+                    rebuilt.publish(1, [record()])
+                finally:
+                    rebuilt.close()
+                reopened = Store(cache, self.source, IDENTITY)
+                try:
+                    self.assertEqual(reopened.snapshot('allowed', {'a': HASH})[0], 1)
+                finally:
+                    reopened.close()
+
     def test_wrong_and_replaced_root(self):
         other = self.root / 'other'
         other.mkdir()
