@@ -1,0 +1,143 @@
+{
+  "packages": [
+    {
+      "declared_license": "BSD-3-Clause",
+      "installed_metadata_sha256": "040d6c84eddf29c8c14dc2aef214962a919803f557243824dd4f8aa3b49e3868",
+      "license_files": [
+        {
+          "name": "LICENSE",
+          "sha256": "f669d63bebf765baaa0b20d8b0c1193296a7e0ea0c22c50a308b74d76ab3939c"
+        }
+      ],
+      "package": "dill",
+      "version": "0.4.1"
+    },
+    {
+      "declared_license": "MIT",
+      "installed_metadata_sha256": "c69b78196acca5eab78a53a3cbbc20edcdebc30411cb9dd68d55abdfdb4caeec",
+      "license_files": [
+        {
+          "name": "LICENSE",
+          "sha256": "7234781681ef4f84b27f5d9da017bca154d597249d63e7706cd06d7cbdc94cce"
+        }
+      ],
+      "package": "mpire",
+      "version": "2.10.2"
+    },
+    {
+      "declared_license": "BSD-3-Clause",
+      "installed_metadata_sha256": "24146d46d724ce041d187426babb43dc5a6a4cd5d1acad0d7fc0d12693376fa5",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "4e693e45d442befb87c1f9d27e8d6b1566ee8ddac083d6f5c7c6829ba40878c9"
+        },
+        {
+          "name": "licenses/COPYING",
+          "sha256": "9f7ff27cb930d2c3202ee07e3d2d6146f4de676d069a33da3166c98cdba83a95"
+        }
+      ],
+      "package": "multiprocess",
+      "version": "0.70.19"
+    },
+    {
+      "declared_license": "BSD-2-Clause",
+      "installed_metadata_sha256": "1dde075570136774c706bf0009183a793fe0ee262e4a5590cc6eff8453eedd43",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "a9d66f1d526df02e29dce73436d34e56e8632f46c275bbdffc70569e882f9f17"
+        }
+      ],
+      "package": "Pygments",
+      "version": "2.21.0"
+    },
+    {
+      "declared_license": "MIT",
+      "installed_metadata_sha256": "729cb421070ad5c0aba18c5c9f21310fe6d65abc976f62f467f86f894096ecad",
+      "license_files": [
+        {
+          "name": "licenses/LICENCE",
+          "sha256": "cd3e4ebfa715a1e79e7f9514fce1891db178cc7e9370959f916146649f1869e4"
+        }
+      ],
+      "package": "semchunk",
+      "version": "3.2.5"
+    },
+    {
+      "declared_license": "MPL-2.0 AND MIT",
+      "installed_metadata_sha256": "a5da70b966afea3a759716041bad7187f2ece02c22348cf9e7c0a512bbf15f57",
+      "license_files": [
+        {
+          "name": "licenses/LICENCE",
+          "sha256": "fcff87c3a47ce8028a8512aa182d4fcf0ad1c90544ee75cf9b343684cac194de"
+        }
+      ],
+      "package": "tqdm",
+      "version": "4.70.1"
+    },
+    {
+      "declared_license": "upstream/installed notice",
+      "installed_metadata_sha256": "bb60fc85145769a68dd378efdc7d7f1d57d9765fad158eb49e973bb7ff1f904d",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "1af0790543fffac99dd3bd290bf83ca963f4f8029065eb6f35638f4df863ae8e"
+        }
+      ],
+      "package": "tree-sitter",
+      "version": "0.26.1"
+    },
+    {
+      "declared_license": "MIT",
+      "installed_metadata_sha256": "0f16a6a6b2a1a63967328f5267c53c35afe246d0b58d03b7164503b5f5b0356a",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        }
+      ],
+      "package": "tree-sitter-c",
+      "version": "0.24.2"
+    },
+    {
+      "declared_license": "MIT",
+      "installed_metadata_sha256": "2dbd765f4db4fa74c6305744a8c16b6ff610aabd387c90bce0bbf5eddbb1b13e",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        }
+      ],
+      "package": "tree-sitter-javascript",
+      "version": "0.25.0"
+    },
+    {
+      "declared_license": "MIT",
+      "installed_metadata_sha256": "cb8c4940e598c665118896cae65c3bc63b0f5a62ab82f5287b7887eabf66de92",
+      "license_files": [
+        {
+          "name": "licenses/LICENSE",
+          "sha256": "d724405ce238a22c0d35769c5a36b386ad5958192efe8bbb304fb2896254575f"
+        }
+      ],
+      "package": "tree-sitter-python",
+      "version": "0.25.0"
+    },
+    {
+      "declared_license": "MIT",
+      "installed_metadata_sha256": "06230729438f75aacf40f098f6a797890c0d33589250f698d1d0ddf7016e663f",
+      "license_files": [
+        {
+          "name": "LICENSE",
+          "sha256": "49bf33cf78ef5897e4e161ce1517df7de1ae5042a65b6bcfd44401e0fc606559"
+        }
+      ],
+      "package": "tree-sitter-typescript",
+      "version": "0.23.2"
+    }
+  ],
+  "platform": "Linux x86_64 CPython 3.12",
+  "purpose": "Only Docling chunking code extras, no new weights or tokenizer artifacts",
+  "source": "isolated temporary package target installed with uv; not redistributed"
+}

@@ -1,4 +1,8 @@
-# OKS-01A dependency and provenance review
+# Dependency and provenance review
+
+OKS-02C adds no redistributed binary or production inference runtime. It reuses the pinned OKS-02B isolated CPU environment and an explicitly provisioned tokenizer-only BGE-M3 snapshot. Optional native-chunking experiment libraries and their exact installed version/license/notice fingerprints are listed in [the 02C dependency inventory](../benchmarks/chunking/dependency-inventory.json), with the [tokenizer artifact SHA-256 manifest](../engine/tokenizer-artifacts.json). No embedding weights are provisioned or loaded by 02C. The 02C benchmark is run offline inside a dedicated network namespace under checked cgroup resource limits.
+
+## Historical OKS-01A package inventory
 
 All project implementation and synthetic fixtures were independently authored; no prior application code was copied. The official Obsidian SDK is used for types and externalized at runtime. All npm dependencies are development-only; the plugin bundle contains project code and host/built-in imports only. Python uses its installed standard library. Node, Python and the separately installed Obsidian app are operator-supplied runtimes, not redistributed here.
 
