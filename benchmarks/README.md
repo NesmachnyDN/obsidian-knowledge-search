@@ -15,3 +15,7 @@ Authorized private acceptance may run locally only, with sanitized aggregate res
 
 
 Before held-out testing, specify per-query relevance grades, counting unit (deduplicated source span), K, treatment of unanswerable queries, acceptable margins and pilot corpus size. Report paired per-query deltas, absolute counts and uncertainty where sample size supports it. Record extraction completeness against known generated source blocks; exact locator validity, lost/duplicate spans, table/requirement/definition coverage, actual token-count parity and prefix duplication separately. Capture index throughput, on-disk bytes, whole-process-tree peak memory/CPU, cancellation and restart/rebuild correctness. No model or incumbent baseline requiring confidential data or cloud egress is allowed. Missing required baseline evidence blocks adoption unless the maintainer explicitly revises the gate in a reviewed decision.
+
+## OKS-02A baseline
+
+See [frozen corpus v1](corpus/v1/README.md) and [baseline evidence](oks-02a.md). Run the synthetic-only benchmark with `python3 -I -B benchmarks/oks02a.py --split tuning` or `--split held_out`; the latter is for the frozen implementation evaluation, not tuning.
