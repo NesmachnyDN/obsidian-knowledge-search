@@ -97,7 +97,7 @@ def generate(directory):
     return {'version': 1, 'font_sha256': sha256(FONT.read_bytes()).hexdigest(),
             'expectations_sha256': sha256((ROOT / 'expected.json').read_bytes()).hexdigest(),
             'sources': {p.name: {'sha256': sha256(p.read_bytes()).hexdigest(), 'bytes': p.stat().st_size}
-                        for p in sorted(directory.iterdir()) if p.is_file()}}
+                        for p in sorted(directory.iterdir()) if p.is_file() and p.suffix in {'.pdf', '.docx'}}}
 
 
 if __name__ == '__main__':
