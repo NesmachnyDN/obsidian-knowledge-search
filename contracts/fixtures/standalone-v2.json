@@ -1,0 +1,266 @@
+{
+  "version": "oks-04a-lexical-contract-v1",
+  "cases": [
+    {
+      "path": "unicode-crlf.md",
+      "text": "---\r\nversion: 1\r\nactive: true\r\ntags: [\"1\",1,true,null]\r\n---\r\n# Раздел 🚀\r\n## API\r\nREQ-X-1: PATCH /v2/items сохраняет запись.\r\nSee [[linked|Alias]].\r\n",
+      "sha256": "90f3910abc3b752d9cd38b4f83509855386f1279162cde185d518ec473d37f43",
+      "blocks": [
+        {
+          "kind": "property",
+          "text": "---",
+          "lineStart": 1,
+          "byteStart": 0,
+          "byteEnd": 3,
+          "charStart": 0,
+          "charEnd": 3,
+          "headings": [],
+          "wikiLinks": []
+        },
+        {
+          "kind": "property",
+          "text": "version: 1",
+          "lineStart": 2,
+          "byteStart": 5,
+          "byteEnd": 15,
+          "charStart": 5,
+          "charEnd": 15,
+          "headings": [],
+          "wikiLinks": []
+        },
+        {
+          "kind": "property",
+          "text": "active: true",
+          "lineStart": 3,
+          "byteStart": 17,
+          "byteEnd": 29,
+          "charStart": 17,
+          "charEnd": 29,
+          "headings": [],
+          "wikiLinks": []
+        },
+        {
+          "kind": "property",
+          "text": "tags: [\"1\",1,true,null]",
+          "lineStart": 4,
+          "byteStart": 31,
+          "byteEnd": 54,
+          "charStart": 31,
+          "charEnd": 54,
+          "headings": [],
+          "wikiLinks": []
+        },
+        {
+          "kind": "property",
+          "text": "---",
+          "lineStart": 5,
+          "byteStart": 56,
+          "byteEnd": 59,
+          "charStart": 56,
+          "charEnd": 59,
+          "headings": [],
+          "wikiLinks": []
+        },
+        {
+          "kind": "heading",
+          "text": "# Раздел 🚀",
+          "lineStart": 6,
+          "byteStart": 61,
+          "byteEnd": 80,
+          "charStart": 61,
+          "charEnd": 71,
+          "headings": [
+            "Раздел 🚀"
+          ],
+          "wikiLinks": []
+        },
+        {
+          "kind": "heading",
+          "text": "## API",
+          "lineStart": 7,
+          "byteStart": 82,
+          "byteEnd": 88,
+          "charStart": 73,
+          "charEnd": 79,
+          "headings": [
+            "Раздел 🚀",
+            "API"
+          ],
+          "wikiLinks": []
+        },
+        {
+          "kind": "clause",
+          "text": "REQ-X-1: PATCH /v2/items сохраняет запись.",
+          "lineStart": 8,
+          "byteStart": 90,
+          "byteEnd": 147,
+          "charStart": 81,
+          "charEnd": 123,
+          "headings": [
+            "Раздел 🚀",
+            "API"
+          ],
+          "wikiLinks": []
+        },
+        {
+          "kind": "paragraph",
+          "text": "See [[linked|Alias]].",
+          "lineStart": 9,
+          "byteStart": 149,
+          "byteEnd": 170,
+          "charStart": 125,
+          "charEnd": 146,
+          "headings": [
+            "Раздел 🚀",
+            "API"
+          ],
+          "wikiLinks": [
+            "linked|Alias"
+          ]
+        }
+      ],
+      "referenceParserStatus": "ok",
+      "nativeExtractionStatus": "ok",
+      "invalidTypedProperties": false
+    },
+    {
+      "path": "duplicate-headings.md",
+      "text": "# Decision\n## Again\n# Decision\nREQ-T-2: stable\n",
+      "sha256": "b63a643f75f939f5a876f4ac4d5496d485d3c90228106713fff7abdcfcbfa01b",
+      "blocks": [
+        {
+          "kind": "heading",
+          "text": "# Decision",
+          "lineStart": 1,
+          "byteStart": 0,
+          "byteEnd": 10,
+          "charStart": 0,
+          "charEnd": 10,
+          "headings": [
+            "Decision"
+          ],
+          "wikiLinks": []
+        },
+        {
+          "kind": "heading",
+          "text": "## Again",
+          "lineStart": 2,
+          "byteStart": 11,
+          "byteEnd": 19,
+          "charStart": 11,
+          "charEnd": 19,
+          "headings": [
+            "Decision",
+            "Again"
+          ],
+          "wikiLinks": []
+        },
+        {
+          "kind": "heading",
+          "text": "# Decision",
+          "lineStart": 3,
+          "byteStart": 20,
+          "byteEnd": 30,
+          "charStart": 20,
+          "charEnd": 30,
+          "headings": [
+            "Decision"
+          ],
+          "wikiLinks": []
+        },
+        {
+          "kind": "clause",
+          "text": "REQ-T-2: stable",
+          "lineStart": 4,
+          "byteStart": 31,
+          "byteEnd": 46,
+          "charStart": 31,
+          "charEnd": 46,
+          "headings": [
+            "Decision"
+          ],
+          "wikiLinks": []
+        }
+      ],
+      "referenceParserStatus": "ok",
+      "nativeExtractionStatus": "ok",
+      "invalidTypedProperties": false
+    },
+    {
+      "path": "empty.md",
+      "text": "",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "blocks": [],
+      "referenceParserStatus": "empty",
+      "nativeExtractionStatus": "empty",
+      "invalidTypedProperties": false
+    },
+    {
+      "path": "invalid-front.md",
+      "text": "---\nversion: 1\nversion: \"1\"\n---\n# malformed\n",
+      "sha256": "79aa1b635397ec24dfe074c76fe3227e3a9c5f85fb91c3c5941a16f3b8f7bf0c",
+      "blocks": [
+        {
+          "kind": "property",
+          "text": "---",
+          "lineStart": 1,
+          "byteStart": 0,
+          "byteEnd": 3,
+          "charStart": 0,
+          "charEnd": 3,
+          "headings": [],
+          "wikiLinks": []
+        },
+        {
+          "kind": "property",
+          "text": "version: 1",
+          "lineStart": 2,
+          "byteStart": 4,
+          "byteEnd": 14,
+          "charStart": 4,
+          "charEnd": 14,
+          "headings": [],
+          "wikiLinks": []
+        },
+        {
+          "kind": "property",
+          "text": "version: \"1\"",
+          "lineStart": 3,
+          "byteStart": 15,
+          "byteEnd": 27,
+          "charStart": 15,
+          "charEnd": 27,
+          "headings": [],
+          "wikiLinks": []
+        },
+        {
+          "kind": "property",
+          "text": "---",
+          "lineStart": 4,
+          "byteStart": 28,
+          "byteEnd": 31,
+          "charStart": 28,
+          "charEnd": 31,
+          "headings": [],
+          "wikiLinks": []
+        },
+        {
+          "kind": "heading",
+          "text": "# malformed",
+          "lineStart": 5,
+          "byteStart": 32,
+          "byteEnd": 43,
+          "charStart": 32,
+          "charEnd": 43,
+          "headings": [
+            "malformed"
+          ],
+          "wikiLinks": []
+        }
+      ],
+      "referenceParserStatus": "ok",
+      "nativeExtractionStatus": "partial",
+      "invalidTypedProperties": true
+    }
+  ]
+}

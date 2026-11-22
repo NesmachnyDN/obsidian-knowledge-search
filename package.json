@@ -8,6 +8,7 @@
     "build": "node scripts/build.mjs",
     "test": "node scripts/test.mjs",
     "test:python": "python3 -I -B -m unittest discover -s tests -p 'test_*.py'",
+    "benchmark:standalone": "node scripts/standalone-benchmark.mjs",
     "licenses": "node scripts/licenses.mjs"
   },
   "devDependencies": {
