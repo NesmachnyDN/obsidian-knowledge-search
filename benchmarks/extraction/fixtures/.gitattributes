@@ -1,0 +1,3 @@
+# Generated binary source fixtures; preserve exact frozen bytes.
+*.pdf binary
+*.docx binary
