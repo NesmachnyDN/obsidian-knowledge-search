@@ -5,7 +5,8 @@ No persistent index, fake dense records, network, or query-language execution.
 import re
 import sqlite3
 
-from engine.document import ParsedBlock, ParsedDocument, physical_lines
+from engine.document import ParsedBlock, ParsedDocument
+from engine.markdown import parse_markdown
 from engine.scope import ScopedReader
 
 MAX_BLOCKS = 8192
@@ -41,15 +42,15 @@ class LexicalIndex:
                 source = reader.read(doc.path)
                 if source.digest != doc.digest:
                     raise ValueError('stale source')
-                originals = list(physical_lines(source.data))
-                if len(originals) != len(doc.blocks):
-                    raise ValueError('incomplete line coverage')
-                for order, (block, (span, raw)) in enumerate(zip(doc.blocks, originals)):
-                    if (block.path != doc.path or block.digest != doc.digest
-                            or block.order != order or block.span != span
-                            or block.text.encode() != raw):
-                        raise ValueError('inconsistent source or locator')
-                    if block.kind in EXCLUDED:
+                # This baseline accepts only Markdown canonicalization. Validate
+                # all derived metadata (not just line text), including cell spans,
+                # hierarchy, document status and diagnostics, against actual bytes.
+                if parse_markdown(doc.path, source.data) != doc:
+                    raise ValueError('inconsistent canonical Markdown or locator')
+                malformed_front = 'unterminated-front-matter' in doc.diagnostics
+                for block in doc.blocks:
+                    if block.kind in EXCLUDED and not (
+                            block.kind == 'property' and malformed_front):
                         continue
                     terms = _terms(' '.join((*block.headings, block.text)))
                     if not terms:

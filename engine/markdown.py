@@ -12,6 +12,8 @@ LIST = re.compile(r'^\s*(?:[-+*]|\d+[.)])\s+')
 PROPERTY = re.compile(r'^([A-Za-z_][\w-]*):[ \t]*(.*)$')
 SEPARATOR = re.compile(r'\s*:?-{3,}:?\s*')
 LINK = re.compile(r'\[\[([^\]\n]+)\]\]')
+FENCE = re.compile(r'^ {0,3}(`{3,}|~{3,})(.*)$')
+SETEXT = re.compile(r'^ {0,3}(?:=+|-+)[ \t]*$')
 
 
 def _cells(text: str, span: Span) -> tuple[Cell, ...]:
@@ -47,6 +49,8 @@ def parse_markdown(path: str, data: bytes) -> ParsedDocument:
     front_closed = not front
     table = row = 0
     in_table = False
+    table_columns = 0
+    table_has_separator = False
     fence = None
     for span, raw_line in lines:
         n, text = span.line_start, raw_line.decode('utf-8')
@@ -67,12 +71,19 @@ def parse_markdown(path: str, data: bytes) -> ParsedDocument:
                 diagnostics.add('unsupported-front-matter')
                 # Keep malformed payload as ordinary evidence, not parsed metadata.
         if not front and kind == 'paragraph':
-            if text.startswith(('```', '~~~')):
-                marker = text[:3]
-                fence = None if fence == marker else marker if fence is None else fence
+            marker = FENCE.fullmatch(text)
+            if fence:
+                if (marker and marker[1][0] == fence[0]
+                        and len(marker[1]) >= len(fence) and not marker[2].strip()):
+                    fence = None
+                # Unsupported code is retained literally, never structural Markdown.
+            elif marker:
+                fence = marker[1]
                 diagnostics.add('fenced-content-literal')
-            elif fence:
-                pass
+            elif text.startswith(('    ', '\t')):
+                diagnostics.add('unsupported-markup-literal')
+            elif SETEXT.fullmatch(text) and blocks and blocks[-1].kind == 'paragraph':
+                diagnostics.add('unsupported-setext-heading')
             elif match := HEADING.match(text):
                 level, label = len(match[1]), match[2]
                 headings = [(k, h) for k, h in headings if k < level]
@@ -88,20 +99,31 @@ def parse_markdown(path: str, data: bytes) -> ParsedDocument:
                     diagnostics.add('unsupported-table-syntax')
             elif LIST.match(text):
                 kind = 'list_item'
-            elif re.search(r'<[A-Za-z!/]', text) or text.startswith(('>', '    ', '\t')):
+            elif re.search(r'<[A-Za-z!/]', text) or text.startswith('>'):
                 diagnostics.add('unsupported-markup-literal')
         if kind in ('table_row', 'table_separator'):
             if not in_table:
                 table, row, in_table = table + 1, 0, True
+                table_columns, table_has_separator = len(cells), False
             if kind == 'table_row':
                 row += 1
+                if len(cells) != table_columns or (row > 1 and not table_has_separator):
+                    diagnostics.add('unsupported-table-structure')
+            elif row != 1 or table_has_separator or len(cells) != table_columns:
+                diagnostics.add('unsupported-table-structure')
+            else:
+                table_has_separator = True
         else:
+            if in_table and not table_has_separator:
+                diagnostics.add('unsupported-table-structure')
             in_table = False
         blocks.append(ParsedBlock(path, digest, len(blocks), kind, text, span,
                                   tuple(h for _, h in headings), cells,
                                   table if in_table else None,
                                   row if kind == 'table_row' else None, clause,
                                   tuple(LINK.findall(text))))
+    if in_table and not table_has_separator:
+        diagnostics.add('unsupported-table-structure')
     if not front_closed:
         diagnostics.add('unterminated-front-matter')
         properties = []  # Never expose malformed values as authoritative metadata.

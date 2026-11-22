@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from benchmarks.corpus_v1 import ROOT, validate
 from benchmarks.lexical_metrics import metrics
 from benchmarks.oks02a import run
+from engine.document import Span
 from engine.lexical import LexicalIndex
 from engine.markdown import MAX_BYTES, parse_markdown, read_markdown
 from engine.scope import ScopedReader
@@ -41,6 +42,30 @@ class DocumentTest(unittest.TestCase):
         self.assertEqual(doc.blocks[-1].text, 'no close')
         self.assertEqual(parse_markdown('x.md', b'```\n# literal').status, 'partial')
         self.assertEqual(parse_markdown('x.md', b'| a\\|b |').status, 'partial')
+
+    def test_fences_do_not_create_headings(self):
+        data = (b'# Outer\n  ~~~~ code\n# literal\n  ~~~\n'
+                b'## still literal\n  ~~~~\n## Real\ntext')
+        doc = parse_markdown('x.md', data)
+        self.assertEqual(doc.status, 'partial')
+        self.assertEqual(doc.diagnostics, ('fenced-content-literal',))
+        self.assertEqual([b.text for b in doc.blocks if b.kind == 'heading'],
+                         ['# Outer', '## Real'])
+        self.assertEqual(doc.blocks[4].headings, ('Outer',))
+        self.assertEqual(doc.blocks[-1].headings, ('Outer', 'Real'))
+
+    def test_unsupported_structures_are_diagnosed(self):
+        for data, diagnostic in (
+                (b'| standalone |', 'unsupported-table-structure'),
+                (b'| a | b |\n| --- |\n| c |', 'unsupported-table-structure'),
+                (b'| a | b |\n| --- | --- |\n| c |', 'unsupported-table-structure'),
+                (b'Title\n=====', 'unsupported-setext-heading')):
+            with self.subTest(data=data):
+                doc = parse_markdown('x.md', data)
+                self.assertEqual(doc.status, 'partial')
+                self.assertIn(diagnostic, doc.diagnostics)
+                for block in doc.blocks:
+                    self.assertEqual(data[block.span.start:block.span.end], block.text.encode())
 
     def test_failure_and_empty(self):
         for data in (b'\xff', b'abc\x00', b'x' * (MAX_BYTES + 1)):
@@ -106,6 +131,31 @@ class LexicalTest(unittest.TestCase):
             LexicalIndex(self.reader, (dataclasses.replace(doc, blocks=(forged, *doc.blocks[1:])),))
         with self.assertRaises(ValueError):
             LexicalIndex(self.reader, (dataclasses.replace(doc, blocks=doc.blocks[:1]),))
+
+    def test_malformed_front_matter_remains_searchable(self):
+        (self.root / 'bad.md').write_bytes(b'---\nrequirement: Encrypt payload\n')
+        (self.root / 'good.md').write_bytes(b'---\nproperty: Encrypt payload\n---\n# Title')
+        docs = tuple(read_markdown(self.reader, name) for name in ('bad.md', 'good.md'))
+        self.assertEqual(docs[0].status, 'partial')
+        self.assertEqual(docs[0].properties, ())
+        self.assertEqual(docs[1].status, 'ok')
+        with_index = LexicalIndex(self.reader, docs)
+        self.addCleanup(with_index.close)
+        self.assertEqual([(b.path, b.text) for b in with_index.search('encrypt')],
+                         [('bad.md', 'requirement: Encrypt payload')])
+
+    def test_rejects_forged_cell_and_heading_provenance(self):
+        (self.root / 'table.md').write_bytes(b'| Name | Value |\n| --- | --- |\n| Alice | 12 |')
+        doc = read_markdown(self.reader, 'table.md')
+        row = doc.blocks[-1]
+        cell = dataclasses.replace(row.cells[0], text='fabricated', span=Span(0, 1, 1, 1))
+        for forged in (dataclasses.replace(row, cells=(cell, *row.cells[1:])),
+                       dataclasses.replace(row, headings=('fabricated',)),
+                       dataclasses.replace(row, page=99),
+                       dataclasses.replace(row, kind='property')):
+            with self.subTest(forged=forged), self.assertRaises(ValueError):
+                LexicalIndex(self.reader, (dataclasses.replace(
+                    doc, blocks=(*doc.blocks[:-1], forged)),))
 
     def test_manifest_rejects_mutation(self):
         import shutil

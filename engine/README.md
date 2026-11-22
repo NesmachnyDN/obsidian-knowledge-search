@@ -30,7 +30,7 @@ path/order ties; no stemming, synonyms or semantic negation. No vector
 records or persistent storage changes: the Foundation storage prototype requires
 dense vectors, which this phase cannot honestly supply. The baseline uses the
 existing descriptor-relative scoped reader, verifies original line/byte evidence
-against the current source on construction and suppresses stale/deleted sources
+against the current source on construction, including cell provenance and derived\nMarkdown structure via bounded revalidation, and suppresses stale/deleted sources
 before returning hits. Bounds: 128 sources, 8192 blocks, 8192 bytes/source,
 512 query bytes, 50 results. A trusted caller controls sources; it is not an
 OS sandbox or an integrated plugin search command.
