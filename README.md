@@ -28,6 +28,7 @@ Desktop Linux is the first supported target. Other desktop platforms and Obsidia
 - [Benchmark protocol](benchmarks/README.md)
 - [Reuse assessment](docs/REUSE.md)
 - [Contributor guide](CONTRIBUTING.md)
+- [Spec-driven development workflow](docs/development/SDD.md)
 - [Security and privacy](SECURITY.md)
 
 ## Repository layout
