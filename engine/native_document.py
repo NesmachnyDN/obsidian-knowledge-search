@@ -60,7 +60,7 @@ def furniture_kind(item, document):
 
 
 def map_document(document, path, digest, profile, diagnostics=(), *,
-                 text_representation='native-text'):
+                 require_page_anchors: bool, text_representation='native-text'):
     from docling_core.types.doc import ContentLayer, ListItem, SectionHeaderItem, TableItem, TextItem
 
     blocks, headings, issues = [], [], set(diagnostics)
@@ -71,6 +71,13 @@ def map_document(document, path, digest, profile, diagnostics=(), *,
         layer = item.content_layer.value
         label = item.label.value
         locations = _locations(item, document)
+        # PDF text and tables require page provenance; unlike DOCX, an
+        # unlocated item is incomplete source evidence, even if text survived.
+        if require_page_anchors and not locations and (
+            isinstance(item, TextItem) and bool(item.text.strip())
+            or isinstance(item, TableItem) and any(c.text.strip() for c in item.data.table_cells)
+        ):
+            issues.add('native-page-location-missing')
         anchor = NativeAnchor(ref, layer, text_representation, locations)
         page = locations[0].page if len(locations) == 1 else None
         bbox = locations[0].bbox if len(locations) == 1 else None

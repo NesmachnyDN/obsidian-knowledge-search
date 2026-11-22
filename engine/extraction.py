@@ -109,7 +109,7 @@ def _docling(data, path, digest, profile, artifacts=None, tessdata=None):
         if not {'page_header', 'page_footer'} <= labels:
             diagnostics.append('docx-furniture-not-fully-classified')
     return map_document(result.document, path, digest, profile, diagnostics,
-                        text_representation=('ocr-native-text' if profile == STRUCTURED_SCAN
+                        require_page_anchors=(profile != DOCX), text_representation=('ocr-native-text' if profile == STRUCTURED_SCAN
                                              else 'native-text'))
 
 

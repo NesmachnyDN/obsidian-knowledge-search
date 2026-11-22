@@ -91,6 +91,7 @@ def extract_scan(data, path, digest, profile, tessdata):
                 page.close()
     finally:
         pdf.close()
-    return ParsedDocument(path, digest, 'partial' if blocks else 'failed', tuple(blocks),
+    # A successfully processed document without OCR text is empty, not failed.
+    return ParsedDocument(path, digest, 'partial' if blocks else 'empty', tuple(blocks),
                           tuple(sorted(issues if blocks else issues | {'no-extracted-text'})),
                           extraction_profile=profile, page_count=count)

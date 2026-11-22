@@ -54,7 +54,8 @@ class ExtractionIntegration(unittest.TestCase):
         doc.add_heading(text='Section', level=1)
         doc.add_heading(text='REQ-SYN-100: Keep evidence.', level=2)
         doc.add_list_item(text='Evidence', orig='2. Evidence', marker='2.', enumerated=True)
-        parsed = map_document(doc, 'synthetic.pdf', 'digest', STRUCTURED_PDF)
+        parsed = map_document(doc, 'synthetic.pdf', 'digest', STRUCTURED_PDF,
+                              require_page_anchors=False)
         self.assertEqual(parsed.status, 'partial')
         self.assertIn('native-clause-label-conflict', parsed.diagnostics)
         self.assertEqual(parsed.blocks[1].kind, 'clause')
@@ -62,6 +63,40 @@ class ExtractionIntegration(unittest.TestCase):
         self.assertEqual(parsed.blocks[2].headings, ('Section',))
         self.assertEqual(parsed.blocks[2].text, '2. Evidence')
         self.assertEqual(parsed.blocks[2].native.representation, 'native-original-text')
+
+    def test_structured_pdf_missing_page_location_is_partial(self):
+        from docling_core.types.doc import DocItemLabel, DoclingDocument
+        from engine.native_document import map_document
+        document = DoclingDocument(name='synthetic')
+        document.add_text(label=DocItemLabel.TEXT, text='Unlocated evidence')
+        parsed = map_document(document, 'unlocated.pdf', 'digest', STRUCTURED_PDF,
+                              require_page_anchors=True)
+        self.assertEqual(parsed.status, 'partial')
+        self.assertIn('native-page-location-missing', parsed.diagnostics)
+        self.assertEqual(parsed.blocks[0].text, 'Unlocated evidence')
+        self.assertFalse(parsed.blocks[0].native.locations)
+
+    def test_blank_scanned_pdf_is_empty_not_failed(self):
+        from pypdf import PdfWriter
+        from unittest.mock import patch
+        from engine.extraction import OCR
+        output = BytesIO()
+        writer = PdfWriter()
+        writer.add_blank_page(width=300, height=200)
+        writer.write(output)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'blank.pdf').write_bytes(output.getvalue())
+            reader = ScopedReader(root)
+            try:
+                with patch('engine.ocr._lines', return_value=iter(())):
+                    parsed = extract(reader, 'blank.pdf', OCR, tessdata=root)
+                self.assertEqual(parsed.status, 'empty')
+                self.assertEqual(parsed.page_count, 1)
+                self.assertEqual(parsed.blocks, ())
+                self.assertIn('no-extracted-text', parsed.diagnostics)
+            finally:
+                reader.close()
 
     def test_empty_native_document_is_explicit(self):
         from docx import Document
@@ -73,6 +108,31 @@ class ExtractionIntegration(unittest.TestCase):
                 doc = extract(reader, 'empty.docx', DOCX)
                 self.assertEqual(doc.status, 'empty')
                 self.assertIn('no-extracted-text', doc.diagnostics)
+            finally:
+                reader.close()
+
+    def test_archive_expansion_and_pdf_page_bounds(self):
+        from pypdf import PdfWriter
+        from zipfile import ZIP_DEFLATED
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reader = ScopedReader(root)
+            try:
+                zip_bytes = BytesIO()
+                with ZipFile(zip_bytes, 'w', compression=ZIP_DEFLATED) as archive:
+                    archive.writestr('[Content_Types].xml', b'<Types/>')
+                    archive.writestr('word/document.xml', b'<document/>')
+                    archive.writestr('word/expanded.xml', b'A' * (8 * 1024 * 1024 + 1))
+                (root / 'bomb.docx').write_bytes(zip_bytes.getvalue())
+                self.assertLess(len(zip_bytes.getvalue()), 65536)
+                self.assertEqual(extract(reader, 'bomb.docx', DOCX).status, 'failed')
+                writer = PdfWriter()
+                for _ in range(9):
+                    writer.add_blank_page(width=300, height=200)
+                output = BytesIO()
+                writer.write(output)
+                (root / 'long.pdf').write_bytes(output.getvalue())
+                self.assertEqual(extract(reader, 'long.pdf', PDF).status, 'failed')
             finally:
                 reader.close()
 

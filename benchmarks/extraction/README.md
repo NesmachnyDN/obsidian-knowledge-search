@@ -192,3 +192,26 @@ documented unresolved semantic classification limitation. Decision acceptance
 and V02B-05 require a fresh independent full-diff review and exact-head hosted
 checks. No chunking, retrieval policy, production deployment or phase closure
 is asserted by these measurements.
+
+## Review remediation and unchanged semantic results
+
+An independent review of PR #6 at `babee8eddeec57ebd5df65c90d027772c2ace57f`
+identified two status/provenance defects: an OCR pass with no recognized text
+reported `failed` instead of `empty`, and a PDF text item lacking a native page
+location could report `ok`. The remediation classifies successful but textless
+OCR as `empty` and makes PDF source-location completeness an explicit `partial`
+diagnostic. DOCX remains exempt from page coordinates it does not possess.
+Regression tests also exercise ZIP expansion and PDF page-count rejection.
+
+The post-fix independent review gate is **still required**. Local checks passed:
+101 TypeScript tests, 53 Python tests, typecheck, build, licenses, and seven
+isolated extraction integration tests. Both bounded structured extractions were
+rerun after the fixes. All semantic result fields (including extraction status,
+text, headings, cells, geometry, source/model/oracle SHA-256, diagnostic labels
+and native locations) matched the original published final JSON exactly.
+The new PDF run measured 11.221 s / 826761216 cgroup peak bytes; the scan
+measured 10.268 s / 770297856 bytes. These are additional single observations,
+not replacements for the originally published run JSON or confidence intervals.
+Both 02A splits reproduced config, corpus/judgment/manifest identity, all
+per-query ranks, structure and aggregate metrics with zero deterministic changes.
+The unresolved Russian numbered heading remains 2/3 native heading coverage.

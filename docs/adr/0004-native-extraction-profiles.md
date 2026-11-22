@@ -70,9 +70,12 @@ Peak charged cgroup memory was 794161152 and 770428928 bytes for the final
 PDF and scan runs, respectively, below the 4 GiB admitted limit. Wall times
 were 11.186 and 10.291 seconds. See the linked measured report for full
 reproducibility, source/weight hashes, dependencies and exact limitations.
-Model classification and reading order remain fallible. Keep native source
-anchors distinct from derived context; do not use this small synthetic
-experiment as proof of production quality. Section classification and
-chunk-policy comparison belong to 02C after this slice passes independent
-review. No retrieval-quality choice until 03B. Do not distribute model or
+Model classification and reading order remain fallible. PDF text or table
+content without a native page location is diagnosed as `partial`, not presented
+as verified `ok` evidence; DOCX page geometry remains unavailable by design.
+A completed OCR run with no recognized text reports `empty`, while conversion
+exceptions report `failed`. Keep native source anchors distinct from derived
+context; do not use this small synthetic experiment as proof of production
+quality. Section classification and chunk-policy comparison belong to 02C
+after this slice passes independent review. No retrieval-quality choice until 03B. Do not distribute model or
 runtime binaries without a separate distribution/license review.
