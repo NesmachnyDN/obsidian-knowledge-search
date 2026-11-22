@@ -1,0 +1,590 @@
+{
+  "blocks": 11,
+  "blocks_detail": [
+    {
+      "cells": [],
+      "clause": null,
+      "headings": [],
+      "kind": "page_header",
+      "layer": "furniture",
+      "locations": [
+        {
+          "bbox": [
+            50.0,
+            817.597656,
+            135.620118,
+            807.597656
+          ],
+          "char_span": [
+            0,
+            16
+          ],
+          "origin": "BOTTOMLEFT",
+          "page": 1
+        }
+      ],
+      "page": 1,
+      "ref": "#/texts/0",
+      "representation": "native-text",
+      "text": "Synthetic header"
+    },
+    {
+      "cells": [],
+      "clause": null,
+      "headings": [
+        "Synthetic control policy"
+      ],
+      "kind": "heading",
+      "layer": "body",
+      "locations": [
+        {
+          "bbox": [
+            50.0,
+            775.195312,
+            285.78124800000006,
+            755.195312
+          ],
+          "char_span": [
+            0,
+            24
+          ],
+          "origin": "BOTTOMLEFT",
+          "page": 1
+        }
+      ],
+      "page": 1,
+      "ref": "#/texts/1",
+      "representation": "native-text",
+      "text": "Synthetic control policy"
+    },
+    {
+      "cells": [],
+      "clause": null,
+      "headings": [
+        "1. Storage"
+      ],
+      "kind": "heading",
+      "layer": "body",
+      "locations": [
+        {
+          "bbox": [
+            50.0,
+            732.1562496,
+            132.95312479999998,
+            716.1562496
+          ],
+          "char_span": [
+            0,
+            10
+          ],
+          "origin": "BOTTOMLEFT",
+          "page": 1
+        }
+      ],
+      "page": 1,
+      "ref": "#/texts/2",
+      "representation": "native-text",
+      "text": "1. Storage"
+    },
+    {
+      "cells": [],
+      "clause": "REQ-EX-101",
+      "headings": [
+        "REQ-EX-101: Retain records for 30 days."
+      ],
+      "kind": "heading",
+      "layer": "body",
+      "locations": [
+        {
+          "bbox": [
+            50.0,
+            699.1171872,
+            293.53320440000005,
+            687.1171872
+          ],
+          "char_span": [
+            0,
+            39
+          ],
+          "origin": "BOTTOMLEFT",
+          "page": 1
+        }
+      ],
+      "page": 1,
+      "ref": "#/texts/3",
+      "representation": "native-text",
+      "text": "REQ-EX-101: Retain records for 30 days."
+    },
+    {
+      "cells": [
+        {
+          "bbox": [
+            55.0,
+            199.8828128,
+            98.6406244,
+            211.8828128
+          ],
+          "col_range": [
+            0,
+            1
+          ],
+          "origin": "TOPLEFT",
+          "row_range": [
+            0,
+            1
+          ],
+          "text": "Control"
+        },
+        {
+          "bbox": [
+            205.0,
+            199.8828128,
+            234.74804559999998,
+            211.8828128
+          ],
+          "col_range": [
+            1,
+            2
+          ],
+          "origin": "TOPLEFT",
+          "row_range": [
+            0,
+            1
+          ],
+          "text": "Limit"
+        }
+      ],
+      "clause": null,
+      "headings": [
+        "REQ-EX-101: Retain records for 30 days."
+      ],
+      "kind": "table_row",
+      "layer": "body",
+      "locations": [
+        {
+          "bbox": [
+            48.57489776611328,
+            650.5943756103516,
+            350.4312438964844,
+            599.4998474121094
+          ],
+          "char_span": [
+            0,
+            0
+          ],
+          "origin": "BOTTOMLEFT",
+          "page": 1
+        }
+      ],
+      "page": 1,
+      "ref": "#/tables/0",
+      "representation": "table-cell-serialization",
+      "text": "Control | Limit"
+    },
+    {
+      "cells": [
+        {
+          "bbox": [
+            55.0,
+            224.8828128,
+            113.40039039999999,
+            236.8828128
+          ],
+          "col_range": [
+            0,
+            1
+          ],
+          "origin": "TOPLEFT",
+          "row_range": [
+            1,
+            2
+          ],
+          "text": "Retention"
+        },
+        {
+          "bbox": [
+            205.0,
+            224.8828128,
+            252.40820440000005,
+            236.8828128
+          ],
+          "col_range": [
+            1,
+            2
+          ],
+          "origin": "TOPLEFT",
+          "row_range": [
+            1,
+            2
+          ],
+          "text": "30 days"
+        }
+      ],
+      "clause": null,
+      "headings": [
+        "REQ-EX-101: Retain records for 30 days."
+      ],
+      "kind": "table_row",
+      "layer": "body",
+      "locations": [
+        {
+          "bbox": [
+            48.57489776611328,
+            650.5943756103516,
+            350.4312438964844,
+            599.4998474121094
+          ],
+          "char_span": [
+            0,
+            0
+          ],
+          "origin": "BOTTOMLEFT",
+          "page": 1
+        }
+      ],
+      "page": 1,
+      "ref": "#/tables/0",
+      "representation": "table-cell-serialization",
+      "text": "Retention | 30 days"
+    },
+    {
+      "cells": [],
+      "clause": null,
+      "headings": [],
+      "kind": "page_footer",
+      "layer": "furniture",
+      "locations": [
+        {
+          "bbox": [
+            50.0,
+            37.59765600000003,
+            130.33203099999997,
+            27.59765600000003
+          ],
+          "char_span": [
+            0,
+            16
+          ],
+          "origin": "BOTTOMLEFT",
+          "page": 1
+        }
+      ],
+      "page": 1,
+      "ref": "#/texts/4",
+      "representation": "native-text",
+      "text": "Synthetic footer"
+    },
+    {
+      "cells": [],
+      "clause": null,
+      "headings": [],
+      "kind": "page_header",
+      "layer": "furniture",
+      "locations": [
+        {
+          "bbox": [
+            50.0,
+            817.597656,
+            135.620118,
+            807.597656
+          ],
+          "char_span": [
+            0,
+            16
+          ],
+          "origin": "BOTTOMLEFT",
+          "page": 2
+        }
+      ],
+      "page": 2,
+      "ref": "#/texts/5",
+      "representation": "native-text",
+      "text": "Synthetic header"
+    },
+    {
+      "cells": [],
+      "clause": null,
+      "headings": [
+        "REQ-EX-101: Retain records for 30 days."
+      ],
+      "kind": "list_item",
+      "layer": "body",
+      "locations": [
+        {
+          "bbox": [
+            50.0,
+            772.1562496,
+            208.28906560000004,
+            756.1562496
+          ],
+          "char_span": [
+            0,
+            17
+          ],
+          "origin": "BOTTOMLEFT",
+          "page": 2
+        }
+      ],
+      "page": 2,
+      "ref": "#/texts/6",
+      "representation": "native-text",
+      "text": "Восстановление"
+    },
+    {
+      "cells": [],
+      "clause": "REQ-EX-102",
+      "headings": [
+        "REQ-EX-101: Retain records for 30 days."
+      ],
+      "kind": "clause",
+      "layer": "body",
+      "locations": [
+        {
+          "bbox": [
+            50.0,
+            729.1171872,
+            317.0937524,
+            717.1171872
+          ],
+          "char_span": [
+            0,
+            39
+          ],
+          "origin": "BOTTOMLEFT",
+          "page": 2
+        }
+      ],
+      "page": 2,
+      "ref": "#/texts/7",
+      "representation": "native-text",
+      "text": "REQ-EX-102: Восстановление за 15 минут."
+    },
+    {
+      "cells": [],
+      "clause": null,
+      "headings": [],
+      "kind": "page_footer",
+      "layer": "furniture",
+      "locations": [
+        {
+          "bbox": [
+            50.0,
+            37.59765600000003,
+            130.33203099999997,
+            27.59765600000003
+          ],
+          "char_span": [
+            0,
+            16
+          ],
+          "origin": "BOTTOMLEFT",
+          "page": 2
+        }
+      ],
+      "page": 2,
+      "ref": "#/texts/8",
+      "representation": "native-text",
+      "text": "Synthetic footer"
+    }
+  ],
+  "cgroup_cpu_stat": {
+    "burst_usec": "0",
+    "core_sched.force_idle_usec": "0",
+    "nr_bursts": "0",
+    "nr_periods": "154",
+    "nr_throttled": "0",
+    "system_usec": "945882",
+    "throttled_usec": "0",
+    "usage_usec": "16762466",
+    "user_usec": "15816584"
+  },
+  "cgroup_memory_peak_bytes": 867004416,
+  "diagnostics": [],
+  "extraction_profile": "docling-heron-tableformer-fast-2.151.1",
+  "headings": {
+    "matched": 2,
+    "missing": [
+      "2. Восстановление"
+    ],
+    "total": 3
+  },
+  "layout_oracle": {
+    "cells": [
+      {
+        "column": [
+          0,
+          1
+        ],
+        "geometry_match": true,
+        "page": 1,
+        "row": [
+          0,
+          1
+        ],
+        "text": "Control",
+        "text_page_match": true,
+        "topology_match": true
+      },
+      {
+        "column": [
+          1,
+          2
+        ],
+        "geometry_match": true,
+        "page": 1,
+        "row": [
+          0,
+          1
+        ],
+        "text": "Limit",
+        "text_page_match": true,
+        "topology_match": true
+      },
+      {
+        "column": [
+          0,
+          1
+        ],
+        "geometry_match": true,
+        "page": 1,
+        "row": [
+          1,
+          2
+        ],
+        "text": "Retention",
+        "text_page_match": true,
+        "topology_match": true
+      },
+      {
+        "column": [
+          1,
+          2
+        ],
+        "geometry_match": true,
+        "page": 1,
+        "row": [
+          1,
+          2
+        ],
+        "text": "30 days",
+        "text_page_match": true,
+        "topology_match": true
+      }
+    ],
+    "regions": [
+      {
+        "geometry_match": true,
+        "kind": "page_header",
+        "kind_match": true,
+        "page": 1,
+        "text": "Synthetic header",
+        "text_page_match": true
+      },
+      {
+        "geometry_match": true,
+        "kind": "heading",
+        "kind_match": true,
+        "page": 1,
+        "text": "Synthetic control policy",
+        "text_page_match": true
+      },
+      {
+        "geometry_match": true,
+        "kind": "heading",
+        "kind_match": true,
+        "page": 1,
+        "text": "1. Storage",
+        "text_page_match": true
+      },
+      {
+        "geometry_match": true,
+        "kind": "clause",
+        "kind_match": false,
+        "page": 1,
+        "text": "REQ-EX-101: Retain records for 30 days.",
+        "text_page_match": true
+      },
+      {
+        "geometry_match": true,
+        "kind": "page_footer",
+        "kind_match": true,
+        "page": 1,
+        "text": "Synthetic footer",
+        "text_page_match": true
+      },
+      {
+        "geometry_match": true,
+        "kind": "page_header",
+        "kind_match": true,
+        "page": 2,
+        "text": "Synthetic header",
+        "text_page_match": true
+      },
+      {
+        "geometry_match": false,
+        "kind": "heading",
+        "kind_match": false,
+        "page": 2,
+        "text": "2. Восстановление",
+        "text_page_match": false
+      },
+      {
+        "geometry_match": true,
+        "kind": "clause",
+        "kind_match": true,
+        "page": 2,
+        "text": "REQ-EX-102: Восстановление за 15 минут.",
+        "text_page_match": true
+      },
+      {
+        "geometry_match": true,
+        "kind": "page_footer",
+        "kind_match": true,
+        "page": 2,
+        "text": "Synthetic footer",
+        "text_page_match": true
+      }
+    ]
+  },
+  "layout_oracle_sha256": "e0975259ecab7ca28104c610f9e355c9cd37198af4cf978cd4d1ff5849084723",
+  "model_manifest_sha256": "e65c2dfbfe78d5c6b666349bd2de75292d6b0e0d8cb82d2991ecda9b9d6d8b2d",
+  "native_anchors": 11,
+  "native_page_locations": 11,
+  "network_interfaces": [
+    "lo"
+  ],
+  "page_anchors": {
+    "1": {
+      "matched": 2,
+      "missing": [],
+      "total": 2
+    },
+    "2": {
+      "matched": 1,
+      "missing": [
+        "2. Восстановление"
+      ],
+      "total": 2
+    }
+  },
+  "page_count": 2,
+  "peak_child_rss_kib": 315604,
+  "peak_rss_kib": 1104236,
+  "process_cpu_seconds": 14.712169026,
+  "seconds": 13.390412816000207,
+  "source_digest": "6d36ed05151b90aa4e8e5f3caf5283eff50fafc6a7c754f28244b1ddea686be7",
+  "status": "ok",
+  "table_cells": {
+    "matched": 4,
+    "missing": [],
+    "total": 4
+  },
+  "text": {
+    "matched": 10,
+    "missing": [
+      "2. Восстановление"
+    ],
+    "total": 11
+  },
+  "torch": "2.14.1+cpu"
+}

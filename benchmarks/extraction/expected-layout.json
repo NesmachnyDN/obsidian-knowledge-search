@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "source": "Independent geometry from frozen ReportLab fixture generator, before structured-model execution",
+  "coordinate_origin": "BOTTOMLEFT",
+  "documents": {
+    "policy.pdf": {
+      "regions": [
+        {"text":"Synthetic header","kind":"page_header","page":1,"bbox":[40,795,300,825]},
+        {"text":"Synthetic control policy","kind":"heading","page":1,"bbox":[40,745,400,785]},
+        {"text":"1. Storage","kind":"heading","page":1,"bbox":[40,705,300,740]},
+        {"text":"REQ-EX-101: Retain records for 30 days.","kind":"clause","page":1,"bbox":[40,675,450,705]},
+        {"text":"Synthetic footer","kind":"page_footer","page":1,"bbox":[40,15,300,45]},
+        {"text":"Synthetic header","kind":"page_header","page":2,"bbox":[40,795,300,825]},
+        {"text":"2. Восстановление","kind":"heading","page":2,"bbox":[40,745,400,785]},
+        {"text":"REQ-EX-102: Восстановление за 15 минут.","kind":"clause","page":2,"bbox":[40,705,450,735]},
+        {"text":"Synthetic footer","kind":"page_footer","page":2,"bbox":[40,15,300,45]}
+      ],
+      "cells": [
+        {"text":"Control","page":1,"row":[0,1],"column":[0,1],"bbox":[50,625,200,650]},
+        {"text":"Limit","page":1,"row":[0,1],"column":[1,2],"bbox":[200,625,350,650]},
+        {"text":"Retention","page":1,"row":[1,2],"column":[0,1],"bbox":[50,600,200,625]},
+        {"text":"30 days","page":1,"row":[1,2],"column":[1,2],"bbox":[200,600,350,625]}
+      ]
+    },
+    "scan.pdf": {
+      "regions": [
+        {"text":"REQ-OCR-301: Keep records for 30 days.","kind":"clause","page":1,"bbox":[15,115,450,150]},
+        {"text":"REQ-OCR-302: Хранить записи 15 суток.","kind":"clause","page":1,"bbox":[15,70,450,105]}
+      ],
+      "cells":[]
+    }
+  }
+}

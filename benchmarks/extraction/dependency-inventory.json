@@ -1,0 +1,516 @@
+{
+  "python": "3.12.3",
+  "platform": "Linux x86_64",
+  "installed_distributions": [
+    {
+      "package": "annotated-doc",
+      "version": "0.0.7",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 5286,
+      "license_related_files": [
+        "annotated_doc-0.0.7.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "annotated-types",
+      "version": "0.8.0",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 13427,
+      "license_related_files": [
+        "annotated_types-0.8.0.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "attrs",
+      "version": "26.1.0",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 67548,
+      "license_related_files": [
+        "attrs-26.1.0.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "certifi",
+      "version": "2026.11.20",
+      "declared_license": "MPL-2.0",
+      "wheel_size_upper_bound_bytes": 127913,
+      "license_related_files": [
+        "certifi-2026.11.20.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "charset-normalizer",
+      "version": "3.5.2",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 260010,
+      "license_related_files": [
+        "charset_normalizer-3.5.2.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "defusedxml",
+      "version": "0.7.1",
+      "declared_license": "PSFL",
+      "wheel_size_upper_bound_bytes": 25604,
+      "license_related_files": [
+        "defusedxml-0.7.1.dist-info/LICENSE"
+      ]
+    },
+    {
+      "package": "doclang",
+      "version": "0.10.1",
+      "declared_license": "Apache-2.0",
+      "wheel_size_upper_bound_bytes": 114110,
+      "license_related_files": [
+        "doclang-0.10.1.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "docling-core",
+      "version": "2.108.0",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 358558,
+      "license_related_files": [
+        "docling_core-2.108.0.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "docling-parse",
+      "version": "7.27.1",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 11076065,
+      "license_related_files": [
+        "docling_parse-7.27.1.dist-info/licenses/LICENSE",
+        "docling_parse/pdf_resources/cmap-resources/LICENSE.md"
+      ]
+    },
+    {
+      "package": "docling-slim",
+      "version": "2.151.1",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 1277556,
+      "license_related_files": [
+        "docling_slim-2.151.1.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "filetype",
+      "version": "1.2.0",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 19970,
+      "license_related_files": [
+        "filetype-1.2.0.dist-info/LICENSE"
+      ]
+    },
+    {
+      "package": "idna",
+      "version": "3.20",
+      "declared_license": "BSD-3-Clause",
+      "wheel_size_upper_bound_bytes": 69583,
+      "license_related_files": [
+        "idna-3.20.dist-info/licenses/LICENSE.md"
+      ]
+    },
+    {
+      "package": "jsonref",
+      "version": "1.1.0",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 9425,
+      "license_related_files": [
+        "jsonref-1.1.0.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "jsonschema",
+      "version": "4.26.0",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 90630,
+      "license_related_files": [
+        "jsonschema-4.26.0.dist-info/licenses/COPYING"
+      ]
+    },
+    {
+      "package": "jsonschema-specifications",
+      "version": "2025.9.1",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 18437,
+      "license_related_files": [
+        "jsonschema_specifications-2025.9.1.dist-info/licenses/COPYING"
+      ]
+    },
+    {
+      "package": "langcodes",
+      "version": "3.5.1",
+      "declared_license": "MIT License",
+      "wheel_size_upper_bound_bytes": 183050,
+      "license_related_files": [
+        "langcodes-3.5.1.dist-info/licenses/LICENSE.txt"
+      ]
+    },
+    {
+      "package": "latex2mathml",
+      "version": "3.81.1",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 79159,
+      "license_related_files": []
+    },
+    {
+      "package": "lxml",
+      "version": "6.1.3",
+      "declared_license": "BSD-3-Clause",
+      "wheel_size_upper_bound_bytes": 5267340,
+      "license_related_files": [
+        "lxml-6.1.3.dist-info/licenses/LICENSE.txt",
+        "lxml-6.1.3.dist-info/licenses/LICENSES.txt"
+      ]
+    },
+    {
+      "package": "markdown-it-py",
+      "version": "4.3.0",
+      "declared_license": "MIT License",
+      "wheel_size_upper_bound_bytes": 96951,
+      "license_related_files": [
+        "markdown_it_py-4.3.0.dist-info/licenses/LICENSE",
+        "markdown_it_py-4.3.0.dist-info/licenses/LICENSE.markdown-it"
+      ]
+    },
+    {
+      "package": "mdurl",
+      "version": "0.1.2",
+      "declared_license": "MIT License",
+      "wheel_size_upper_bound_bytes": 9979,
+      "license_related_files": [
+        "mdurl-0.1.2.dist-info/LICENSE"
+      ]
+    },
+    {
+      "package": "numpy",
+      "version": "2.5.5",
+      "declared_license": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+      "wheel_size_upper_bound_bytes": 17082560,
+      "license_related_files": [
+        "numpy-2.5.5.dist-info/licenses/LICENSE.txt",
+        "numpy-2.5.5.dist-info/licenses/numpy/_core/include/numpy/libdivide/LICENSE.txt",
+        "numpy-2.5.5.dist-info/licenses/numpy/_core/src/common/pythoncapi-compat/COPYING",
+        "numpy-2.5.5.dist-info/licenses/numpy/_core/src/highway/LICENSE",
+        "numpy-2.5.5.dist-info/licenses/numpy/_core/src/multiarray/dragon4_LICENSE.txt",
+        "numpy-2.5.5.dist-info/licenses/numpy/_core/src/npysort/x86-simd-sort/LICENSE.md",
+        "numpy-2.5.5.dist-info/licenses/numpy/_core/src/umath/svml/LICENSE",
+        "numpy-2.5.5.dist-info/licenses/numpy/fft/pocketfft/LICENSE.md",
+        "numpy-2.5.5.dist-info/licenses/numpy/linalg/lapack_lite/LICENSE.txt",
+        "numpy-2.5.5.dist-info/licenses/numpy/ma/LICENSE",
+        "numpy-2.5.5.dist-info/licenses/numpy/random/LICENSE.md",
+        "numpy-2.5.5.dist-info/licenses/numpy/random/src/distributions/LICENSE.md",
+        "numpy-2.5.5.dist-info/licenses/numpy/random/src/mt19937/LICENSE.md",
+        "numpy-2.5.5.dist-info/licenses/numpy/random/src/pcg64/LICENSE.md",
+        "numpy-2.5.5.dist-info/licenses/numpy/random/src/philox/LICENSE.md",
+        "numpy-2.5.5.dist-info/licenses/numpy/random/src/sfc64/LICENSE.md",
+        "numpy-2.5.5.dist-info/licenses/numpy/random/src/splitmix64/LICENSE.md",
+        "numpy/_core/include/numpy/random/LICENSE.txt",
+        "numpy/ma/LICENSE",
+        "numpy/random/LICENSE.md"
+      ]
+    },
+    {
+      "package": "pandas",
+      "version": "3.1.1",
+      "declared_license": "BSD-3-Clause",
+      "wheel_size_upper_bound_bytes": 13109983,
+      "license_related_files": [
+        "pandas-3.1.1.dist-info/licenses/LICENSE",
+        "pandas-3.1.1.dist-info/licenses/LICENSES/BOTTLENECK_LICENCE",
+        "pandas-3.1.1.dist-info/licenses/LICENSES/DATEUTIL_LICENSE",
+        "pandas-3.1.1.dist-info/licenses/LICENSES/HAVEN_LICENSE",
+        "pandas-3.1.1.dist-info/licenses/LICENSES/HAVEN_MIT",
+        "pandas-3.1.1.dist-info/licenses/LICENSES/KLIB_LICENSE",
+        "pandas-3.1.1.dist-info/licenses/LICENSES/MUSL_LICENSE",
+        "pandas-3.1.1.dist-info/licenses/LICENSES/NUMPY_LICENSE",
+        "pandas-3.1.1.dist-info/licenses/LICENSES/PACKAGING_LICENSE",
+        "pandas-3.1.1.dist-info/licenses/LICENSES/PSF_LICENSE",
+        "pandas-3.1.1.dist-info/licenses/LICENSES/PYPERCLIP_LICENSE",
+        "pandas-3.1.1.dist-info/licenses/LICENSES/PYUPGRADE_LICENSE",
+        "pandas-3.1.1.dist-info/licenses/LICENSES/SAS7BDAT_LICENSE",
+        "pandas-3.1.1.dist-info/licenses/LICENSES/STATSBASE_JL_LICENSE",
+        "pandas-3.1.1.dist-info/licenses/LICENSES/ULTRAJSON_LICENSE",
+        "pandas-3.1.1.dist-info/licenses/LICENSES/XSIMD_LICENSE",
+        "pandas-3.1.1.dist-info/licenses/subprojects/fast_float-8.2.10/LICENSE-APACHE",
+        "pandas-3.1.1.dist-info/licenses/subprojects/fast_float-8.2.10/LICENSE-BOOST",
+        "pandas-3.1.1.dist-info/licenses/subprojects/fast_float-8.2.10/LICENSE-MIT"
+      ]
+    },
+    {
+      "package": "pillow",
+      "version": "13.0.0",
+      "declared_license": "MIT-CMU",
+      "wheel_size_upper_bound_bytes": 7228137,
+      "license_related_files": [
+        "pillow-13.0.0.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "pluggy",
+      "version": "1.7.0",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 27082,
+      "license_related_files": [
+        "pluggy-1.7.0.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "pydantic",
+      "version": "2.14.4",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 494865,
+      "license_related_files": [
+        "pydantic-2.14.4.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "pydantic-settings",
+      "version": "2.16.3",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 82679,
+      "license_related_files": [
+        "pydantic_settings-2.16.3.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "pydantic_core",
+      "version": "2.50.5",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 2501161,
+      "license_related_files": [
+        "pydantic_core-2.50.5.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "Pygments",
+      "version": "2.21.0",
+      "declared_license": "BSD-2-Clause",
+      "wheel_size_upper_bound_bytes": 1250147,
+      "license_related_files": [
+        "pygments-2.21.0.dist-info/licenses/AUTHORS",
+        "pygments-2.21.0.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "pypdf",
+      "version": "7.1.1",
+      "declared_license": "BSD-3-Clause",
+      "wheel_size_upper_bound_bytes": null,
+      "license_related_files": [
+        "pypdf-7.1.1.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "pypdfium2",
+      "version": "5.14.0",
+      "declared_license": "BSD-3-Clause, Apache-2.0, dependency licenses",
+      "wheel_size_upper_bound_bytes": 5121606,
+      "license_related_files": [
+        "pypdfium2-5.14.0.dist-info/licenses/LICENSES/Apache-2.0.txt",
+        "pypdfium2-5.14.0.dist-info/licenses/LICENSES/BSD-3-Clause.txt",
+        "pypdfium2-5.14.0.dist-info/licenses/LICENSES/CC-BY-4.0.txt",
+        "pypdfium2-5.14.0.dist-info/licenses/data/linux_x64/BUILD_LICENSES/abseil.txt",
+        "pypdfium2-5.14.0.dist-info/licenses/data/linux_x64/BUILD_LICENSES/agg23.txt",
+        "pypdfium2-5.14.0.dist-info/licenses/data/linux_x64/BUILD_LICENSES/fast_float.txt",
+        "pypdfium2-5.14.0.dist-info/licenses/data/linux_x64/BUILD_LICENSES/freetype.txt",
+        "pypdfium2-5.14.0.dist-info/licenses/data/linux_x64/BUILD_LICENSES/icu.txt",
+        "pypdfium2-5.14.0.dist-info/licenses/data/linux_x64/BUILD_LICENSES/lcms.txt",
+        "pypdfium2-5.14.0.dist-info/licenses/data/linux_x64/BUILD_LICENSES/libjpeg_turbo.ijg",
+        "pypdfium2-5.14.0.dist-info/licenses/data/linux_x64/BUILD_LICENSES/libjpeg_turbo.md",
+        "pypdfium2-5.14.0.dist-info/licenses/data/linux_x64/BUILD_LICENSES/libopenjpeg.txt",
+        "pypdfium2-5.14.0.dist-info/licenses/data/linux_x64/BUILD_LICENSES/libpng.txt",
+        "pypdfium2-5.14.0.dist-info/licenses/data/linux_x64/BUILD_LICENSES/llvm-libc.txt",
+        "pypdfium2-5.14.0.dist-info/licenses/data/linux_x64/BUILD_LICENSES/pdfium-binaries.txt",
+        "pypdfium2-5.14.0.dist-info/licenses/data/linux_x64/BUILD_LICENSES/pdfium.txt",
+        "pypdfium2-5.14.0.dist-info/licenses/data/linux_x64/BUILD_LICENSES/simdutf.txt",
+        "pypdfium2-5.14.0.dist-info/licenses/data/linux_x64/BUILD_LICENSES/zlib.txt"
+      ]
+    },
+    {
+      "package": "python-dateutil",
+      "version": "4.0.0",
+      "declared_license": "BSD-3-Clause",
+      "wheel_size_upper_bound_bytes": 92853,
+      "license_related_files": [
+        "python_dateutil-4.0.0.dist-info/licenses/AUTHORS.md",
+        "python_dateutil-4.0.0.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "python-docx",
+      "version": "1.2.0",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 252987,
+      "license_related_files": [
+        "python_docx-1.2.0.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "python-dotenv",
+      "version": "1.2.4",
+      "declared_license": "BSD-3-Clause",
+      "wheel_size_upper_bound_bytes": 23266,
+      "license_related_files": [
+        "python_dotenv-1.2.4.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "PyYAML",
+      "version": "6.0.4",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 849249,
+      "license_related_files": [
+        "pyyaml-6.0.4.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "referencing",
+      "version": "0.37.0",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 26766,
+      "license_related_files": [
+        "referencing-0.37.0.dist-info/licenses/COPYING"
+      ]
+    },
+    {
+      "package": "reportlab",
+      "version": "5.1.0",
+      "declared_license": "BSD license (see license.txt for details), Copyright (c) 2000-2025, ReportLab Inc.",
+      "wheel_size_upper_bound_bytes": null,
+      "license_related_files": [
+        "reportlab-5.1.0.dist-info/licenses/LICENSE",
+        "reportlab/fonts/DarkGarden-copying-gpl.txt",
+        "reportlab/fonts/DarkGarden-copying.txt",
+        "reportlab/fonts/bitstream-vera-license.txt",
+        "reportlab/license.txt"
+      ]
+    },
+    {
+      "package": "requests",
+      "version": "2.34.2",
+      "declared_license": "Apache-2.0",
+      "wheel_size_upper_bound_bytes": 73075,
+      "license_related_files": [
+        "requests-2.34.2.dist-info/licenses/LICENSE",
+        "requests-2.34.2.dist-info/licenses/NOTICE"
+      ]
+    },
+    {
+      "package": "rich",
+      "version": "15.0.0",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 310654,
+      "license_related_files": [
+        "rich-15.0.0.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "rpds-py",
+      "version": "2026.9.1",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 578509,
+      "license_related_files": [
+        "rpds_py-2026.9.1.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "rtree",
+      "version": "1.4.1",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 1555140,
+      "license_related_files": [
+        "rtree-1.4.1.dist-info/licenses/LICENSE.txt"
+      ]
+    },
+    {
+      "package": "scipy",
+      "version": "1.18.1",
+      "declared_license": "Copyright (c) 2001-2002 Enthought, Inc. 2003, SciPy Developers.",
+      "wheel_size_upper_bound_bytes": 37480330,
+      "license_related_files": [
+        "scipy-1.18.1.dist-info/LICENSE.txt",
+        "scipy/_lib/_uarray/LICENSE",
+        "scipy/fft/_duccfft/LICENSE.md",
+        "scipy/integrate/LICENSE_DOP",
+        "scipy/spatial/qhull_src/COPYING_QHULL.txt"
+      ]
+    },
+    {
+      "package": "shellingham",
+      "version": "1.5.4",
+      "declared_license": "ISC License",
+      "wheel_size_upper_bound_bytes": 9755,
+      "license_related_files": [
+        "shellingham-1.5.4.dist-info/LICENSE"
+      ]
+    },
+    {
+      "package": "tabulate",
+      "version": "0.10.0",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 39814,
+      "license_related_files": [
+        "tabulate-0.10.0.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "tqdm",
+      "version": "4.70.1",
+      "declared_license": "MPL-2.0 AND MIT",
+      "wheel_size_upper_bound_bytes": 80199,
+      "license_related_files": [
+        "tqdm-4.70.1.dist-info/licenses/LICENCE"
+      ]
+    },
+    {
+      "package": "typer",
+      "version": "0.27.3",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 123312,
+      "license_related_files": [
+        "typer-0.27.3.dist-info/licenses/LICENSE",
+        "typer/_click/LICENSE.txt"
+      ]
+    },
+    {
+      "package": "typing-inspection",
+      "version": "0.4.5",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 14874,
+      "license_related_files": [
+        "typing_inspection-0.4.5.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "typing_extensions",
+      "version": "4.16.0",
+      "declared_license": "PSF-2.0",
+      "wheel_size_upper_bound_bytes": 45571,
+      "license_related_files": [
+        "typing_extensions-4.16.0.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "package": "tzdata",
+      "version": "2026.6",
+      "declared_license": "Apache-2.0",
+      "wheel_size_upper_bound_bytes": 348210,
+      "license_related_files": [
+        "tzdata-2026.6.dist-info/licenses/LICENSE",
+        "tzdata-2026.6.dist-info/licenses/licenses/LICENSE_APACHE"
+      ]
+    },
+    {
+      "package": "urllib3",
+      "version": "2.8.0",
+      "declared_license": "MIT",
+      "wheel_size_upper_bound_bytes": 135717,
+      "license_related_files": [
+        "urllib3-2.8.0.dist-info/licenses/LICENSE.txt"
+      ]
+    }
+  ],
+  "note": "Metadata inventory only; bundled binary notices retained in local wheels; no third-party packaging or redistribution decision."
+}

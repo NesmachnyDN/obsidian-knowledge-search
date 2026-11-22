@@ -1,0 +1,131 @@
+{
+  "blocks": 2,
+  "blocks_detail": [
+    {
+      "cells": [],
+      "clause": "REQ-OCR-301",
+      "headings": [],
+      "kind": "clause",
+      "layer": "body",
+      "locations": [
+        {
+          "bbox": [
+            21.0,
+            141.0,
+            354.0,
+            125.0
+          ],
+          "char_span": [
+            0,
+            38
+          ],
+          "origin": "BOTTOMLEFT",
+          "page": 1
+        }
+      ],
+      "page": 1,
+      "ref": "#/texts/0",
+      "representation": "ocr-native-text",
+      "text": "REQ-OCR-301: Keep records for 30 days."
+    },
+    {
+      "cells": [],
+      "clause": "REQ-OCR-302",
+      "headings": [],
+      "kind": "clause",
+      "layer": "body",
+      "locations": [
+        {
+          "bbox": [
+            21.0,
+            95.66666666666667,
+            366.6666666666667,
+            80.0
+          ],
+          "char_span": [
+            0,
+            37
+          ],
+          "origin": "BOTTOMLEFT",
+          "page": 1
+        }
+      ],
+      "page": 1,
+      "ref": "#/texts/1",
+      "representation": "ocr-native-text",
+      "text": "REQ-OCR-302: Хранить записи 15 суток."
+    }
+  ],
+  "cgroup_cpu_stat": {
+    "burst_usec": "0",
+    "core_sched.force_idle_usec": "0",
+    "nr_bursts": "0",
+    "nr_periods": "122",
+    "nr_throttled": "0",
+    "system_usec": "706601",
+    "throttled_usec": "0",
+    "usage_usec": "13318337",
+    "user_usec": "12611735"
+  },
+  "cgroup_memory_peak_bytes": 770428928,
+  "diagnostics": [],
+  "extraction_profile": "docling-heron-tableformer-fast-tesseract-2.151.1",
+  "headings": {
+    "matched": 0,
+    "missing": [],
+    "total": 0
+  },
+  "layout_oracle": {
+    "cells": [],
+    "regions": [
+      {
+        "geometry_match": true,
+        "kind": "clause",
+        "kind_match": true,
+        "page": 1,
+        "text": "REQ-OCR-301: Keep records for 30 days.",
+        "text_page_match": true
+      },
+      {
+        "geometry_match": true,
+        "kind": "clause",
+        "kind_match": true,
+        "page": 1,
+        "text": "REQ-OCR-302: Хранить записи 15 суток.",
+        "text_page_match": true
+      }
+    ]
+  },
+  "layout_oracle_sha256": "e0975259ecab7ca28104c610f9e355c9cd37198af4cf978cd4d1ff5849084723",
+  "model_manifest_sha256": "e65c2dfbfe78d5c6b666349bd2de75292d6b0e0d8cb82d2991ecda9b9d6d8b2d",
+  "native_anchors": 2,
+  "native_page_locations": 2,
+  "network_interfaces": [
+    "lo"
+  ],
+  "page_anchors": {
+    "1": {
+      "matched": 2,
+      "missing": [],
+      "total": 2
+    }
+  },
+  "page_count": 1,
+  "peak_child_rss_kib": 1032360,
+  "peak_rss_kib": 1032360,
+  "process_cpu_seconds": 10.934685062,
+  "seconds": 10.290729519999331,
+  "source_digest": "6bfe0ed877419c3377b06b53e5a395dc538f398b71441344b07055f37c1548fc",
+  "status": "ok",
+  "table_cells": {
+    "matched": 0,
+    "missing": [],
+    "total": 0
+  },
+  "text": {
+    "matched": 2,
+    "missing": [],
+    "total": 2
+  },
+  "torch": "2.14.1+cpu"
+}
