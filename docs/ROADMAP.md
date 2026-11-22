@@ -1,0 +1,31 @@
+# Implementation roadmap
+
+Initial baseline. All slices below are planned, not completed. One bounded PR at a time; dependencies must be satisfied and actual GitHub state checked. Track execution in PRs/issues, not duplicate status ledgers.
+
+| Slice | Depends on | Outcome / exit gate |
+|---|---|---|
+| OKS-00 | Bootstrap | Design readiness: read specs, inspect license-safe reuse candidates and dependencies; select first vertical slice. Produce dependency/reuse matrix, decision gaps and concrete execution contract. No production code import. |
+| OKS-01A | 00 | Minimal offline vertical slice in isolated synthetic vault: plugin command -> supervised lightweight engine -> typed response. Contract tests, build, clean unload/restart. No model downloads. CAP-07/09. |
+| OKS-01B | 01A | Choose index storage and IPC with small measured prototypes; transactional manifest, scope and failure tests. ADRs before production adoption. CAP-01/08/09. |
+| OKS-02A | 01B | Reproducible synthetic corpus and baseline parser/lexical retrieval; source locator and coverage tests. Freeze train/tuning and held-out judgments. CAP-02/10. |
+| OKS-02B | 02A | Docling-based PDF/DOCX native structure, Markdown extraction and local OCR PoC. Compare layout, table cells, headings and scan evidence; pin extractor and licenses. CAP-02. |
+| OKS-02C | 02B | Compare fixed/paragraph baseline, tokenizer-aware existing-style planner and native HybridChunker; vary budgets/overlap under same parsed input. Preserve exact spans, contextual prefixes, table rows; select measured policy via ADR. CAP-03/10. |
+| OKS-03A | 02C | BGE-M3 local runtime, model identity, actual token budget, vector validation, offline/pressure/error checks. Compare candidate implementations with a frozen corpus; pin chosen profile. CAP-04/09. |
+| OKS-03B | 03A | Lexical + dense indexing, RRF, exact technical identifiers, metadata scope filters, evidence contract and scores. Measure baselines and hybrid quality. CAP-05/06. |
+| OKS-04A | 03B | File events and startup reconciliation, atomic generation, incremental updates, rename/delete, crash/resume, cancel. Test failures and source deletion. CAP-01/08. |
+| OKS-04B | 04A | Search panel/settings/status/open source and supported machine-readable interface; test actual Obsidian CLI access. Resource guards, installation and removal. CAP-07/09. |
+| OKS-05 | 04B | MVP acceptance: locked benchmark vs incumbent plugin where feasible, offline verification, real-host resource/stability test with synthetic data, clean install and rollback. Private authorized validation only locally. CAP-01–10. |
+| OKS-06A | 05 | Cross-encoder reranker evaluation (BGE-reranker-v2-m3 candidate), bounded candidates and optional activation if net benefit. CAP-11. |
+| OKS-06B | 05 | Source-neighbor expansion, Properties and wiki-link traversal, filtered evidence sets, compare with non-expanded baseline. CAP-06/11. |
+| OKS-07 | 05; optional 06 | Controlled adoption via separate maintainer decision, backup incumbent settings, verify coverage, rollback path, operate one active search index. |
+| OKS-08 | 07 | Public release hardening: supported OS matrix, licenses/notices/SBOM, reproducible package, security and Obsidian distribution policy review. No store publication claim before approval. |
+
+## Phase exits
+
+- Foundation (00–01B): design and protocol tested; no unresolved blocker to the next slice.
+- Document quality (02): measurable structure and token/provenance metrics, selected policy.
+- Retrieval (03): reproducible offline evidence retrieval and compatible index.
+- MVP (04–05): integration, incremental lifecycle, recovery, measured quality and bounded resources.
+- Advanced / adoption (06–08): individually benchmarked optional features and separate rollout authorization.
+
+No branch, PR, task ID or numeric metric is evidence by itself. Before each next slice reconcile the roadmap with current implementation and review. Production vault indexing must wait for maintainer approval and stability checks.
