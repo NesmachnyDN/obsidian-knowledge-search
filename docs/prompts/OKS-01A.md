@@ -1,10 +1,10 @@
 # OKS-01A — Bounded execution contract: synthetic evidence probe
 
-Status: candidate execution prompt; execute only after OKS-00 is reviewed and merged into main. This file is the single contract for 01A. At execution record the actual main SHA; if dependencies or governing decisions changed, stop for reconciliation.
+Status: candidate execution prompt; execute only after OKS-00 is reviewed and merged into develop. This file is the single contract for 01A. At execution record the actual develop SHA; if dependencies or governing decisions changed, stop for reconciliation.
 
 ## Authority and scope
 
-Read AGENTS.md, applicable component instructions/readmes, SPEC, ARCHITECTURE, ROADMAP, SECURITY, ADR-0001/0002 and this contract. Check main, worktree, open PRs and applicable decisions. One short-lived branch and one draft PR to main. CAP-07/09, partial AC-07/09, plus a limited AC-06 evidence-shape check; do not claim full acceptance of these capabilities.
+Read AGENTS.md, applicable component instructions/readmes, SPEC, ARCHITECTURE, ROADMAP, SECURITY, ADR-0001/0002 and this contract. Check develop, worktree, open PRs and applicable decisions. One short-lived branch and one draft PR to develop. CAP-07/09, partial AC-07/09, plus a limited AC-06 evidence-shape check; do not claim full acceptance of these capabilities.
 
 Implement the smallest complete actual desktop plugin -> local process -> typed evidence response. No prior application imports. All public artifacts in English. Source and test data must be independently authored and synthetic.
 
@@ -33,8 +33,8 @@ Automated tests use synthetic fixtures and small injected failure workers only. 
 
 ## Explicit exclusions
 
-No Docling, OCR, learned embeddings, fake/hash vectors, tokenizer downloads, lexical index/BM25, vector DB, hybrid/RRF, reranker, source expansion, persistent index, folder scan, bulk events, MCP/network API or production installer. No unrelated ADR, scope expansion, legacy code transfer or automatic merge.
+No Docling, OCR, learned embeddings, fake/hash vectors, tokenizer downloads, lexical index/BM25, vector DB, hybrid/RRF, reranker, source expansion, persistent index, folder scan, bulk events, MCP/network API or production installer. No unrelated ADR, scope expansion, legacy code transfer or bypass of required merge gates.
 
 ## Delivery
 
-Commit only bounded implementation/tests/docs on a short-lived branch; push without force and open draft PR to main, report base/head SHA, changed paths, requirement mapping, dependency/license review, actual checks, failures and unrun manual smoke, privacy/resource impact and readiness. Independent review is separate; never merge without maintainer authorization.
+Commit only bounded implementation/tests/docs on a short-lived branch; push without force and open draft PR to develop, report base/head SHA, changed paths, requirement mapping, dependency/license review, actual checks, failures and unrun manual smoke, privacy/resource impact and readiness. Independent review is separate; the orchestrator follows the SDD workflow and completes the authorized slice through verified merge into develop only after all gates pass.
