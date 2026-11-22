@@ -1,0 +1,94 @@
+{
+  "judgments": {
+    "held_out.json": "743bcd7bed8ab1551da833221343ecbdcb0cc527aa4f4af950d9f5b4a4840e52",
+    "oracle.json": "2c65db81772c768bccc80f1c97990752ea643fda495b85e25430709e8a237c32",
+    "tuning.json": "63773964614751c14e91ddc7507af753b62fe45f5bf0852638b130700a39bab5"
+  },
+  "sources": [
+    {
+      "path": "aurora-adr.md",
+      "sha256": "25cad814a67aecc333a075590fc775b37ed66509381f33f544e5d4dfbec89134"
+    },
+    {
+      "path": "aurora-rotation.md",
+      "sha256": "39c399cb9657b73a246cba70ce834482616ea4432b80bb1f5d9a6efaab2ca170"
+    },
+    {
+      "path": "aurora-legacy.md",
+      "sha256": "37707f8dab9be9bd47fc68e5a9c2a4277c0893e04dc1fa026aa45f14ebe55843"
+    },
+    {
+      "path": "boreal-storage.md",
+      "sha256": "3b963744b842a60db7bf3c86ad2fdd4fdb6e192490e95831589423869d32f1f9"
+    },
+    {
+      "path": "boreal-cache.md",
+      "sha256": "73f95f9709c3d516e507f6ad08f4ad057bf44c3e933cf5176792d097da3b9987"
+    },
+    {
+      "path": "boreal-recovery.md",
+      "sha256": "0c68d7a6c2d075ab9f170bb2364ce88bb1efb406088a6f4730925b323f2965ec"
+    },
+    {
+      "path": "cedar-api.md",
+      "sha256": "d666a3e20f32860f9b8c4398cbe0e58ce122e6a1e63c572a290446eee84c483c"
+    },
+    {
+      "path": "cedar-errors.md",
+      "sha256": "f6b95ae8e980b6cc3658b54b4da3eeef027ef5ba90e4fc14821f88bd9fa2a2d9"
+    },
+    {
+      "path": "cedar-v1.md",
+      "sha256": "a3b84911542d6b5b076e86582883a8dff2fa28faa73f9baae47333535597df97"
+    },
+    {
+      "path": "delta-queue.md",
+      "sha256": "df09b1401f1ff31c67fd14939dab95e61d782620eab79099d1b14ac8cab3b52e"
+    },
+    {
+      "path": "delta-retry.md",
+      "sha256": "8f09337d916011c5c59f2f0a66ef0bc8bd1e5832ff3e66bf39af2f5d15497b97"
+    },
+    {
+      "path": "echo-audit.md",
+      "sha256": "a723f102e4f3b559f85335ce0e07745005bdabbad469bd5acda0dac9e224e7b9"
+    },
+    {
+      "path": "echo-privacy.md",
+      "sha256": "a4870913bd494cd5a92686a4f2106e1db8d2127a4a966d99238fbf5d9ecc2ae8"
+    },
+    {
+      "path": "fjord-network.md",
+      "sha256": "62ac8af4772e593617efcf23d4be6e771f1abc10a3cd76dff729db2e4fed796d"
+    },
+    {
+      "path": "fjord-backup.md",
+      "sha256": "634037bbc185e18027cd4b2a4fdee0a07f334232d53f0bcc1057bc4e2e358afd"
+    },
+    {
+      "path": "glossary.md",
+      "sha256": "83d1638b65bcb3cc668a4ae79a31adc9687a95552fa4fdf1d2620fd9767ffed3"
+    },
+    {
+      "path": "helios-adr.md",
+      "sha256": "48891f0f60f9b7abbf4327d3f24e6e76ee459362254ccb66ac264b0dcde1068e"
+    },
+    {
+      "path": "helios-copy.md",
+      "sha256": "48891f0f60f9b7abbf4327d3f24e6e76ee459362254ccb66ac264b0dcde1068e"
+    },
+    {
+      "path": "empty.md",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "malformed.md",
+      "sha256": "e7b3f011d9ff81ad90a603d0551a6f983e6f61ee0e5c2312a78591634cb2a7e7"
+    },
+    {
+      "path": "iris-unsupported.md",
+      "sha256": "b0bed3c8cedd8a496d11d36058cc4d728e7b1cddac85964354b4696e9302e18c"
+    }
+  ],
+  "version": "v1"
+}

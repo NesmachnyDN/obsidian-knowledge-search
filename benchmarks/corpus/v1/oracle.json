@@ -1,0 +1,568 @@
+{
+  "aurora-adr.md": [
+    {
+      "kind": "property",
+      "line": 1,
+      "text": "---"
+    },
+    {
+      "kind": "property",
+      "line": 2,
+      "text": "status: accepted"
+    },
+    {
+      "kind": "property",
+      "line": 3,
+      "text": "component: Aurora"
+    },
+    {
+      "kind": "property",
+      "line": 4,
+      "text": "---"
+    },
+    {
+      "kind": "heading",
+      "line": 5,
+      "text": "# ADR-101: Aurora transport"
+    },
+    {
+      "kind": "heading",
+      "line": 6,
+      "text": "## Decision"
+    },
+    {
+      "kind": "paragraph",
+      "line": 7,
+      "text": "Aurora uses mutual TLS for service traffic; plain HTTP is prohibited."
+    },
+    {
+      "kind": "paragraph",
+      "line": 8,
+      "text": "See [[aurora-rotation]] for certificate lifecycle."
+    },
+    {
+      "kind": "heading",
+      "line": 9,
+      "text": "## Rationale"
+    },
+    {
+      "kind": "paragraph",
+      "line": 10,
+      "text": "Service identity is verified before any request is transmitted."
+    }
+  ],
+  "aurora-legacy.md": [
+    {
+      "kind": "heading",
+      "line": 1,
+      "text": "# Aurora legacy gateway"
+    },
+    {
+      "kind": "paragraph",
+      "line": 2,
+      "text": "ADR-101 was not implemented by the retired gateway."
+    },
+    {
+      "kind": "paragraph",
+      "line": 3,
+      "text": "The legacy gateway used plain HTTP on an isolated test network."
+    },
+    {
+      "kind": "paragraph",
+      "line": 4,
+      "text": "This is historical information, not an approved deployment policy."
+    }
+  ],
+  "aurora-rotation.md": [
+    {
+      "kind": "heading",
+      "line": 1,
+      "text": "# Aurora certificate rotation"
+    },
+    {
+      "kind": "clause",
+      "line": 2,
+      "text": "REQ-AUR-12: Rotate client certificates every 30 days."
+    },
+    {
+      "kind": "clause",
+      "line": 3,
+      "text": "REQ-AUR-13: Keep the previous certificate valid for 24 hours."
+    },
+    {
+      "kind": "heading",
+      "line": 4,
+      "text": "## Exception"
+    },
+    {
+      "kind": "paragraph",
+      "line": 5,
+      "text": "Emergency revocation must not wait for the rotation window."
+    }
+  ],
+  "boreal-cache.md": [
+    {
+      "kind": "heading",
+      "line": 1,
+      "text": "# Boreal cache"
+    },
+    {
+      "kind": "paragraph",
+      "line": 2,
+      "text": "The SSD cache has a 14-hour TTL; it is not the object retention policy."
+    },
+    {
+      "kind": "clause",
+      "line": 3,
+      "text": "REQ-BOR-210: Cache eviction is permitted."
+    },
+    {
+      "kind": "paragraph",
+      "line": 4,
+      "text": "Eviction does not delete the authoritative object."
+    }
+  ],
+  "boreal-recovery.md": [
+    {
+      "kind": "heading",
+      "line": 1,
+      "text": "# Восстановление Boreal"
+    },
+    {
+      "kind": "heading",
+      "line": 2,
+      "text": "## Требования"
+    },
+    {
+      "kind": "clause",
+      "line": 3,
+      "text": "REQ-BOR-31: RPO не более 15 минут."
+    },
+    {
+      "kind": "clause",
+      "line": 4,
+      "text": "REQ-BOR-32: RTO не более 90 минут."
+    },
+    {
+      "kind": "heading",
+      "line": 5,
+      "text": "### Исключения"
+    },
+    {
+      "kind": "paragraph",
+      "line": 6,
+      "text": "Для тестового контура RTO не нормируется."
+    }
+  ],
+  "boreal-storage.md": [
+    {
+      "kind": "heading",
+      "line": 1,
+      "text": "# Хранилище Boreal"
+    },
+    {
+      "kind": "heading",
+      "line": 2,
+      "text": "## Политика размещения"
+    },
+    {
+      "kind": "clause",
+      "line": 3,
+      "text": "REQ-BOR-21: Горячие объекты хранятся на SSD ровно 14 суток."
+    },
+    {
+      "kind": "clause",
+      "line": 4,
+      "text": "REQ-BOR-22: После 14 суток объекты переводятся на HDD."
+    },
+    {
+      "kind": "paragraph",
+      "line": 5,
+      "text": "Удаление объектов при переходе на HDD запрещено."
+    }
+  ],
+  "cedar-api.md": [
+    {
+      "kind": "heading",
+      "line": 1,
+      "text": "# Cedar API v2.4"
+    },
+    {
+      "kind": "heading",
+      "line": 2,
+      "text": "## Endpoints"
+    },
+    {
+      "kind": "table_row",
+      "line": 3,
+      "text": "| Method | Path | Purpose |"
+    },
+    {
+      "kind": "table_separator",
+      "line": 4,
+      "text": "| --- | --- | --- |"
+    },
+    {
+      "kind": "table_row",
+      "line": 5,
+      "text": "| GET | /v2/items | List items |"
+    },
+    {
+      "kind": "table_row",
+      "line": 6,
+      "text": "| POST | /v2/items | Create item |"
+    },
+    {
+      "kind": "clause",
+      "line": 7,
+      "text": "REQ-CED-41: POST requires an Idempotency-Key header."
+    }
+  ],
+  "cedar-errors.md": [
+    {
+      "kind": "heading",
+      "line": 1,
+      "text": "# Cedar error contract"
+    },
+    {
+      "kind": "table_row",
+      "line": 2,
+      "text": "| Status | Meaning |"
+    },
+    {
+      "kind": "table_separator",
+      "line": 3,
+      "text": "| --- | --- |"
+    },
+    {
+      "kind": "table_row",
+      "line": 4,
+      "text": "| 409 | Idempotency key conflict |"
+    },
+    {
+      "kind": "table_row",
+      "line": 5,
+      "text": "| 429 | Rate limit exceeded |"
+    },
+    {
+      "kind": "paragraph",
+      "line": 6,
+      "text": "Retry-After is required only for status 429."
+    }
+  ],
+  "cedar-v1.md": [
+    {
+      "kind": "heading",
+      "line": 1,
+      "text": "# Cedar API v1.9 (retired)"
+    },
+    {
+      "kind": "paragraph",
+      "line": 2,
+      "text": "POST /v1/items does not support Idempotency-Key."
+    },
+    {
+      "kind": "paragraph",
+      "line": 3,
+      "text": "The v1.9 contract must not be used for new consumers."
+    }
+  ],
+  "delta-queue.md": [
+    {
+      "kind": "heading",
+      "line": 1,
+      "text": "# Delta message delivery"
+    },
+    {
+      "kind": "heading",
+      "line": 2,
+      "text": "## Guarantees"
+    },
+    {
+      "kind": "clause",
+      "line": 3,
+      "text": "REQ-DEL-51: Delivery is at-least-once."
+    },
+    {
+      "kind": "paragraph",
+      "line": 4,
+      "text": "Exactly-once processing is not guaranteed."
+    },
+    {
+      "kind": "list_item",
+      "line": 5,
+      "text": "- Consumers deduplicate by event_id."
+    },
+    {
+      "kind": "list_item",
+      "line": 6,
+      "text": "- Acknowledgements follow durable writes."
+    }
+  ],
+  "delta-retry.md": [
+    {
+      "kind": "heading",
+      "line": 1,
+      "text": "# Delta retry policy"
+    },
+    {
+      "kind": "clause",
+      "line": 2,
+      "text": "REQ-DEL-52: Retry at intervals of 2, 4 and 8 seconds."
+    },
+    {
+      "kind": "paragraph",
+      "line": 3,
+      "text": "After three unsuccessful attempts, route to the DLQ."
+    },
+    {
+      "kind": "paragraph",
+      "line": 4,
+      "text": "DLQ означает очередь необработанных сообщений."
+    }
+  ],
+  "echo-audit.md": [
+    {
+      "kind": "heading",
+      "line": 1,
+      "text": "# Аудит Echo"
+    },
+    {
+      "kind": "clause",
+      "line": 2,
+      "text": "REQ-ECH-61: Журнал аудита хранится 365 суток."
+    },
+    {
+      "kind": "paragraph",
+      "line": 3,
+      "text": "Оператор может читать журнал, но не изменять записи."
+    },
+    {
+      "kind": "paragraph",
+      "line": 4,
+      "text": "See [[echo-privacy]] for excluded fields."
+    }
+  ],
+  "echo-privacy.md": [
+    {
+      "kind": "heading",
+      "line": 1,
+      "text": "# Echo privacy"
+    },
+    {
+      "kind": "clause",
+      "line": 2,
+      "text": "REQ-ECH-62: Never log Authorization headers or access tokens."
+    },
+    {
+      "kind": "paragraph",
+      "line": 3,
+      "text": "Correlation IDs may be logged."
+    },
+    {
+      "kind": "heading",
+      "line": 4,
+      "text": "## Appendix A"
+    },
+    {
+      "kind": "paragraph",
+      "line": 5,
+      "text": "Example synthetic correlation ID: SYN-9F-22."
+    }
+  ],
+  "empty.md": [],
+  "fjord-backup.md": [
+    {
+      "kind": "heading",
+      "line": 1,
+      "text": "# Fjord backup"
+    },
+    {
+      "kind": "clause",
+      "line": 2,
+      "text": "REQ-FJO-71: Backups use AES-256-GCM."
+    },
+    {
+      "kind": "paragraph",
+      "line": 3,
+      "text": "SHA-256 checksums verify restored backup integrity."
+    },
+    {
+      "kind": "paragraph",
+      "line": 4,
+      "text": "Encryption keys are stored separately from backups."
+    }
+  ],
+  "fjord-network.md": [
+    {
+      "kind": "heading",
+      "line": 1,
+      "text": "# Fjord network"
+    },
+    {
+      "kind": "table_row",
+      "line": 2,
+      "text": "| Zone | Port | Protocol |"
+    },
+    {
+      "kind": "table_separator",
+      "line": 3,
+      "text": "| --- | --- | --- |"
+    },
+    {
+      "kind": "table_row",
+      "line": 4,
+      "text": "| ingress | 8443 | HTTPS |"
+    },
+    {
+      "kind": "table_row",
+      "line": 5,
+      "text": "| admin | 9443 | HTTPS |"
+    },
+    {
+      "kind": "paragraph",
+      "line": 6,
+      "text": "Admin access is denied from the ingress zone."
+    }
+  ],
+  "glossary.md": [
+    {
+      "kind": "heading",
+      "line": 1,
+      "text": "# Термины / Glossary"
+    },
+    {
+      "kind": "paragraph",
+      "line": 2,
+      "text": "RPO — допустимая потеря данных (recovery point objective)."
+    },
+    {
+      "kind": "paragraph",
+      "line": 3,
+      "text": "RTO — допустимое время восстановления (recovery time objective)."
+    },
+    {
+      "kind": "paragraph",
+      "line": 4,
+      "text": "DLQ — dead-letter queue."
+    }
+  ],
+  "helios-adr.md": [
+    {
+      "kind": "property",
+      "line": 1,
+      "text": "---"
+    },
+    {
+      "kind": "property",
+      "line": 2,
+      "text": "status: proposed"
+    },
+    {
+      "kind": "property",
+      "line": 3,
+      "text": "---"
+    },
+    {
+      "kind": "heading",
+      "line": 4,
+      "text": "# ADR-201: Helios topology"
+    },
+    {
+      "kind": "heading",
+      "line": 5,
+      "text": "## Decision"
+    },
+    {
+      "kind": "paragraph",
+      "line": 6,
+      "text": "Helios proposes active-passive failover for region R2."
+    },
+    {
+      "kind": "heading",
+      "line": 7,
+      "text": "## Appendix B"
+    },
+    {
+      "kind": "paragraph",
+      "line": 8,
+      "text": "The proposal does not approve active-active operation."
+    }
+  ],
+  "helios-copy.md": [
+    {
+      "kind": "property",
+      "line": 1,
+      "text": "---"
+    },
+    {
+      "kind": "property",
+      "line": 2,
+      "text": "status: proposed"
+    },
+    {
+      "kind": "property",
+      "line": 3,
+      "text": "---"
+    },
+    {
+      "kind": "heading",
+      "line": 4,
+      "text": "# ADR-201: Helios topology"
+    },
+    {
+      "kind": "heading",
+      "line": 5,
+      "text": "## Decision"
+    },
+    {
+      "kind": "paragraph",
+      "line": 6,
+      "text": "Helios proposes active-passive failover for region R2."
+    },
+    {
+      "kind": "heading",
+      "line": 7,
+      "text": "## Appendix B"
+    },
+    {
+      "kind": "paragraph",
+      "line": 8,
+      "text": "The proposal does not approve active-active operation."
+    }
+  ],
+  "iris-unsupported.md": [
+    {
+      "kind": "heading",
+      "line": 1,
+      "text": "# Iris sample"
+    },
+    {
+      "kind": "paragraph",
+      "line": 2,
+      "text": "<custom-widget>opaque payload</custom-widget>"
+    },
+    {
+      "kind": "paragraph",
+      "line": 3,
+      "text": "The payload is retained literally; rendering is outside scope."
+    }
+  ],
+  "malformed.md": [
+    {
+      "kind": "property",
+      "line": 1,
+      "text": "---"
+    },
+    {
+      "kind": "property",
+      "line": 2,
+      "text": "status: unknown"
+    },
+    {
+      "kind": "paragraph",
+      "line": 3,
+      "text": "Unterminated front matter deliberately has no closing delimiter."
+    }
+  ]
+}
