@@ -1,0 +1,1055 @@
+{
+  "config": {
+    "candidate_limit": 50,
+    "order": "fts5-bm25-rowid",
+    "query": "casefolded-exact-terms-or",
+    "unit": "physical-line"
+  },
+  "corpus_version": "v1",
+  "implementation_sha256": {
+    "benchmarks/corpus_v1.py": "346cd70d51e2c79c627a3bfdcfa36b4fc0fb3db66290d364576b18ad26f6d84a",
+    "benchmarks/lexical_metrics.py": "bbbc89067e6af0ad5d9819a067f8fd18c517da25d40b9fc0e78a1cad22f8f874",
+    "benchmarks/oks02a.py": "803222ae5049b3b8ef26e49640f952766b82cf3e532d8d72ad1959e05027c549",
+    "engine/document.py": "f461b71ebefce27a6890a52e643cf859ab21b4e877ff5421f48dc17e38c0897d",
+    "engine/lexical.py": "b2fcb21f671e7a02d11b40c8b456afb8434484320346429dff45938e2ff88697",
+    "engine/markdown.py": "a5567a0989516f07a8c1f45d401a88106281ac5b14b8c2808fc7bfd1eb89ec44"
+  },
+  "judgment_sha256": "63773964614751c14e91ddc7507af753b62fe45f5bf0852638b130700a39bab5",
+  "manifest_sha256": "454079750da7b7b7b0ecd19945a0e8ff69e95a2f4b96246502fbe7891245a3cb",
+  "observed": {
+    "index_ms": 2.946368000266375,
+    "parse_ms": 2.197046000219416,
+    "process_peak_rss_kib": 22016,
+    "query_p50_ms": 0.14140700022835517,
+    "query_p95_ms": 0.26616699960868573,
+    "sqlite_page_bytes": 49152
+  },
+  "per_query": [
+    {
+      "exact": false,
+      "id": "t01",
+      "metrics": {
+        "document": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.1,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          }
+        },
+        "span": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.4,
+            "recall": 1.0
+          }
+        }
+      },
+      "ranked": [
+        [
+          "aurora-adr.md",
+          7
+        ],
+        [
+          "aurora-adr.md",
+          5
+        ],
+        [
+          "aurora-legacy.md",
+          1
+        ],
+        [
+          "aurora-rotation.md",
+          1
+        ],
+        [
+          "aurora-adr.md",
+          6
+        ],
+        [
+          "aurora-adr.md",
+          9
+        ],
+        [
+          "aurora-rotation.md",
+          4
+        ],
+        [
+          "aurora-adr.md",
+          8
+        ],
+        [
+          "aurora-rotation.md",
+          2
+        ],
+        [
+          "aurora-legacy.md",
+          2
+        ],
+        [
+          "aurora-legacy.md",
+          4
+        ],
+        [
+          "aurora-rotation.md",
+          3
+        ],
+        [
+          "aurora-adr.md",
+          10
+        ],
+        [
+          "aurora-rotation.md",
+          5
+        ],
+        [
+          "aurora-legacy.md",
+          3
+        ]
+      ],
+      "unanswerable": false
+    },
+    {
+      "exact": true,
+      "id": "t02",
+      "metrics": {
+        "document": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.1,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          }
+        },
+        "span": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.1,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          }
+        }
+      },
+      "ranked": [
+        [
+          "aurora-rotation.md",
+          2
+        ]
+      ],
+      "unanswerable": false
+    },
+    {
+      "exact": false,
+      "id": "t03",
+      "metrics": {
+        "document": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.1,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          }
+        },
+        "span": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.4,
+            "recall": 1.0
+          }
+        }
+      },
+      "ranked": [
+        [
+          "boreal-storage.md",
+          3
+        ],
+        [
+          "boreal-storage.md",
+          4
+        ],
+        [
+          "boreal-cache.md",
+          2
+        ],
+        [
+          "echo-audit.md",
+          2
+        ],
+        [
+          "boreal-cache.md",
+          1
+        ],
+        [
+          "boreal-recovery.md",
+          1
+        ],
+        [
+          "boreal-storage.md",
+          1
+        ],
+        [
+          "boreal-recovery.md",
+          2
+        ],
+        [
+          "boreal-recovery.md",
+          5
+        ],
+        [
+          "boreal-storage.md",
+          2
+        ],
+        [
+          "boreal-cache.md",
+          3
+        ],
+        [
+          "boreal-cache.md",
+          4
+        ],
+        [
+          "boreal-recovery.md",
+          3
+        ],
+        [
+          "boreal-recovery.md",
+          4
+        ],
+        [
+          "boreal-recovery.md",
+          6
+        ],
+        [
+          "boreal-storage.md",
+          5
+        ]
+      ],
+      "unanswerable": false
+    },
+    {
+      "exact": true,
+      "id": "t04",
+      "metrics": {
+        "document": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.1,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          }
+        },
+        "span": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.1,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          }
+        }
+      },
+      "ranked": [
+        [
+          "boreal-storage.md",
+          3
+        ]
+      ],
+      "unanswerable": false
+    },
+    {
+      "exact": false,
+      "id": "t05",
+      "metrics": {
+        "document": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.4,
+            "recall": 1.0
+          }
+        },
+        "span": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 0.9639404333166532,
+            "precision": 0.2,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 0.9639404333166532,
+            "precision": 0.4,
+            "recall": 1.0
+          }
+        }
+      },
+      "ranked": [
+        [
+          "boreal-recovery.md",
+          3
+        ],
+        [
+          "boreal-recovery.md",
+          4
+        ],
+        [
+          "glossary.md",
+          2
+        ],
+        [
+          "boreal-cache.md",
+          1
+        ],
+        [
+          "boreal-recovery.md",
+          1
+        ],
+        [
+          "boreal-storage.md",
+          1
+        ],
+        [
+          "boreal-recovery.md",
+          2
+        ],
+        [
+          "boreal-recovery.md",
+          5
+        ],
+        [
+          "boreal-storage.md",
+          2
+        ],
+        [
+          "boreal-cache.md",
+          3
+        ],
+        [
+          "boreal-cache.md",
+          4
+        ],
+        [
+          "boreal-recovery.md",
+          6
+        ],
+        [
+          "boreal-storage.md",
+          5
+        ],
+        [
+          "boreal-storage.md",
+          4
+        ],
+        [
+          "boreal-storage.md",
+          3
+        ],
+        [
+          "boreal-cache.md",
+          2
+        ]
+      ],
+      "unanswerable": false
+    },
+    {
+      "exact": false,
+      "id": "t06",
+      "metrics": {
+        "document": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.1,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          }
+        },
+        "span": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 0.9639404333166532,
+            "precision": 0.2,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 0.9639404333166532,
+            "precision": 0.4,
+            "recall": 1.0
+          }
+        }
+      },
+      "ranked": [
+        [
+          "cedar-api.md",
+          6
+        ],
+        [
+          "cedar-api.md",
+          5
+        ],
+        [
+          "cedar-api.md",
+          7
+        ],
+        [
+          "cedar-v1.md",
+          2
+        ]
+      ],
+      "unanswerable": false
+    },
+    {
+      "exact": false,
+      "id": "t07",
+      "metrics": {
+        "document": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.1,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          }
+        },
+        "span": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.1,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          }
+        }
+      },
+      "ranked": [
+        [
+          "cedar-errors.md",
+          4
+        ]
+      ],
+      "unanswerable": false
+    },
+    {
+      "exact": false,
+      "id": "t08",
+      "metrics": {
+        "document": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.1,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          }
+        },
+        "span": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 0.9327783893101107,
+            "precision": 0.2,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 0.9327783893101107,
+            "precision": 0.4,
+            "recall": 1.0
+          }
+        }
+      },
+      "ranked": [
+        [
+          "delta-queue.md",
+          4
+        ],
+        [
+          "delta-queue.md",
+          1
+        ],
+        [
+          "delta-retry.md",
+          1
+        ],
+        [
+          "delta-queue.md",
+          2
+        ],
+        [
+          "delta-queue.md",
+          3
+        ],
+        [
+          "delta-queue.md",
+          5
+        ],
+        [
+          "delta-queue.md",
+          6
+        ],
+        [
+          "delta-retry.md",
+          4
+        ],
+        [
+          "delta-retry.md",
+          3
+        ],
+        [
+          "delta-retry.md",
+          2
+        ]
+      ],
+      "unanswerable": false
+    },
+    {
+      "exact": false,
+      "id": "t09",
+      "metrics": {
+        "document": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.4,
+            "recall": 1.0
+          }
+        },
+        "span": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.3,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.6,
+            "recall": 1.0
+          }
+        }
+      },
+      "ranked": [
+        [
+          "glossary.md",
+          4
+        ],
+        [
+          "delta-retry.md",
+          4
+        ],
+        [
+          "delta-retry.md",
+          3
+        ]
+      ],
+      "unanswerable": false
+    },
+    {
+      "exact": false,
+      "id": "t10",
+      "metrics": {
+        "document": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.1,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          }
+        },
+        "span": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.1,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          }
+        }
+      },
+      "ranked": [
+        [
+          "echo-audit.md",
+          2
+        ],
+        [
+          "echo-audit.md",
+          1
+        ],
+        [
+          "echo-audit.md",
+          4
+        ],
+        [
+          "echo-audit.md",
+          3
+        ],
+        [
+          "boreal-storage.md",
+          4
+        ],
+        [
+          "boreal-storage.md",
+          3
+        ]
+      ],
+      "unanswerable": false
+    },
+    {
+      "exact": false,
+      "id": "t11",
+      "metrics": {
+        "document": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.1,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          }
+        },
+        "span": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.1,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          }
+        }
+      },
+      "ranked": [
+        [
+          "echo-privacy.md",
+          2
+        ]
+      ],
+      "unanswerable": false
+    },
+    {
+      "exact": false,
+      "id": "t12",
+      "metrics": {
+        "document": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.1,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          }
+        },
+        "span": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.4,
+            "recall": 1.0
+          }
+        }
+      },
+      "ranked": [
+        [
+          "fjord-network.md",
+          5
+        ],
+        [
+          "fjord-network.md",
+          6
+        ],
+        [
+          "fjord-backup.md",
+          1
+        ],
+        [
+          "fjord-network.md",
+          1
+        ],
+        [
+          "fjord-network.md",
+          2
+        ],
+        [
+          "fjord-network.md",
+          4
+        ],
+        [
+          "fjord-backup.md",
+          2
+        ],
+        [
+          "fjord-backup.md",
+          3
+        ],
+        [
+          "fjord-backup.md",
+          4
+        ]
+      ],
+      "unanswerable": false
+    },
+    {
+      "exact": true,
+      "id": "t13",
+      "metrics": {
+        "document": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.1,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          }
+        },
+        "span": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.1,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          }
+        }
+      },
+      "ranked": [
+        [
+          "fjord-backup.md",
+          2
+        ]
+      ],
+      "unanswerable": false
+    },
+    {
+      "exact": false,
+      "id": "t14",
+      "metrics": {
+        "document": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.4,
+            "recall": 1.0
+          }
+        },
+        "span": {
+          "10": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.2,
+            "recall": 1.0
+          },
+          "5": {
+            "direct_hit": 1,
+            "mrr": 1.0,
+            "ndcg": 1.0,
+            "precision": 0.4,
+            "recall": 1.0
+          }
+        }
+      },
+      "ranked": [
+        [
+          "helios-adr.md",
+          6
+        ],
+        [
+          "helios-copy.md",
+          6
+        ],
+        [
+          "helios-adr.md",
+          4
+        ],
+        [
+          "helios-copy.md",
+          4
+        ],
+        [
+          "helios-adr.md",
+          5
+        ],
+        [
+          "helios-copy.md",
+          5
+        ],
+        [
+          "helios-adr.md",
+          7
+        ],
+        [
+          "helios-copy.md",
+          7
+        ],
+        [
+          "helios-adr.md",
+          8
+        ],
+        [
+          "helios-copy.md",
+          8
+        ]
+      ],
+      "unanswerable": false
+    },
+    {
+      "exact": false,
+      "id": "t15",
+      "metrics": {
+        "document": {
+          "10": null,
+          "5": null
+        },
+        "span": {
+          "10": null,
+          "5": null
+        }
+      },
+      "ranked": [],
+      "unanswerable": true
+    }
+  ],
+  "runtime": {
+    "python": "3.12.3",
+    "sqlite": "3.45.1"
+  },
+  "split": "tuning",
+  "structure": {
+    "indexed_blocks": 90,
+    "lines": 105,
+    "locator_errors": 0,
+    "oracle_coverage": 1.0,
+    "sources": 21,
+    "statuses": {
+      "empty": 1,
+      "ok": 18,
+      "partial": 2
+    }
+  },
+  "summary": {
+    "document": {
+      "10": {
+        "exact_direct_hit": 1,
+        "exact_query_count": 3,
+        "mrr": 1.0,
+        "ndcg": 1.0,
+        "precision": 0.12142857142857144,
+        "recall": 1.0
+      },
+      "5": {
+        "exact_direct_hit": 1,
+        "exact_query_count": 3,
+        "mrr": 1.0,
+        "ndcg": 1.0,
+        "precision": 0.24285714285714288,
+        "recall": 1.0
+      }
+    },
+    "positive": 14,
+    "queries": 15,
+    "span": {
+      "10": {
+        "exact_direct_hit": 1,
+        "exact_query_count": 3,
+        "mrr": 1.0,
+        "ndcg": 0.9900470897102441,
+        "precision": 0.16428571428571428,
+        "recall": 1.0
+      },
+      "5": {
+        "exact_direct_hit": 1,
+        "exact_query_count": 3,
+        "mrr": 1.0,
+        "ndcg": 0.9900470897102441,
+        "precision": 0.32857142857142857,
+        "recall": 1.0
+      }
+    },
+    "unanswerable": 1,
+    "unanswerable_hits_at_10": 0,
+    "unanswerable_with_hits": 0
+  }
+}
