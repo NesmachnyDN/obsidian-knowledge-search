@@ -1,0 +1,23 @@
+{
+  "expectations_sha256": "f26df86dfb7c14de7d85a4728ebbf1f1c0c8e4b6b23bf46998842debb1615872",
+  "font_sha256": "ae7b7855e115a5966d8b1b3f80f254ccc117ec86f9965e202ee2940453837280",
+  "sources": {
+    "malformed.pdf": {
+      "bytes": 33,
+      "sha256": "fdb1d2a2b0b97713b2d78e2883ebae8660af974760188ca01919d263d02a08af"
+    },
+    "policy.docx": {
+      "bytes": 38045,
+      "sha256": "aca912bc63baa793f79e5e8a787e8c9d8d934a2a0a76295d5be79d677b6f807c"
+    },
+    "policy.pdf": {
+      "bytes": 24088,
+      "sha256": "6d36ed05151b90aa4e8e5f3caf5283eff50fafc6a7c754f28244b1ddea686be7"
+    },
+    "scan.pdf": {
+      "bytes": 36486,
+      "sha256": "6bfe0ed877419c3377b06b53e5a395dc538f398b71441344b07055f37c1548fc"
+    }
+  },
+  "version": 1
+}

@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "documents": {
+    "policy.docx": {
+      "expected_text": [
+        "Synthetic control policy",
+        "1. Storage",
+        "REQ-EX-101: Retain records for 30 days.",
+        "2. Восстановление",
+        "REQ-EX-102: Восстановление за 15 минут.",
+        "Synthetic header",
+        "Synthetic footer",
+        "Control",
+        "Limit",
+        "Retention",
+        "30 days",
+        "Exception: test only"
+      ],
+      "headings": [
+        "Synthetic control policy",
+        "1. Storage",
+        "2. Восстановление"
+      ],
+      "table_cells": [
+        "Control",
+        "Limit",
+        "Retention",
+        "30 days",
+        "Exception: test only"
+      ],
+      "merged_cell": {
+        "text": "Exception: test only",
+        "row_start": 2,
+        "row_end": 3,
+        "col_start": 0,
+        "col_end": 2
+      }
+    },
+    "policy.pdf": {
+      "pages": 2,
+      "expected_text": [
+        "Synthetic header",
+        "Synthetic control policy",
+        "1. Storage",
+        "REQ-EX-101: Retain records for 30 days.",
+        "Control",
+        "Limit",
+        "Retention",
+        "30 days",
+        "2. Восстановление",
+        "REQ-EX-102: Восстановление за 15 минут.",
+        "Synthetic footer"
+      ],
+      "headings": [
+        "Synthetic control policy",
+        "1. Storage",
+        "2. Восстановление"
+      ],
+      "table_cells": [
+        "Control",
+        "Limit",
+        "Retention",
+        "30 days"
+      ],
+      "page_text": {
+        "1": [
+          "Synthetic control policy",
+          "REQ-EX-101: Retain records for 30 days."
+        ],
+        "2": [
+          "2. Восстановление",
+          "REQ-EX-102: Восстановление за 15 минут."
+        ]
+      },
+      "page_dimensions": [
+        595,
+        842
+      ]
+    },
+    "scan.pdf": {
+      "pages": 1,
+      "expected_text": [
+        "REQ-OCR-301: Keep records for 30 days.",
+        "REQ-OCR-302: Хранить записи 15 суток."
+      ],
+      "page_text": {
+        "1": [
+          "REQ-OCR-301: Keep records for 30 days.",
+          "REQ-OCR-302: Хранить записи 15 суток."
+        ]
+      },
+      "page_dimensions": [
+        540,
+        180
+      ]
+    }
+  }
+}
