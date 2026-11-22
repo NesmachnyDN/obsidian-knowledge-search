@@ -1,0 +1,244 @@
+[
+  {
+    "exact": true,
+    "id": "h01",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 7,
+        "path": "aurora-adr.md"
+      },
+      {
+        "grade": 1,
+        "line": 10,
+        "path": "aurora-adr.md"
+      }
+    ],
+    "query": "ADR-101 approved transport policy",
+    "unanswerable": false
+  },
+  {
+    "exact": false,
+    "id": "h02",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 5,
+        "path": "aurora-rotation.md"
+      },
+      {
+        "grade": 1,
+        "line": 2,
+        "path": "aurora-rotation.md"
+      }
+    ],
+    "query": "emergency certificate revocation wait rotation",
+    "unanswerable": false
+  },
+  {
+    "exact": true,
+    "id": "h03",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 3,
+        "path": "aurora-rotation.md"
+      }
+    ],
+    "query": "REQ-AUR-13",
+    "unanswerable": false
+  },
+  {
+    "exact": false,
+    "id": "h04",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 5,
+        "path": "boreal-storage.md"
+      },
+      {
+        "grade": 1,
+        "line": 4,
+        "path": "boreal-storage.md"
+      }
+    ],
+    "query": "Удаление объектов при переходе на HDD",
+    "unanswerable": false
+  },
+  {
+    "exact": true,
+    "id": "h05",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 3,
+        "path": "boreal-cache.md"
+      }
+    ],
+    "query": "REQ-BOR-210",
+    "unanswerable": false
+  },
+  {
+    "exact": false,
+    "id": "h06",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 6,
+        "path": "boreal-recovery.md"
+      },
+      {
+        "grade": 1,
+        "line": 4,
+        "path": "boreal-recovery.md"
+      }
+    ],
+    "query": "RTO тестового контура нормируется?",
+    "unanswerable": false
+  },
+  {
+    "exact": true,
+    "id": "h07",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 7,
+        "path": "cedar-api.md"
+      }
+    ],
+    "query": "REQ-CED-41",
+    "unanswerable": false
+  },
+  {
+    "exact": true,
+    "id": "h08",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 6,
+        "path": "cedar-errors.md"
+      },
+      {
+        "grade": 1,
+        "line": 5,
+        "path": "cedar-errors.md"
+      }
+    ],
+    "query": "Retry-After 429",
+    "unanswerable": false
+  },
+  {
+    "exact": false,
+    "id": "h09",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 3,
+        "path": "cedar-v1.md"
+      },
+      {
+        "grade": 1,
+        "line": 1,
+        "path": "cedar-v1.md"
+      }
+    ],
+    "query": "Cedar retired v1.9 no new consumers",
+    "unanswerable": false
+  },
+  {
+    "exact": true,
+    "id": "h10",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 5,
+        "path": "delta-queue.md"
+      }
+    ],
+    "query": "Delta event_id deduplication",
+    "unanswerable": false
+  },
+  {
+    "exact": true,
+    "id": "h11",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 2,
+        "path": "delta-retry.md"
+      },
+      {
+        "grade": 1,
+        "line": 3,
+        "path": "delta-retry.md"
+      }
+    ],
+    "query": "REQ-DEL-52",
+    "unanswerable": false
+  },
+  {
+    "exact": false,
+    "id": "h12",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 3,
+        "path": "echo-audit.md"
+      }
+    ],
+    "query": "оператор изменять журнал Echo",
+    "unanswerable": false
+  },
+  {
+    "exact": true,
+    "id": "h13",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 5,
+        "path": "echo-privacy.md"
+      }
+    ],
+    "query": "SYN-9F-22",
+    "unanswerable": false
+  },
+  {
+    "exact": false,
+    "id": "h14",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 8,
+        "path": "helios-adr.md"
+      },
+      {
+        "grade": 2,
+        "line": 8,
+        "path": "helios-copy.md"
+      }
+    ],
+    "query": "Helios active-active approved?",
+    "unanswerable": false
+  },
+  {
+    "exact": false,
+    "id": "h15",
+    "labels": [],
+    "query": "REQ-NON-999 unsupported satellite gateway",
+    "unanswerable": true
+  },
+  {
+    "exact": true,
+    "id": "h16",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 3,
+        "path": "fjord-backup.md"
+      }
+    ],
+    "query": "SHA-256 checksums restored backup",
+    "unanswerable": false
+  }
+]

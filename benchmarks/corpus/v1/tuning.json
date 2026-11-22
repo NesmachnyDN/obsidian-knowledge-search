@@ -1,0 +1,236 @@
+[
+  {
+    "exact": false,
+    "id": "t01",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 7,
+        "path": "aurora-adr.md"
+      },
+      {
+        "grade": 1,
+        "line": 5,
+        "path": "aurora-adr.md"
+      }
+    ],
+    "query": "Aurora mutual TLS",
+    "unanswerable": false
+  },
+  {
+    "exact": true,
+    "id": "t02",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 2,
+        "path": "aurora-rotation.md"
+      }
+    ],
+    "query": "REQ-AUR-12",
+    "unanswerable": false
+  },
+  {
+    "exact": false,
+    "id": "t03",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 3,
+        "path": "boreal-storage.md"
+      },
+      {
+        "grade": 1,
+        "line": 4,
+        "path": "boreal-storage.md"
+      }
+    ],
+    "query": "Boreal SSD 14 суток",
+    "unanswerable": false
+  },
+  {
+    "exact": true,
+    "id": "t04",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 3,
+        "path": "boreal-storage.md"
+      }
+    ],
+    "query": "REQ-BOR-21",
+    "unanswerable": false
+  },
+  {
+    "exact": false,
+    "id": "t05",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 3,
+        "path": "boreal-recovery.md"
+      },
+      {
+        "grade": 1,
+        "line": 2,
+        "path": "glossary.md"
+      }
+    ],
+    "query": "RPO Boreal 15 минут",
+    "unanswerable": false
+  },
+  {
+    "exact": false,
+    "id": "t06",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 6,
+        "path": "cedar-api.md"
+      },
+      {
+        "grade": 1,
+        "line": 7,
+        "path": "cedar-api.md"
+      }
+    ],
+    "query": "POST /v2/items",
+    "unanswerable": false
+  },
+  {
+    "exact": false,
+    "id": "t07",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 4,
+        "path": "cedar-errors.md"
+      }
+    ],
+    "query": "409 Idempotency key conflict",
+    "unanswerable": false
+  },
+  {
+    "exact": false,
+    "id": "t08",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 4,
+        "path": "delta-queue.md"
+      },
+      {
+        "grade": 1,
+        "line": 3,
+        "path": "delta-queue.md"
+      }
+    ],
+    "query": "Delta exactly-once guaranteed?",
+    "unanswerable": false
+  },
+  {
+    "exact": false,
+    "id": "t09",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 4,
+        "path": "glossary.md"
+      },
+      {
+        "grade": 2,
+        "line": 4,
+        "path": "delta-retry.md"
+      },
+      {
+        "grade": 1,
+        "line": 3,
+        "path": "delta-retry.md"
+      }
+    ],
+    "query": "DLQ definition",
+    "unanswerable": false
+  },
+  {
+    "exact": false,
+    "id": "t10",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 2,
+        "path": "echo-audit.md"
+      }
+    ],
+    "query": "аудит 365 суток",
+    "unanswerable": false
+  },
+  {
+    "exact": false,
+    "id": "t11",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 2,
+        "path": "echo-privacy.md"
+      }
+    ],
+    "query": "Authorization headers log",
+    "unanswerable": false
+  },
+  {
+    "exact": false,
+    "id": "t12",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 5,
+        "path": "fjord-network.md"
+      },
+      {
+        "grade": 1,
+        "line": 6,
+        "path": "fjord-network.md"
+      }
+    ],
+    "query": "Fjord admin 9443",
+    "unanswerable": false
+  },
+  {
+    "exact": true,
+    "id": "t13",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 2,
+        "path": "fjord-backup.md"
+      }
+    ],
+    "query": "AES-256-GCM",
+    "unanswerable": false
+  },
+  {
+    "exact": false,
+    "id": "t14",
+    "labels": [
+      {
+        "grade": 2,
+        "line": 6,
+        "path": "helios-adr.md"
+      },
+      {
+        "grade": 2,
+        "line": 6,
+        "path": "helios-copy.md"
+      }
+    ],
+    "query": "Helios active-passive",
+    "unanswerable": false
+  },
+  {
+    "exact": false,
+    "id": "t15",
+    "labels": [],
+    "query": "ZEPHYR-404 quantum replicator",
+    "unanswerable": true
+  }
+]
