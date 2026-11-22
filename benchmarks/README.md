@@ -20,6 +20,10 @@ Before held-out testing, specify per-query relevance grades, counting unit (dedu
 
 See [frozen corpus v1](corpus/v1/README.md) and [baseline evidence](oks-02a.md). Run the synthetic-only benchmark with `python3 -I -B benchmarks/oks02a.py --split tuning` or `--split held_out`; the latter is for the frozen implementation evaluation, not tuning.
 
-## OKS-02B experiment (incomplete)
+## OKS-02B native extraction
 
-See [native extraction and offline OCR evidence](extraction/README.md). The model-free PDF profile is not a full semantic layout extraction strategy.
+See [native extraction and offline OCR evidence](extraction/README.md). The model-free PDF profile is not a full semantic layout extraction strategy. The measured structured PDF profile has an explicit unresolved Russian numbered-heading classification limitation.
+
+## OKS-02C tokenizer-verified chunking
+
+See the [reproducible four-policy structural/token comparison](chunking/README.md), [600-case evidence summary](chunking/results.json), [complete case records](chunking/cases.ndjson), and [provisional ADR](../docs/adr/0005-provisional-structural-chunking.md). These are source-coverage/token-budget experiments, not retrieval-quality or embedding-inference validation.
