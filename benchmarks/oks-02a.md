@@ -33,3 +33,41 @@ representative production distribution. High document recall must not be
 interpreted as demonstrated production search quality. No PDF/DOCX, OCR,
 embedding, chunking, hybrid, incumbent comparison or real-vault acceptance
 is claimed. Independent code review and exact-head CI remain delivery gates.
+
+## Post-review correctness rerun
+
+The initial results above are retained unchanged as historical evidence. A fresh
+review of candidate `0cb9f2a687f1ed7c55d9ce8b8a910099969eac50` reproduced all
+deterministic fields and found three correctness defects outside the frozen
+corpus: unchecked derived cell provenance, lost searchability of malformed
+front-matter property lines, and false heading detection inside indented fences.
+It also identified missing diagnostics for inconsistent bordered tables and
+Setext headings. Correctness fixes and four independent regression test methods
+were committed before reevaluation in
+`663a997b3868356f812620a5ecb518bb86f7f36f`. No ranking-policy tuning or changes
+to the corpus, manifest, or either judgment set were made.
+
+Reevaluation artifacts:
+[tuning](oks-02a-tuning-reviewed.json) and
+[held-out](oks-02a-held_out-reviewed.json).
+Both splits preserve every original per-query ranked result and aggregate
+effectiveness metric (0/31 changed ranks). Extraction remains 105/105 lines,
+21 sources (18 ok, 2 partial, 1 empty), with zero observed invalid locators;
+searchable blocks increase from 90 to 91 because malformed metadata is retained
+as searchable literal text. The four false-positive hits on the held-out
+unanswerable query remain documented limitations of lexical OR matching.
+
+| Observation | Tuning | Held-out |
+|---|---:|---:|
+| Parse ms | 2.244 | 2.172 |
+| Build in-memory index ms | 3.709 | 3.624 |
+| Query median ms | 0.131 | 0.110 |
+| Query nearest-rank p95 ms | 0.250 | 0.349 |
+| SQLite allocated page bytes | 49152 | 49152 |
+| Process peak RSS KiB | 22272 | 22144 |
+
+Local bounded regression passed: TypeScript type check, 101 Node tests, 49
+Python tests, dependency license check, and plugin build. The implementation
+commit and frozen corpus hashes are recorded independently of the artifacts.
+The review-fix candidate still requires a fresh independent full-diff review
+and hosted CI on the final PR head; this rerun is not an approval.
