@@ -3,6 +3,7 @@
   "repository": "BAAI/bge-m3",
   "revision": "5617a9f61b028005a4858fdac845db406aefb181",
   "license": "MIT",
+  "tokenizers_version": "0.23.3",
   "tokenizer_class": "XLMRobertaTokenizer",
   "model_max_length": 8192,
   "cls_token": "<s>",

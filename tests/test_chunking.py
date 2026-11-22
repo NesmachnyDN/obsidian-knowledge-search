@@ -4,15 +4,18 @@ from hashlib import sha256
 from pathlib import Path
 import sys
 import tempfile
+import types
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from engine.chunking import (ChunkPolicy, SourceSlice, coverage_report, make_chunk,
-                             plan_chunks)
+from engine.chunking import (ChunkPolicy, SourceSlice, _tail_overlap,
+                             coverage_report, make_chunk, plan_chunks)
 from engine.document import Cell, NativeAnchor, NativeLocation, ParsedBlock, ParsedDocument
 from engine.markdown import parse_markdown
-from engine.token_budget import TokenBudgetError, serialize_text, verify_snapshot
+from engine.token_budget import (ExactTokenizer, TokenBudgetError,
+                                 serialize_text, verify_snapshot)
 
 
 class ScalarCounter:
@@ -166,6 +169,33 @@ class ChunkingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(TokenBudgetError):
                 verify_snapshot(Path(directory))
+
+    def test_nonmonotone_overlap_chooses_longest_fitting_suffix(self):
+        doc = parse_markdown("suffix.md", b"ab")
+        policy = ChunkPolicy("fixed-window", 16, overlap_tokens=1)
+
+        class SuffixCounter(ScalarCounter):
+            def count(self, text):
+                if text == "ab":
+                    return 3  # one content token
+                if text == "b":
+                    return 5  # three content tokens, despite being shorter
+                return super().count(text)
+
+        counter = SuffixCounter()
+        chunk = make_chunk(doc, (SourceSlice(0, 0, 2),), policy, counter)
+        self.assertEqual(_tail_overlap(doc, chunk, policy, counter),
+                         SourceSlice(0, 0, 2))
+
+    def test_tokenizers_runtime_mismatch_fails_before_loading(self):
+        fake = types.ModuleType("tokenizers")
+        fake.__version__ = "0.0.0-review-simulation"
+        fake.Tokenizer = object
+        with patch("engine.token_budget.verify_snapshot",
+                   return_value={"tokenizers_version": "0.23.3"}):
+            with patch.dict(sys.modules, {"tokenizers": fake}):
+                with self.assertRaisesRegex(TokenBudgetError, "runtime version mismatch"):
+                    ExactTokenizer(Path("unused-synthetic-snapshot"))
 
     def test_contextual_text_separated_from_original(self):
         complete, prefix = serialize_text(("Chapter", "Clause"), "Actual clause",

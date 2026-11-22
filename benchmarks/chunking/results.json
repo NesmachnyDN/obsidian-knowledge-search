@@ -9,7 +9,7 @@
       "avg_source_coverage": 1.0,
       "chunk_count_total": 278,
       "cross_section_mixed_chunks": 84,
-      "duplicated_source_characters": 802,
+      "duplicated_source_characters": 833,
       "full_budget_violations": 0,
       "locator_incomplete_total": 0,
       "locator_incorrect_total": 0,
@@ -20,15 +20,15 @@
       "prefix_tokens_total": 0,
       "runs": 150,
       "table_cells_preserved_runs": 150,
-      "token_duplication_ratio_mean": 0.987900699943923,
-      "worst_case_wall_seconds": 0.031015,
+      "token_duplication_ratio_mean": 0.9876720722510827,
+      "worst_case_wall_seconds": 2.63151,
       "zero_lost_span_runs": 150
     },
     "native-hybrid": {
       "avg_source_coverage": 0.8710046523438268,
       "chunk_count_total": 224,
       "cross_section_mixed_chunks": 108,
-      "duplicated_source_characters": 1745,
+      "duplicated_source_characters": 1751,
       "full_budget_violations": 6,
       "locator_incomplete_total": 0,
       "locator_incorrect_total": 0,
@@ -36,18 +36,18 @@
       "lost_source_characters": 21048,
       "min_source_coverage": 0.041933605125218404,
       "native_unaligned_observations": 272,
-      "prefix_tokens_total": 1696,
+      "prefix_tokens_total": 1695,
       "runs": 150,
       "table_cells_preserved_runs": 114,
-      "token_duplication_ratio_mean": 0.9512151216423945,
-      "worst_case_wall_seconds": 3.113253,
+      "token_duplication_ratio_mean": 0.951091664852271,
+      "worst_case_wall_seconds": 3.088492,
       "zero_lost_span_runs": 114
     },
     "paragraph": {
       "avg_source_coverage": 1.0,
       "chunk_count_total": 904,
       "cross_section_mixed_chunks": 0,
-      "duplicated_source_characters": 6260,
+      "duplicated_source_characters": 6323,
       "full_budget_violations": 0,
       "locator_incomplete_total": 0,
       "locator_incorrect_total": 0,
@@ -58,15 +58,15 @@
       "prefix_tokens_total": 5580,
       "runs": 150,
       "table_cells_preserved_runs": 150,
-      "token_duplication_ratio_mean": 1.7836972954608972,
-      "worst_case_wall_seconds": 0.036994,
+      "token_duplication_ratio_mean": 1.7832918681229546,
+      "worst_case_wall_seconds": 2.656931,
       "zero_lost_span_runs": 150
     },
     "structure": {
       "avg_source_coverage": 1.0,
       "chunk_count_total": 502,
       "cross_section_mixed_chunks": 0,
-      "duplicated_source_characters": 1524,
+      "duplicated_source_characters": 1561,
       "full_budget_violations": 0,
       "locator_incomplete_total": 0,
       "locator_incorrect_total": 0,
@@ -77,15 +77,15 @@
       "prefix_tokens_total": 3186,
       "runs": 150,
       "table_cells_preserved_runs": 150,
-      "token_duplication_ratio_mean": 1.2752026965412178,
-      "worst_case_wall_seconds": 0.039274,
+      "token_duplication_ratio_mean": 1.275044182783522,
+      "worst_case_wall_seconds": 3.296914,
       "zero_lost_span_runs": 150
     }
   },
   "case_count": 600,
   "case_record_format": "one complete original benchmark case JSON object per line",
   "case_record_path": "cases.ndjson",
-  "case_record_sha256": "0f85ff0cf2625bdaa83570e6f89d62e8a8cd57a3d8e7fcf10c74abb3e32a0a53",
+  "case_record_sha256": "3d14d8c01a7abe3d23c316582bfe3159e391033289cd91112d4001f5a9c2d020",
   "deterministic_repeat": {
     "fixed-window": true,
     "native-hybrid": true,
@@ -120,12 +120,12 @@
       "burst_usec": "0",
       "core_sched.force_idle_usec": "0",
       "nr_bursts": "0",
-      "nr_periods": "120",
+      "nr_periods": "518",
       "nr_throttled": "0",
-      "system_usec": "887899",
+      "system_usec": "827877",
       "throttled_usec": "0",
-      "usage_usec": "11955652",
-      "user_usec": "11067752"
+      "usage_usec": "51849302",
+      "user_usec": "51021425"
     },
     "memory_events": {
       "high": "0",
@@ -136,12 +136,12 @@
       "oom_kill": "0"
     },
     "memory_max": 4294967296,
-    "memory_peak_bytes": 1710829568,
+    "memory_peak_bytes": 1710645248,
     "network_interfaces": [
       "lo"
     ],
     "pids_max": 128,
-    "process_peak_rss_kib": 1795304,
+    "process_peak_rss_kib": 1795244,
     "swap_max": 0
   },
   "summary": {

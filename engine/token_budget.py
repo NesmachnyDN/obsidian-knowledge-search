@@ -53,6 +53,8 @@ class ExactTokenizer:
         except ImportError as exc:
             raise TokenBudgetError("pinned tokenizers runtime unavailable") from exc
         self.version = tokenizers.__version__
+        if self.version != manifest["tokenizers_version"]:
+            raise TokenBudgetError("pinned tokenizers runtime version mismatch")
         self.identity = {
             "repository": manifest["repository"],
             "revision": manifest["revision"],

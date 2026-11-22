@@ -182,19 +182,19 @@ def make_chunk(doc: ParsedDocument, slices: tuple[SourceSlice, ...], policy: Chu
 
 def _fit(doc: ParsedDocument, block: ParsedBlock, start: int, policy: ChunkPolicy,
          tokenizer: TokenCounter, headings: tuple[str, ...]) -> SourceSlice:
-    """Find a nonempty exact-token-fitting Unicode substring, never truncate."""
-    lo, hi, best = start + 1, len(block.text), start
-    while lo <= hi:
-        middle = (lo + hi) // 2
-        contextual, _ = serialize_text(headings, block.text[start:middle],
+    """Find the longest fitting original-character prefix without monotonicity assumptions.
+
+    Subword token counts can *decrease* after adding a character: a tokenizer
+    may merge the new suffix with an earlier token. Binary search can therefore
+    reject an otherwise fitting element. Check exact serialized candidates from
+    longest to shortest and fail only when no nonempty candidate fits.
+    """
+    for end in range(len(block.text), start, -1):
+        contextual, _ = serialize_text(headings, block.text[start:end],
                                        literal_prefix=policy.literal_prefix)
         if tokenizer.count(contextual) <= policy.max_tokens:
-            best, lo = middle, middle + 1
-        else:
-            hi = middle - 1
-    if best == start:
-        raise TokenBudgetError("prefix or single source codepoint exceeds token budget")
-    return SourceSlice(block.order, start, best)
+            return SourceSlice(block.order, start, end)
+    raise TokenBudgetError("prefix and every nonempty source fragment exceed token budget")
 
 
 def _tail_overlap(doc: ParsedDocument, chunk: Chunk, policy: ChunkPolicy,
@@ -203,15 +203,13 @@ def _tail_overlap(doc: ParsedDocument, chunk: Chunk, policy: ChunkPolicy,
         return None
     last = chunk.slices[-1]
     value = doc.blocks[last.block_order].text
-    # Add a suffix of one original source fragment. Does not infer token-to-byte spans.
-    low, high, start = last.start, last.end - 1, last.end
-    while low <= high:
-        mid = (low + high) // 2
-        if tokenizer.count(value[mid:last.end]) - tokenizer.count("") <= policy.overlap_tokens:
-            start, high = mid, mid - 1
-        else:
-            low = mid + 1
-    return SourceSlice(last.block_order, start, last.end) if start < last.end else None
+    # Subword suffix token counts are not monotonic in their start position.
+    # Inspect longest first; never derive byte or native-cell offsets here.
+    base_tokens = tokenizer.count("")
+    for start in range(last.start, last.end):
+        if tokenizer.count(value[start:last.end]) - base_tokens <= policy.overlap_tokens:
+            return SourceSlice(last.block_order, start, last.end)
+    return None
 
 
 def _overlap(doc: ParsedDocument, chunks: list[Chunk], policy: ChunkPolicy,

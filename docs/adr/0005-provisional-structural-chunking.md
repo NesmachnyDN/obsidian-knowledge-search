@@ -25,7 +25,7 @@ The checked benchmark [aggregate](../../benchmarks/chunking/results.json) and [c
 | Policy | Zero lost-source-span cases (of 150) | Full-input budget violations | Cross-section mixed chunks | Full-table-cell-preserved cases | Total chunks | Mean contextual token duplication ratio |
 |---|---:|---:|---:|---:|---:|---:|
 | Fixed-window | 150 | 0 | 84 | 150 | 278 | 0.988 |
-| Paragraph | 150 | 0 | 0 | 150 | 904 | 1.784 |
+| Paragraph | 150 | 0 | 0 | 150 | 904 | 1.783 |
 | Independent structure | 150 | 0 | 0 | 150 | 502 | 1.275 |
 | Docling HybridChunker via canonical projection | 114 | 6 | 108 | 114 | 224 | 0.951 |
 
@@ -33,7 +33,7 @@ The native bridge conservatively credits **only exact-aligned canonical original
 
 At token budget 96, zero overlap, the **partial** structured PDF source produced 100% canonical source-character coverage with 0 budget/cross-section violations and preserved table cells under the independent structure planner. It does not restore the incorrectly classified numbered heading; the unresolved extraction diagnostic continues to apply. Both independent structural and paragraph policies satisfy the current structural gates; the former emits fewer chunks and repeats less contextual text under these measured constraints.
 
-The final guarded run consumed 14.47 seconds wall end-to-end; cgroup peak memory **1,710,829,568 bytes** with a 4,294,967,296-byte hard limit, `memory.swap.max=0`, two-CPU affinity and 200% CPU quota, `pids.max=128`, loopback-only namespace, and **zero** cgroup memory-pressure/oom events. Four offline integration tests confirmed exact full-input counts against HuggingFace fast tokenizer, intentional >8192-token inputs not being truncated, oversized canonical coverage and native provenance diagnostics. The existing Python/TypeScript regressions and code quality gates remain separate CI/review requirements.
+The corrected guarded run consumed 54.23 seconds wall end-to-end (versus 14.47 seconds before the exact-fit correction); the exhaustive token-fitting search trades higher CPU time for correctness and needs further large-document throughput evaluation before adoption. The measured cgroup peak memory was **1,710,645,248 bytes** with a 4,294,967,296-byte hard limit, `memory.swap.max=0`, two-CPU affinity and 200% CPU quota, `pids.max=128`, loopback-only namespace, and **zero** cgroup memory-pressure/oom events. Five offline integration tests confirmed exact full-input counts against HuggingFace fast tokenizer, intentional >8192-token inputs not being truncated, oversized canonical coverage and native provenance diagnostics. The existing Python/TypeScript regressions and code quality gates remain separate CI/review requirements.
 
 ## Rejected alternatives and consequences
 

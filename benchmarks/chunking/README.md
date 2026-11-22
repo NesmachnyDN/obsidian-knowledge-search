@@ -52,7 +52,7 @@ The comparative shortlist remains provisional pending paired quality trials in *
 
 ## Observed runs
 
-The final reproducible, successful [result summary](results.json) and **all 600 original cases** in [newline-delimited JSON](cases.ndjson) were generated from the checked guarded-run JSON by [the lossless summarizer](summarize.py), preserving every source span and per-case metric. Full raw run SHA-256: `573507ba316f4083913f1428bbd29c3bbf6574e587188962ecdd7524aa17d02f`; compact case stream SHA-256: `0f85ff0cf2625bdaa83570e6f89d62e8a8cd57a3d8e7fcf10c74abb3e32a0a53`. A second full run after binding chunk IDs to tokenizer identity reproduced **all 600 semantic case metrics exactly** (wall times and RSS naturally vary). To reproduce the committed format, redirect the guarded runner's JSON to a unique local file and run:
+The final reproducible, successful [result summary](results.json) and **all 600 original cases** in [newline-delimited JSON](cases.ndjson) were generated from the checked guarded-run JSON by [the lossless summarizer](summarize.py), preserving every source span and per-case metric. Current corrected full raw run SHA-256: `27fe3b2647f8597332cf215df5d2194f3779e4ce9b1dfc7ffda3d66062689740`; compact case stream SHA-256: `3d14d8c01a7abe3d23c316582bfe3159e391033289cd91112d4001f5a9c2d020`. The 600 cases were regenerated after fixing nonmonotonic tokenizer prefix/suffix fitting and enforcing `tokenizers==0.23.3`. Aggregate coverage and chunk counts remain the same; duplication metrics and timings were recalculated rather than retained from the previous HEAD. To reproduce the committed format, redirect the guarded runner's JSON to a unique local file and run:
 
 ```sh
 python3 -I -B benchmarks/chunking/summarize.py \
@@ -66,7 +66,7 @@ The case stream is deliberately one JSON object per line to keep the 600-result 
 | Policy | No lost spans / 150 | Full budget violations | Section-mixed chunks | Total chunks | Mean contextual-token duplication ratio | Cells preserved / 150 |
 |---|---:|---:|---:|---:|---:|---:|
 | Fixed-window | 150 | 0 | 84 | 278 | 0.988 | 150 |
-| Paragraph-aware | 150 | 0 | 0 | 904 | 1.784 | 150 |
+| Paragraph-aware | 150 | 0 | 0 | 904 | 1.783 | 150 |
 | Independent structure-aware | 150 | 0 | 0 | 502 | 1.275 | 150 |
 | Native HybridChunker on canonical projection | 114 | 6 | 108 | 224 | 0.951* | 114 |
 
@@ -74,8 +74,8 @@ The case stream is deliberately one JSON object per line to keep the 600-result 
 
 For the structured PDF at budget 96 and overlap 0, independent structure-aware gives 100% verified coverage, 0 mixed sections, 0 token violations, and retained table cell anchors; it does not improve the source classifier.
 
-The final guarded run took 14.47 s end-to-end, with `memory.max=4,294,967,296` bytes, actual `memory.peak=1,710,829,568` bytes, `memory.swap.max=0`, `cpu.max=200000 100000`, affinity 2 CPUs, `pids.max=128`, network interfaces `["lo"]`, and zero recorded memory high/max/OOM/OOM-kill events. A prior run was manually canceled via the user service scope to avoid an unbounded repeated tokenizer initialisation and left a nonpublished `.partial` result; a fresh independent scope then completed successfully. Another earlier trial detected a missing `mpire` runtime dependency on the late native repeat test; installing the declared code-only transitive packages corrected this. Neither incomplete attempt was published as a successful result.
+The corrected guarded run took 54.23 s end-to-end (versus 14.47 s for the earlier binary-search prototype); exact longest-fitting substring enumeration has a higher CPU cost for oversized fragments and is not yet an accepted large-document throughput policy.\n\nThe corrected run enforced `memory.max=4,294,967,296` bytes, actual `memory.peak=1,710,645,248` bytes, `memory.swap.max=0`, `cpu.max=200000 100000`, affinity 2 CPUs, `pids.max=128`, network interfaces `["lo"]`, and zero recorded memory high/max/OOM/OOM-kill events. A prior run was manually canceled via the user service scope to avoid an unbounded repeated tokenizer initialisation and left a nonpublished `.partial` result; a fresh independent scope then completed successfully. Another earlier trial detected a missing `mpire` runtime dependency on the late native repeat test; installing the declared code-only transitive packages corrected this. Neither incomplete attempt was published as a successful result.
 
-Four actual-tokenizer integration tests passed **inside a separately verified CPU/memory-limited network namespace**, checking parity with HuggingFace fast tokenizer, a deliberately >8192-token untruncated input, exact-token long-clause segmentation, and conservative native provenance mapping. Existing dependency-free unit suites continue to work without the tokenizer artifacts. Overall interpretation and the provisional selection are recorded in [ADR-0005](../../docs/adr/0005-provisional-structural-chunking.md).
+Five actual-tokenizer integration tests passed **inside a separately verified CPU/memory-limited network namespace**, checking parity with HuggingFace fast tokenizer, a deliberately >8192-token untruncated input, nonmonotonic exact-token fitting, long-clause segmentation, and conservative native provenance mapping. Existing dependency-free unit suites continue to work without the tokenizer artifacts. Overall interpretation and the provisional selection are recorded in [ADR-0005](../../docs/adr/0005-provisional-structural-chunking.md).
 
 There are no claims of production chunking acceptance, complete native table cell-local offsets, representative large-document throughput or retrieval quality. The shortlist decision remains conditional on 03B paired retrieval-quality validation and 03A embedding runtime parity.

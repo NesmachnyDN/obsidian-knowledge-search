@@ -42,6 +42,26 @@ class ExactOfflineTokenizerTests(unittest.TestCase):
         self.assertEqual(self.tokenizer.identity["embedding_runtime_verified"], False)
         self.assertEqual(self.tokenizer.count(""), 2)
 
+    def test_nonmonotone_exact_fit_and_longest_prefix(self):
+        # Real BGE-M3 Unigram token counts can drop when a new char is appended.
+        prefix = "0162и9дВd71А72a-ГА9"
+        self.assertEqual(self.tokenizer.count(prefix), 16)
+        self.assertEqual(self.tokenizer.count(prefix + "-"), 17)
+        self.assertEqual(self.tokenizer.count(prefix + "-1"), 16)
+        doc = parse_markdown("nonmonotone.md", b"-1")
+        policy = ChunkPolicy("fixed-window", 16, literal_prefix=prefix)
+        chunks = plan_chunks(doc, policy, self.tokenizer)
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0].original_text, "-1")
+        self.assertEqual(chunks[0].token_count, 16)
+        self.assertEqual(coverage_report(doc, chunks, self.tokenizer)["source_coverage"], 1.0)
+
+        source = "0162и9дВd71А72a-ГА9-11cbеВз0йca5жиА0bГ34"
+        longer = parse_markdown("longer.md", source.encode("utf-8"))
+        chunks = plan_chunks(longer, ChunkPolicy("fixed-window", 16), self.tokenizer)
+        self.assertEqual(chunks[0].slices[0].end, 21)
+        self.assertEqual(coverage_report(longer, chunks, self.tokenizer)["lost_spans"], [])
+
     def test_large_input_is_not_truncated(self):
         large = ("REQ-HELLO-123, 45 дней.\n" * 4000)
         count = self.tokenizer.count(large)
