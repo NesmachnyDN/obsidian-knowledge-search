@@ -24,6 +24,17 @@
   const file = await app.vault.create(filename, raw); await settle();
   await p.updateSettings({ ...p.settings, propertiesEnabled: true });
   await wait(() => !element('fieldset').disabled, 'FILTER_DISABLED');
+  assert(element('.oks-match-mode').value === 'literal', 'DEFAULT_LITERAL');
+  await query('42: café');
+  assert(element('.oks-results').children.length === 1, 'LITERAL_SUBSTRING');
+  await query('café REQ-UI-42');
+  assert(element('.oks-results').children.length === 0, 'LITERAL_REVERSED_PHRASE');
+  element('.oks-match-mode').value = 'terms';
+  element('.oks-match-mode').dispatchEvent(new Event('change', { bubbles: true }));
+  await query('café REQ-UI-42');
+  assert(element('.oks-results').children.length === 1, 'EXPLICIT_TERMS');
+  element('.oks-match-mode').value = 'literal';
+  element('.oks-match-mode').dispatchEvent(new Event('change', { bubbles: true }));
   await query('req-ui-42');
   assert(element('.oks-results').children.length === 1, 'LEXICAL');
   assert(element('.oks-results pre').textContent.includes('<img'), 'LITERAL_TEXT');

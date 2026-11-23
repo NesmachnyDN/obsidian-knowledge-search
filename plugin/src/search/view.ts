@@ -25,6 +25,13 @@ export class SearchView extends ItemView {
     const status = add('pre', '', 'oks-status'); status.setAttribute('aria-live', 'polite');
     const input = add('input', '', 'oks-query'); input.type = 'search';
     input.placeholder = 'Query (maximum 512 UTF-8 bytes)'; input.setAttribute('aria-label', 'Search query');
+    const matchMode = add('select', '', 'oks-match-mode');
+    matchMode.setAttribute('aria-label', 'Text matching mode');
+    for (const [value, description] of [['literal', 'Literal occurrence / exact phrase'],
+      ['terms', 'Ranked lexical terms']] as const) {
+      const option = textElement(doc, 'option', description); option.value = value; matchMode.appendChild(option);
+    }
+    matchMode.value = 'literal';
     const topK = add('input', '', 'oks-topk'); topK.type = 'number'; topK.min = '1'; topK.max = '50';
     topK.value = String(this.settings().topK); topK.setAttribute('aria-label', 'Top K');
     const filters = add('fieldset', '');
@@ -47,7 +54,8 @@ export class SearchView extends ItemView {
       try {
         const predicates = enabled.checked && this.settings().propertiesEnabled
           ? [propertyInput(key.value, type.value, op.value, value.value)] : [];
-        const result = await this.controller.search(uiRequest(input.value, Number(topK.value), predicates));
+        const result = await this.controller.search(uiRequest(input.value, Number(topK.value),
+          predicates, matchMode.value as 'literal' | 'terms'));
         if (!this.disposed && !result.ok && result.error !== 'SUPERSEDED') this.controller.message(result.error);
       } catch { if (!this.disposed) this.controller.message('INVALID_REQUEST'); }
     };
@@ -55,6 +63,7 @@ export class SearchView extends ItemView {
     input.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); void search(); } };
     // Editing the query invalidates an earlier asynchronous response before another submit.
     input.oninput = () => this.controller.invalidate();
+    matchMode.onchange = () => this.controller.invalidate();
     for (const action of ['pause','resume','cancel','rebuild'] as const)
       button(action[0]!.toUpperCase() + action.slice(1), `oks-${action}`, () => { void this.control(action); });
     const exportArea = add('textarea', '', 'oks-diagnostics'); exportArea.readOnly = true; exportArea.hidden = true;
