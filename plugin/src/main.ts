@@ -1,7 +1,12 @@
 import { AdvancedHealthBridge } from './advanced/health';
 import { AdvancedIngestionManager } from './advanced/manager';
+import { AdvancedRetrievalManager } from './advanced/retrieval-manager';
+import { AdvancedSearchModal } from './advanced/search-modal';
+import { ModelError } from './advanced/model-protocol';
+import { readSource, trustedVaultRoot } from './advanced/source';
+import type { AdvancedEvidenceHit, RetrievalRequest, RetrievalResponse } from './advanced/retrieval';
 import { IngestError, type IngestResponse } from './advanced/protocol';
-import { FileSystemAdapter, Modal, Notice, Plugin, TFile, type App, type TAbstractFile } from 'obsidian';
+import { FileSystemAdapter, MarkdownView, Modal, Notice, Plugin, TFile, type App, type TAbstractFile } from 'obsidian';
 import { ProbeController } from './controller';
 import { FIXTURE_PATH, type Response } from './protocol';
 import { Supervisor } from './supervisor';
@@ -59,6 +64,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private purgeInFlight?: Promise<number>;
   readonly advancedHealth = new AdvancedHealthBridge();
   readonly advancedIngestion = new AdvancedIngestionManager();
+  readonly advancedRetrieval = new AdvancedRetrievalManager(this.advancedIngestion);
   private advancedStartup?: Promise<void>;
   readonly searchController = new SearchController(async hit => {
     if (!this.navigator) throw new StandaloneError('NAVIGATION_REJECTED');
@@ -95,10 +101,23 @@ export default class SyntheticEvidencePlugin extends Plugin {
     });
     this.addSettingTab(new SearchSettingsTab(this.app, this, () => this.settings, change => this.patchSettings(change), () => this.purgeIndex(),
       () => this.advancedHealth.snapshot(), () => this.checkAdvancedHealth(),
-      () => this.advancedIngestion.snapshot(), () => this.ingestAdvancedActiveFile()));
+      () => this.advancedIngestion.snapshot(), () => this.ingestAdvancedActiveFile(),
+      () => this.advancedRetrieval.snapshot(), () => this.indexAdvancedActiveFile(),
+      () => this.openAdvancedSearch(), () => this.cancelAdvancedWork(),
+      () => this.indexAdvancedActiveFile(true)));
     this.addCommand({ id:'ingest-active-advanced-source', name:'Ingest active Vault document (Advanced opt-in)',
       callback: () => { void this.ingestAdvancedActiveFile().catch(error =>
         new Notice('OKS Advanced: '+(error instanceof IngestError?error.code:'ADVANCED_UNAVAILABLE'))); } });
+    this.addCommand({ id:'index-active-advanced-source', name:'Build BGE-M3 index for active Vault document (Advanced)',
+      callback:()=>{void this.indexAdvancedActiveFile().catch(error=>
+        new Notice('OKS Advanced: '+(error instanceof Error?error.message:'INDEX_FAILED')));}});
+    this.addCommand({ id:'rebuild-active-advanced-source', name:'Rebuild model index for active Vault document (Advanced)',
+      callback:()=>{void this.indexAdvancedActiveFile(true).catch(error=>
+        new Notice('OKS Advanced: '+(error instanceof Error?error.message:'INDEX_FAILED')));}});
+    this.addCommand({ id:'open-advanced-search',name:'Open Advanced lexical/dense/hybrid search',
+      callback:()=>{this.openAdvancedSearch();}});
+    this.addCommand({ id:'cancel-advanced-work',name:'Cancel Advanced indexing / retrieval',
+      callback:()=>{void this.cancelAdvancedWork().catch(()=>new Notice('OKS Advanced: cancel failed'));}});
     this.addCommand({ id: 'run-synthetic-evidence-probe' , name: 'Run synthetic evidence probe', callback: () => { void this.runProbe(); } });
     this.addCommand({ id: 'cancel-synthetic-evidence-probe', name: 'Cancel synthetic evidence probe', callback: () => this.controller?.cancel() });
     const invalidate = (file: TAbstractFile, oldPath?: string): void => {
@@ -117,7 +136,8 @@ export default class SyntheticEvidencePlugin extends Plugin {
       this.searchController.invalidate();
       this.standalone?.changed(file.path);
       this.advancedIngestion.invalidate(file.path);
-      if (oldPath !== undefined) { this.standalone?.changed(oldPath); this.advancedIngestion.invalidate(oldPath); }
+      this.advancedRetrieval.invalidate(file.path);
+      if (oldPath !== undefined) { this.standalone?.changed(oldPath); this.advancedIngestion.invalidate(oldPath);this.advancedRetrieval.invalidate(oldPath); }
     };
     this.registerEvent(this.app.vault.on('create', file => nativeChange(file)));
     this.registerEvent(this.app.vault.on('modify', file => nativeChange(file)));
@@ -251,8 +271,87 @@ export default class SyntheticEvidencePlugin extends Plugin {
       && this.app.vault.getAbstractFileByPath(path) === file && file.path===path;
     return this.advancedIngestion.verified(path,allowed);
   }
+  async indexAdvancedActiveFile(rebuild=false):Promise<void>{
+    const file=this.app.workspace.getActiveFile();
+    if(!(file instanceof TFile))throw new ModelError('SOURCE_REJECTED');
+    await this.indexAdvancedPath(file.path,rebuild);
+    new Notice('OKS Advanced: real BGE-M3 index committed for '+file.name);
+  }
+  async indexAdvancedPath(path:string,rebuild=false):Promise<void>{
+    const adapter=this.app.vault.adapter;
+    const file=this.app.vault.getAbstractFileByPath(path);
+    if(this.unloaded||!this.layoutReady||!this.settings.ingestion.enabled
+       ||!(adapter instanceof FileSystemAdapter)||!(file instanceof TFile)||file.path!==path)
+      throw new ModelError('SOURCE_REJECTED');
+    const root=resolve(adapter.getBasePath());
+    await ingestionBarriers.get(root);
+    const cfg={...this.settings.ingestion};
+    const authorized=()=>!this.unloaded&&this.layoutReady&&this.settings.ingestion.enabled
+      &&JSON.stringify(this.settings.ingestion)===JSON.stringify(cfg)
+      &&this.app.vault.getAbstractFileByPath(path)===file&&file.path===path;
+    if(!await this.verifiedAdvancedResult(path))await this.ingestAdvancedPath(path);
+    if(!authorized())throw new ModelError('SOURCE_STALE');
+    await this.advancedRetrieval.index(cfg,root,this.manifest.id,path,authorized,rebuild);
+  }
+  async searchAdvanced(request:RetrievalRequest):Promise<RetrievalResponse>{
+    const adapter=this.app.vault.adapter;
+    if(this.unloaded||!this.layoutReady||!this.settings.ingestion.enabled
+       ||!(adapter instanceof FileSystemAdapter))throw new ModelError('MODEL_UNAVAILABLE');
+    const root=resolve(adapter.getBasePath());
+    await ingestionBarriers.get(root);
+    const cfg={...this.settings.ingestion};
+    const authorized=(path:string):boolean=>this.layoutReady&&!this.unloaded
+      &&this.settings.ingestion.enabled
+      &&JSON.stringify(this.settings.ingestion)===JSON.stringify(cfg)
+      &&this.app.vault.getAbstractFileByPath(path) instanceof TFile;
+    return this.advancedRetrieval.search(cfg,root,this.manifest.id,request,authorized);
+  }
+  openAdvancedSearch():void{
+    if(!this.settings.ingestion.enabled){new Notice('Enable Advanced document ingestion first.');return;}
+    new AdvancedSearchModal(this.app,request=>this.searchAdvanced(request),
+      hit=>this.openAdvancedHit(hit),()=>this.cancelAdvancedWork(),
+      ()=>JSON.stringify(this.advancedRetrieval.snapshot())).open();
+  }
+  async openAdvancedHit(hit:AdvancedEvidenceHit):Promise<void>{
+    const path=hit.vaultRelativeReference,file=this.app.vault.getAbstractFileByPath(path);
+    const adapter=this.app.vault.adapter;
+    if(!(file instanceof TFile)||!(adapter instanceof FileSystemAdapter)||this.unloaded)
+      throw new ModelError('SOURCE_STALE');
+    const authorized=()=>!this.unloaded&&this.settings.ingestion.enabled
+      &&this.app.vault.getAbstractFileByPath(path)===file&&file.path===path;
+    await this.advancedRetrieval.verifyHit(hit,path,authorized);
+    const root=await trustedVaultRoot(resolve(adapter.getBasePath()));
+    const source=await readSource(root,path);
+    if(source.sha256!==hit.sourceSha256||!authorized())throw new ModelError('SOURCE_STALE');
+    const loc=hit.sourceLocators[0];
+    if(!loc||loc.sourceVersion!==source.sha256)throw new ModelError('EVIDENCE_INVALID');
+    if(loc.locatorKind==='markdown'){
+      if(loc.byteStart===null||loc.byteEnd===null||loc.lineStart===null
+          ||loc.lineEnd!==loc.lineStart)throw new ModelError('EVIDENCE_INVALID');
+      const excerpt=new TextDecoder('utf-8',{fatal:true}).decode(source.bytes.subarray(loc.byteStart,loc.byteEnd));
+      if(excerpt!==hit.originalExcerpt)throw new ModelError('EVIDENCE_INVALID');
+    }else if(loc.locatorKind!=='native'||!loc.nativeItemRef)
+      throw new ModelError('EVIDENCE_INVALID');
+    const leaf=this.app.workspace.getLeaf('tab');
+    await leaf.openFile(file,{active:true});
+    await this.advancedRetrieval.verifyHit(hit,path,authorized);
+    if(loc.locatorKind==='markdown'){
+      const view=leaf.view;
+      if(!(view instanceof MarkdownView)||view.file!==file)throw new ModelError('NAVIGATION_REJECTED');
+      const sourceText=new TextDecoder('utf-8',{fatal:true}).decode(source.bytes);
+      if(view.editor.getValue().replace(/\r\n|\r/g,'\n')!==sourceText.replace(/\r\n|\r/g,'\n'))
+        throw new ModelError('SOURCE_STALE');
+      const prefix=new TextDecoder('utf-8',{fatal:true}).decode(source.bytes.subarray(0,loc.byteStart!));
+      const line=loc.lineStart!-1,ch=prefix.split(/\r\n|\r|\n/).at(-1)!.length;
+      view.editor.setSelection({line,ch},{line,ch:ch+hit.originalExcerpt.length});
+      view.editor.scrollIntoView({from:{line,ch},to:{line,ch:ch+hit.originalExcerpt.length}},true);
+    }
+    // PDF/DOCX: preserve the true native locator in the result; Obsidian's
+    // public file-open API cannot guarantee page/cell navigation for DOCX.
+  }
+  async cancelAdvancedWork():Promise<void>{await this.advancedRetrieval.stop();}
   private stopIngestion(): Promise<void> {
-    const stopping=this.advancedIngestion.stop();
+    const stopping=this.advancedRetrieval.stop().then(()=>this.advancedIngestion.stop());
     const adapter=this.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter)) return stopping;
     const key=resolve(adapter.getBasePath());

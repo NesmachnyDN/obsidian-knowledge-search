@@ -16,7 +16,7 @@ type Pointer = { schemaVersion: 1; rootId: string; filename: string; sha256: str
 const pointerName = 'CURRENT';
 const namePattern = /^[0-9a-f]{64}\.json$/;
 const stagePattern = /^\.stage-[0-9a-f-]{36}$/;
-const strictFile = async (file: string, maximum: number): Promise<Buffer> => {
+export const strictFile = async (file: string, maximum: number): Promise<Buffer> => {
   const info = await lstat(file);
   if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > maximum || info.size < 1
       || (info.mode & 0o077) !== 0)
@@ -25,7 +25,7 @@ const strictFile = async (file: string, maximum: number): Promise<Buffer> => {
   if (bytes.byteLength !== info.size) throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
   return bytes;
 };
-const parseCanonical = (bytes: Buffer): unknown => {
+export const parseCanonical = (bytes: Buffer): unknown => {
   let data: unknown;
   try { data = JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes)); }
   catch { throw new IngestError('INDEX_PUBLICATION_UNCERTAIN'); }
@@ -33,12 +33,12 @@ const parseCanonical = (bytes: Buffer): unknown => {
     throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
   return data;
 };
-const persist = async (file: string, bytes: Buffer): Promise<void> => {
+export const persist = async (file: string, bytes: Buffer): Promise<void> => {
   const handle = await open(file, constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);
   try { await handle.writeFile(bytes); await handle.sync(); }
   finally { await handle.close(); }
 };
-const syncDirectory = async (path: string): Promise<void> => {
+export const syncDirectory = async (path: string): Promise<void> => {
   const handle = await open(path,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);
   try { await handle.sync(); } finally { await handle.close(); }
 };
@@ -100,6 +100,10 @@ export class AdvancedGenerationStore {
       next.set(entry.sourcePath,entry.response);
     }
     this.entries=next;
+  }
+  paths(): string[] {
+    if(this.unavailable) throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
+    return [...this.entries.keys()].sort();
   }
   get(path: string): IngestResponse | null {
     if (this.unavailable) throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
