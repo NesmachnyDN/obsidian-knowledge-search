@@ -70,6 +70,36 @@ test('05D remediation B1: cancellation during FINAL async guard forbids CURRENT 
   }
 });
 
+test('05D remediation B4: repeated final-guard cancellation never accumulates pointer stages',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'oks05d-stage-quota-'));
+  const vault=join(root,'vault'),xdg=join(root,'xdg'),prior=process.env.XDG_DATA_HOME;
+  await mkdir(vault,{mode:0o700});await mkdir(xdg,{mode:0o700});process.env.XDG_DATA_HOME=xdg;
+  try{
+    const scoped=await trustedVaultRoot(vault);
+    const store=await AdvancedRetrievalStore.open(scoped,'oks-synthetic-evidence');
+    const committed=await store.publish(entry('a.md'),identity,async()=>{},
+      new AbortController().signal);
+    for(let i=0;i<16;i++){
+      let checks=0;
+      const abort=new AbortController();
+      await assert.rejects(store.publish(entry('b.md'),identity,async()=>{
+        if(++checks===3)abort.abort();
+      },abort.signal),(e:unknown)=>e instanceof ModelError&&e.code==='MODEL_CANCELLED');
+      assert.equal(checks,3);
+      assert.equal(store.snapshot()?.generationId,committed.generationId);
+    }
+    const files=await readdir(store.path);
+    assert.equal(files.filter(f=>f.startsWith('.stage-')).length,0,
+      'last-guard cancel must clean its pointer stage');
+    assert.ok(files.length<12,'repeated canceled publish must not poison cold recovery quota');
+    const reopened=await AdvancedRetrievalStore.open(scoped,'oks-synthetic-evidence');
+    assert.equal(reopened.snapshot()?.generationId,committed.generationId);
+  }finally{
+    if(prior===undefined)delete process.env.XDG_DATA_HOME;else process.env.XDG_DATA_HOME=prior;
+    await rm(root,{recursive:true,force:true});
+  }
+});
+
 test('05D remediation B3: XDG ancestor symlinks and later swaps cannot write derived data into Vault',async()=>{
   const root=await mkdtemp(join(tmpdir(),'oks05d-ancestor-'));
   const vault=join(root,'vault'),xdg=join(root,'xdg'),prior=process.env.XDG_DATA_HOME;

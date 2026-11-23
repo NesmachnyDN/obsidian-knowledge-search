@@ -35,7 +35,7 @@ export class AdvancedRetrievalManager {
   invalidate(path:string):void{
     const affected=this.store?.snapshot()?.entries.some(e=>e.sourcePath===path
       ||e.sourcePath.startsWith(path+'/'))??false;
-    if(affected||this.activePath===path){
+    if(affected||this.activePath===path||this.active){
       ++this.revision;
       this.controller?.abort();
       if(this.active)void this.ingestion.runner.stop().catch(()=>{
@@ -81,8 +81,14 @@ export class AdvancedRetrievalManager {
     this.controller=abort;this.activePath=path;
     const job=(async()=>{
       try{
+        const stillActive=()=>{
+          if(abort.signal.aborted||revision!==this.revision||!config.enabled||!authorized())
+            throw new ModelError('MODEL_CANCELLED');
+        };
         await this.recover(rootPath,pluginId);
+        stillActive();
         const initial=await this.version(path,authorized),source=initial.source!;
+        stillActive();
         if(source.scopeId!==this.root!.id)throw new ModelError('INDEX_INCOMPATIBLE');
         const existing=this.store!.snapshot()?.entries.find(e=>e.sourcePath===path);
         if(initial.chunks.length>64
@@ -91,6 +97,7 @@ export class AdvancedRetrievalManager {
         if(initial.chunks.some(c=>c.tokenizerFingerprint!==CHUNK_TOKENIZER_FINGERPRINT
           ||c.effectiveTokenCount>384||c.effectiveTokenCount<1))
           throw new ModelError('TOKENIZER_INCOMPATIBLE');
+        stillActive();
         this.status={...this.status,status:'indexing',error:null,dense:'not-ready'};
         const reply=await this.ingestion.runner.embed(config,initial.chunks.map(c=>c.contextualText));
         if(abort.signal.aborted||revision!==this.revision)throw new ModelError('MODEL_CANCELLED');
@@ -132,13 +139,21 @@ export class AdvancedRetrievalManager {
     this.controller=abort;
     const job=(async()=>{
       try{
+        const stillActive=()=>{
+          if(abort.signal.aborted||revision!==this.revision||!config.enabled)
+            throw new ModelError('MODEL_CANCELLED');
+        };
         await this.recover(rootPath,pluginId);
+        stillActive();
         await this.ingestion.recover(rootPath,pluginId);
+        stillActive();
         this.status={...this.status,status:'searching',error:null};
         const before=await this.ingestion.verifiedAll(authorized);
+        stillActive();
         let queryVector:number[]|null=null;
         const generation=this.store!.snapshot();
         if(request.requestedMode!=='lexical'){
+          stillActive();
           if(!generation||!generation.entries.length)
             throw new ModelError('CAPABILITY_UNAVAILABLE');
           const reply=await this.ingestion.runner.embed(config,[request.query],

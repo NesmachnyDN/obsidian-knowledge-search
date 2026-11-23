@@ -154,21 +154,27 @@ export class AdvancedRetrievalStore {
       if(signal.aborted)throw new ModelError('MODEL_CANCELLED');
     };
     await guard();
+    let pointerStage:string|null=null;
+    let dataStageOwned=false;
     try{
+      dataStageOwned=true;
       await persist(stage,payload);
-      if(!(await readdir(dir)).includes(name))await rename(stage,join(dir,name));
-      else{
+      if(!(await readdir(dir)).includes(name)){
+        await rename(stage,join(dir,name));
+        dataStageOwned=false;
+      }else{
         const existing=await strictFile(join(dir,name),LIMIT_BYTES);
         if(sha(existing)!==name.slice(0,-5))invalid();
         await unlink(stage);
+        dataStageOwned=false;
       }
       await syncDirectory(dir);
       await guard();
       const pointer:Pointer={schemaVersion:1,rootId:this.root.id,filename:name,sha256:name.slice(0,-5)};
-      const pstage=join(dir,'.stage-'+randomUUID());
-      await persist(pstage,Buffer.from(canonical(pointer),'utf8'));
+      pointerStage=join(dir,'.stage-'+randomUUID());
+      await persist(pointerStage,Buffer.from(canonical(pointer),'utf8'));
       await guard();
-      try{await rename(pstage,join(dir,CURRENT));}
+      try{await rename(pointerStage,join(dir,CURRENT));pointerStage=null;}
       catch{this.poisoned=true;invalid();}
       // New version is now the only visible in-memory generation.
       this.generation=next;
@@ -179,6 +185,24 @@ export class AdvancedRetrievalStore {
           await unlink(join(dir,oldName)).catch(()=>{});
       return structuredClone(next);
     }catch(error){
+      // A pre-CURRENT cancellation must not accumulate unbounded pointer
+      // stages and eventually poison cold recovery. Remove only our newly
+      // created, authenticated stage files; ambiguous CURRENT stays poisoned.
+      if(!this.poisoned){
+        for(const file of [pointerStage,dataStageOwned?stage:null]){
+          if(!file)continue;
+          try{
+            const stat=await lstat(file);
+            if(!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1
+              ||stat.uid!==process.getuid?.()||(stat.mode&0o077)!==0)invalid();
+            await unlink(file);
+          }catch(cleanupError){
+            if((cleanupError as NodeJS.ErrnoException).code==='ENOENT')continue;
+            this.poisoned=true;invalid();
+          }
+        }
+        try{await syncDirectory(dir);}catch{this.poisoned=true;invalid();}
+      }
       if(error instanceof ModelError)throw error;
       throw new ModelError('INDEX_PUBLICATION_UNCERTAIN');
     }
