@@ -9,7 +9,9 @@
     "test": "node scripts/test.mjs",
     "test:python": "python3 -I -B -m unittest discover -s tests -p 'test_*.py'",
     "benchmark:standalone": "node scripts/standalone-benchmark.mjs",
-    "licenses": "node scripts/licenses.mjs"
+    "licenses": "node scripts/licenses.mjs",
+    "package:standalone": "npm run build && node scripts/standalone-package.mjs pack",
+    "test:package": "npm run package:standalone && node --test tests/package-standalone.test.mjs"
   },
   "devDependencies": {
     "@types/node": "22.19.0",

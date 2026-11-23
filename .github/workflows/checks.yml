@@ -1,4 +1,4 @@
-name: Synthetic probe
+name: OKS validation
 on: [push, pull_request]
 permissions:
   contents: read
@@ -21,3 +21,4 @@ jobs:
       - run: npm run test:python
       - run: npm run licenses
       - run: npm run build
+      - run: npm run test:package

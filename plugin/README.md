@@ -1,6 +1,6 @@
-# Obsidian Knowledge Search — Linux Standalone Markdown core (OKS-04A)
+# Obsidian Knowledge Search — Linux Standalone Markdown profile
 
-**Status:** OKS-04A core merged in PR #11; OKS-04B adds a candidate search view, settings, status, verified source navigation and versioned in-process API. Real-host 04B smoke passed, including Settings dialog; fresh independent exact-HEAD review and CI are still required; this is not a production plugin release or full MVP. The existing OKS-01A Python-backed synthetic evidence probe is retained only as an explicitly configured, manually run legacy diagnostic. It is **not** required for Standalone.
+**Status:** OKS-04A and OKS-04B are merged in PR #11 and PR #12. OKS-05A prepares a candidate release-shaped Standalone package and independent clean-install evidence; this is not a public plugin release or full CAP-01–10 MVP acceptance. The existing OKS-01A Python-backed synthetic evidence probe is retained only as an explicitly configured, manually run legacy diagnostic. It is **not** required for Standalone.
 
 ## Runtime and installation
 
@@ -18,9 +18,22 @@ npm run test:python
 npm run benchmark:standalone
 npm run licenses
 npm run build
+npm run test:package
 ```
 
-Copy `dist/main.js`, `dist/standalone-worker.js` and `dist/manifest.json` to a **disposable synthetic** Vault at `.obsidian/plugins/oks-synthetic-evidence/`; enable the community plugin only in that disposable Vault. The plugin name/ID remains the historical development ID in 04A. `plugin/manifest.json` declares desktop-only. The OKS-04B candidate uses the same package ID; final public naming/distribution is deferred.
+## Reproducible Standalone package (OKS-05A candidate)
+
+From a previously reviewed development checkout, run:
+
+```sh
+npm run test:package
+node scripts/standalone-package.mjs verify
+OKS_STANDALONE_PACKAGE_DIR="$PWD/build/standalone-package" bash scripts/obsidian-host-smoke.sh
+```
+
+`npm run package:standalone` first builds the app, then creates `build/standalone-package/` with **exactly** `main.js`, `manifest.json` and `standalone-worker.js`. The separate `build/standalone-package.sha256.json` lists deterministic SHA-256 and byte sizes, without source text or machine paths. It is a local integrity ledger, **not a signature or proof of publisher authenticity**. Re-running a build with identical inputs checks identity and does not overwrite a foreign/different package. A different build requires removing only the known disposable `build/standalone-package/` and its adjacent ledger before repackaging. The package verifier rejects extra/missing/altered, symlinked or multiply-linked files and incorrect manifest identity. The installed package itself does not contain build tooling, test fixtures, model artifacts, OCR binaries or Python.
+
+Copy **only the three files inside that package directory** to the corresponding subfolder of a **disposable synthetic** Vault, `.obsidian/plugins/oks-synthetic-evidence/`, and enable it in Obsidian Community Plugins. Do not copy the SHA-256 ledger into the installed plugin directory. No model/backend provisioning is necessary for lexical search. The plugin ID `oks-synthetic-evidence` remains stable for existing installations; the display name/description now identify the actual Standalone search capability. `minAppVersion` is conservatively pinned to tested Obsidian Desktop 1.15.1; support on earlier versions is not claimed. This candidate is not a signed archive or a Community Plugins submission. A verified isolated host test is distinct from the offline/no-egress security gate.
 
 ## Native data, storage and privacy
 
@@ -54,5 +67,5 @@ The script installs into a disposable synthetic Vault with separate HOME/XDG/Ele
 
 - Markdown lexical-only. No PDF/DOCX/OCR, embeddings, real dense/hybrid, reranker, graph traversal or semantic retrieval. Unsupported modes return `CAPABILITY_UNAVAILABLE`, not a lexical result mislabeled hybrid.
 - Typed Properties support unambiguous YAML subset of strings, finite numbers, booleans, ISO dates, null and scalar lists. No arbitrary YAML objects/anchors, implicit coercion or external execution. wiki-link targets are retained as strings; graph traversal is deliberately absent.
-- First supported execution target is Linux desktop with host filesystem APIs and local fsync/rename. No cross-OS or full clean-install/release claim.
+- First supported execution target is Linux desktop with host filesystem APIs and local fsync/rename. No cross-OS, signed release or public distribution claim. A release-shaped package is a pre-release candidate until independent acceptance.
 - The manually invoked legacy `Run synthetic evidence probe` command still uses a maintainer-configured Python interpreter for OKS-01A regression only; it is disabled by default and is **outside Standalone**. For historical probe acceptance and its independent process safeguards, see [OKS-01A contract](../docs/prompts/OKS-01A.md) and [ADR-0002](../docs/adr/0002-first-vertical-and-experiment-gates.md). Do not enable it for normal native indexing.

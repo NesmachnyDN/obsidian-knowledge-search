@@ -16,7 +16,18 @@ export XDG_CONFIG_HOME="$tmp/home/.config" XDG_DATA_HOME="$tmp/home/.local/share
 mkdir -p "$XDG_CONFIG_HOME/obsidian" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$tmp/electron" "$tmp/vault/.obsidian/plugins/oks-synthetic-evidence"
 printf '%s\n' '# Synthetic Obsidian Host' 'REQ-OKS-SMOKE: local only.' 'See [[second]].' > "$tmp/vault/first.md"
 printf '%s\n' '---' 'status: active' '---' '# Second' 'Synthetic second note.' > "$tmp/vault/second.md"
-cp "$repo/dist/main.js" "$repo/dist/manifest.json" "$repo/dist/standalone-worker.js" "$tmp/vault/.obsidian/plugins/oks-synthetic-evidence/"
+# OKS-05A clean-install mode installs the verified release-shaped directory, not dist.
+# Default remains the historical dist-based host smoke to avoid changing existing callers.
+package_dir="${OKS_STANDALONE_PACKAGE_DIR:-$repo/dist}"
+if [[ -n "${OKS_STANDALONE_PACKAGE_DIR:-}" ]]; then
+  node "$repo/scripts/standalone-package.mjs" verify "$package_dir" >/dev/null ||
+    { echo "HOST_SMOKE_FAILURE: package verification failed" >&2; exit 1; }
+fi
+for asset in main.js manifest.json standalone-worker.js; do
+  test -f "$package_dir/$asset" ||
+    { echo "HOST_SMOKE_FAILURE: required package asset missing: $asset" >&2; exit 1; }
+  cp "$package_dir/$asset" "$tmp/vault/.obsidian/plugins/oks-synthetic-evidence/"
+done
 printf '%s\n' '["oks-synthetic-evidence"]' > "$tmp/vault/.obsidian/community-plugins.json"
 printf '%s\n' '{"safeMode":false}' > "$tmp/vault/.obsidian/app.json"
 export tmp app cli repo
@@ -108,3 +119,12 @@ cache="$(find "$XDG_DATA_HOME/obsidian-knowledge-search" -name CURRENT -type f -
 test -n "$cache" ||
   { echo "HOST_SMOKE_FAILURE: host-private CURRENT not found" >&2; exit 1; }
 printf '%s\n' 'OBSIDIAN_HOST_STORAGE_PASS: private XDG index, no Vault-contained index; only synthetic fixtures used'
+# Package uninstallation from an explicitly disposable fixture must not remove source notes.
+if [[ -n "${OKS_STANDALONE_PACKAGE_DIR:-}" ]]; then
+  rm -rf -- "$tmp/vault/.obsidian/plugins/oks-synthetic-evidence"
+  test -f "$tmp/vault/first.md" && test -f "$tmp/vault/second.md" ||
+    { echo "HOST_SMOKE_FAILURE: uninstall removed original sources" >&2; exit 1; }
+  test "$(sha256sum "$tmp/vault/second.md" | cut -d' ' -f1)" = "$fixture_sha" ||
+    { echo "HOST_SMOKE_FAILURE: uninstall changed original bytes" >&2; exit 1; }
+  printf '%s\n' 'OBSIDIAN_HOST_CLEAN_REMOVAL_PASS: packaged plugin files removed; source Markdown preserved'
+fi

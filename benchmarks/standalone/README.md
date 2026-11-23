@@ -1,6 +1,6 @@
 # OKS-04A — Standalone native lexical synthetic corpus v1
 
-**Status:** OKS-04A implementation merged in PR #11. The current rerun and OKS-04B candidate validation are author-produced evidence; see [04B validation and open gates](04b-validation.md). This is a real TypeScript lexical-only (no model) experiment, **not** a claim of MVP, CAP-05, full Obsidian UI or optional advanced profile validation.
+**Status:** OKS-04A implementation merged in PR #11. Standalone 04B has now merged in PR #12. Author-produced OKS-05A release-shaped acceptance evidence is separate; see [05A candidate package/host results](05a-validation.md). This is a real TypeScript lexical-only (no model) experiment, **not** a claim of MVP, CAP-05, full Obsidian UI or optional advanced profile validation.
 
 ## Reproduction
 
@@ -53,4 +53,4 @@ This is a **directional**, not algorithm-identical comparison: Python reference 
 
 This is a bounded lexical index prototype (512 sources, 64 KiB/source, 16 MiB generation). It does not validate large real Vault behavior, a hard memory sandbox for the tested browser Web Worker, all CommonMark/YAML, full UI lifecycle or privacy under a user's independent whole-home sync. Host smoke is a real Obsidian application interaction on a disposable synthetic Vault; Node mocks are not represented as host tests. The index can contain original excerpts and Properties, so it is **host-private outside Vault** by ADR-0008. Neither corpus nor results contain private production notes, indices or host paths. Python is needed only for historical reference/conformance tests, not for Standalone execution.
 
-**Release status:** OKS-04A is the merged dependency. OKS-04B has completed local checks and actual Obsidian 1.15.1 extended host smoke (including disabled-only derived-index purge); it remains a candidate pending independent exact-final-diff review and hosted exact-HEAD CI. ADR-0008 now records acceptance anchored to the independently reviewed and merged PR #11. No UI release or MVP acceptance is implied.
+**Release status:** OKS-04A and OKS-04B merged into develop in PR #11/#12. OKS-05A adds an independently verifiable, but still unreleased, Standalone package and real clean-install host tests; see its separate 05A report. No Advanced or full MVP acceptance is implied.
