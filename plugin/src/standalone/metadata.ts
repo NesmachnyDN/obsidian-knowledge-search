@@ -5,7 +5,7 @@ import type { ParsedBlock, Predicate, SourceVersion, SearchMetadata } from './co
 
 const norm = (value: string): string => value.toLowerCase();
 const tagValue = (value: string): string => norm(value.replace(/^#/, ''));
-const TAG = /(?:^|[\s(])#([\p{L}\p{N}_/-]+)/gu;
+const TAG = /(?:^|\s)#([\p{L}\p{N}_/-]+)/gu;
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 
 /** Only inspect Markdown lines outside fenced code and parsed frontmatter. */
@@ -42,7 +42,7 @@ function inlineTag(block: ParsedBlock, wanted: string): boolean {
   return [...block.originalText.matchAll(TAG)].some(match => tagValue(match[1]!) === wanted);
 }
 function linkTarget(block: ParsedBlock, wanted: string): boolean {
-  return block.wikiLinks.some(raw => norm(raw.split('|', 1)[0]!.trim()) === wanted);
+  return block.wikiLinks.some(raw => raw.split('|', 1)[0]!.trim() === wanted);
 }
 
 /** Return a *real source line* for metadata-only navigation, or null when filters miss.
@@ -59,7 +59,7 @@ export function metadataAnchor(doc: SourceVersion,
     if (!tag) return null;
   }
   if (metadata?.linkTarget !== undefined) {
-    const wanted = norm(metadata.linkTarget);
+    const wanted = metadata.linkTarget;
     link = blocks.find(block => linkTarget(block, wanted)) ?? null;
     if (!link) return null;
   }

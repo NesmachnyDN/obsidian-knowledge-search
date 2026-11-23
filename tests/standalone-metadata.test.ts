@@ -7,7 +7,7 @@ import { validateRequest, matches, hash, type SearchRequest, type Predicate } fr
 const RAW = [
   '---', 'count: 7', 'active: true', 'tags:', '  - архитектура', '  - Design',
   '---', '# Note', 'See [[target/note|Alias]] #поиск',
-  'Mention #архитектура here.', '~~~', 'Hidden #secret [[hidden|Alias]]', '~~~',
+  'Mention #архитектура here.', 'See [jump](#fragment).', '~~~', 'Hidden #secret [[hidden|Alias]]', '~~~',
 ].join('\r\n');
 const source = () => parseMarkdown('note.md', Buffer.from(RAW), hash('root'));
 const request = (query = '', extras: Partial<SearchRequest> = {}): SearchRequest => ({
@@ -41,13 +41,16 @@ test('05E-A2 tags are exact and case-insensitive, frontmatter plus inline, fence
   assert.equal(metadataAnchor(doc, {tag:'архитектура'}, [])?.originalText, 'Mention #архитектура here.');
   assert.equal(metadataAnchor(doc, {tag:'поиск'}, [])?.originalText, 'See [[target/note|Alias]] #поиск');
   assert.equal(metadataAnchor(doc, {tag:'secret'}, []), null);
+  assert.equal(metadataAnchor(doc, {tag:'fragment'}, []), null,
+    'Markdown URL fragment is not an authored Obsidian tag');
   assert.equal(metadataAnchor(doc, {tag:'not-a-tag'}, []), null);
 });
 
 test('05E-A2 only exact authored wiki-link target, never display alias or fenced source code', () => {
   const doc = source();
   assert.equal(metadataAnchor(doc, {linkTarget:'target/note'}, [])?.locator.lineStart, 9);
-  assert.equal(metadataAnchor(doc, {linkTarget:'TARGET/note'}, [])?.locator.lineStart, 9);
+  assert.equal(metadataAnchor(doc, {linkTarget:'TARGET/note'}, []), null,
+    'do not normalize authored case-sensitive Linux source target');
   assert.equal(metadataAnchor(doc, {linkTarget:'Alias'}, []), null);
   assert.equal(metadataAnchor(doc, {linkTarget:'hidden'}, []), null);
   assert.equal(metadataAnchor(doc, {linkTarget:'target/note', tag:'поиск'}, [])?.locator.lineStart, 9);
