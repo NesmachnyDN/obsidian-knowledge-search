@@ -12,13 +12,14 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from engine.token_budget import ExactTokenizer, SERIALIZATION_VERSION, verify_snapshot
 
 MANIFEST = Path(__file__).with_name("embedding-artifacts.json")
 MAX_INPUT_BYTES = 8192
 EXPERIMENT_MAX_TOKENS = 256
+ADVANCED_MAX_TOKENS = 512
 MAX_WEIGHT_BYTES = 3 * 1024**3
 MAX_CGROUP_BYTES = 4 * 1024**3
 EXPECTED_SCOPE = "oks-03a-embedding.scope"
@@ -148,7 +149,7 @@ def verify_active_experiment_guard(
         raise EmbeddingUnavailable("RESOURCE_GUARD_UNAVAILABLE") from exc
 
 
-def validate_input(text: str, *, max_tokens: int) -> None:
+def validate_input(text: str, *, max_tokens: int, ceiling: int = EXPERIMENT_MAX_TOKENS) -> None:
     if not isinstance(text, str) or not text:
         raise EmbeddingUnavailable("INPUT_INVALID")
     try:
@@ -157,16 +158,20 @@ def validate_input(text: str, *, max_tokens: int) -> None:
         raise EmbeddingUnavailable("INPUT_INVALID") from exc
     if size > MAX_INPUT_BYTES:
         raise EmbeddingUnavailable("INPUT_INVALID")
-    if type(max_tokens) is not int or not 8 <= max_tokens <= EXPERIMENT_MAX_TOKENS:
+    if type(max_tokens) is not int or not 8 <= max_tokens <= ceiling:
         raise EmbeddingUnavailable("INPUT_INVALID")
 
 
 class OfflineDenseReference:
     """Model-backed dense embeddings. Instantiate only inside authorized, guarded scope."""
 
-    def __init__(self, snapshot: Path, *, max_tokens: int = EXPERIMENT_MAX_TOKENS):
-        verify_active_experiment_guard()
-        if type(max_tokens) is not int or not 8 <= max_tokens <= EXPERIMENT_MAX_TOKENS:
+    def __init__(self, snapshot: Path, *, max_tokens: int = EXPERIMENT_MAX_TOKENS,
+                 admission: Callable[[], None] = verify_active_experiment_guard,
+                 ceiling: int = EXPERIMENT_MAX_TOKENS):
+        admission()
+        if ceiling not in (EXPERIMENT_MAX_TOKENS, ADVANCED_MAX_TOKENS):
+            raise EmbeddingUnavailable("INPUT_INVALID")
+        if type(max_tokens) is not int or not 8 <= max_tokens <= ceiling:
             raise EmbeddingUnavailable("INPUT_INVALID")
         model_manifest = verify_model_snapshot(snapshot)
         try:
@@ -209,6 +214,7 @@ class OfflineDenseReference:
         self._model = model
         self._counter = counter
         self.max_tokens = max_tokens
+        self._ceiling = ceiling
         self.identity = ModelIdentity(
             repository=model_manifest["repository"],
             revision=model_manifest["revision"],
@@ -225,7 +231,7 @@ class OfflineDenseReference:
         )
 
     def embed(self, text: str) -> tuple[float, ...]:
-        validate_input(text, max_tokens=self.max_tokens)
+        validate_input(text, max_tokens=self.max_tokens, ceiling=self._ceiling)
         encoding = self._counter._raw.encode(text, add_special_tokens=True)
         if len(encoding.ids) > self.max_tokens:
             raise EmbeddingUnavailable("TOKEN_BUDGET_EXCEEDED")
