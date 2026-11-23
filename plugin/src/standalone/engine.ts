@@ -225,17 +225,24 @@ export class StandaloneEngine {
     const req: SearchRequest = input;
     const gen = this.generation; // Pin ALL response fields to this immutable snapshot.
     const response = (status: SearchResponse['status'], error: string | null,
-      hits: EvidenceHit[], stale: number): SearchResponse => ({
+      hits: EvidenceHit[], stale: number, snapshot: IndexGeneration | null = gen): SearchResponse => ({
       protocolVersion: PROTOCOL, requestId: req.requestId, requestedMode: req.requestedMode,
       executedMode: status === 'failed' ? 'none' : 'lexical', status, error,
-      indexGenerationId: gen?.generationId ?? null, hits,
-      capabilityReadiness: { lexical: !gen ? 'unavailable'
+      indexGenerationId: snapshot?.generationId ?? null, hits,
+      capabilityReadiness: { lexical: !snapshot ? 'unavailable'
         : status === 'ok' ? 'ready' : status === 'failed' ? 'failed' : 'degraded', dense: 'unavailable' },
       staleSourceCount: stale,
     });
-    if (this.stopped) return response('failed', 'LIFECYCLE_INVALID', [], 0);
+    // Snapshot pinning is valid for an ordinary A->B publication, but an
+    // unauthenticated CURRENT or unload irrevocably revokes ALL in-flight hits.
+    // Recheck after asynchronous reads and immediately before returning evidence.
+    const visibilityFailure = (): string | null => this.stopped ? 'LIFECYCLE_INVALID'
+      : this.store.isPublicationUncertain() ? 'INDEX_PUBLICATION_UNCERTAIN'
+      : this.generation === null ? this.state.error ?? 'INDEX_UNAVAILABLE' : null;
+    const denied = (reason: string): SearchResponse => response('failed', reason, [], 0, null);
+    if (this.stopped) return denied('LIFECYCLE_INVALID');
     if (req.requestedMode !== 'lexical') return response('failed', 'CAPABILITY_UNAVAILABLE', [], 0);
-    if (!gen) return response('failed', this.state.error ?? 'INDEX_UNAVAILABLE', [], 0);
+    if (!gen) return denied(this.state.error ?? 'INDEX_UNAVAILABLE');
     try {
       // Events alone are insufficient. Every search validates the bounded path
       // list AND cheap filesystem version hints, including when there are no
@@ -311,6 +318,8 @@ export class StandaloneEngine {
       }
       // A missed event never defeats live hash suppression; queue reconciliation for recovery.
       if (stale && !this.stopped && !this.paused && !this.work) this.reconcile();
+      const revoked = visibilityFailure();
+      if (revoked) return denied(revoked);
       const switched = this.generation !== gen;
       const degraded = drift || due || switched || this.state.status !== 'ready'
         || this.work !== null || stale > 0;
@@ -320,7 +329,8 @@ export class StandaloneEngine {
         hits, stale);
     } catch (error) {
       if (!this.stopped && !this.paused && !this.work) this.reconcile();
-      return response('failed', code(error), [], 0);
+      const revoked = visibilityFailure();
+      return revoked ? denied(revoked) : response('failed', code(error), [], 0);
     }
   }
   async close(): Promise<void> {

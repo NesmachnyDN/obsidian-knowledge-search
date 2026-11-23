@@ -1118,3 +1118,235 @@ test('B6: concurrent query storm does not repeatedly invalidate an already runni
     assert.equal((await engine.search(search('REQ-STORM-22'))).hits.length,1);
   } finally { gate.release(); reader.read = actualRead; await cleanup(); }
 });
+
+test('B7: search A fails closed after unauthenticated CURRENT publication B during gated source read', async () => {
+  const { root, paths, reader, store, engine, cleanup } = await setup({
+    'a.md': '# A\nREQ-B7-441: stable original evidence\n',
+  });
+  const realRead = reader.read.bind(reader);
+  const realRename = fsPromises.rename;
+  const gate = asynchronousGate();
+  let held = false, injected = false;
+  let restarted: StandaloneEngine | null = null;
+  try {
+    const a = engine.status().generationId!;
+    reader.read = async path => {
+      if (path === 'a.md' && !held) {
+        held = true; gate.enter(); await gate.held;
+      }
+      return realRead(path);
+    };
+    const pendingSearch = engine.search(search('REQ-B7-441'));
+    await gate.entered;
+    (fsPromises as { rename: typeof realRename }).rename = async (src, dst) => {
+      await realRename(src, dst);
+      if (!injected && String(dst) === join(store.dir, 'CURRENT')) {
+        injected = true;
+        await writeFile(String(dst), '{not-authenticated');
+        throw Object.assign(new Error('EIO after physical rename'), { code: 'EIO' });
+      }
+    };
+    await writeFile(join(root, 'b.md'), '# B\nREQ-B7-442: new evidence\n');
+    paths.add('b.md'); engine.changed('b.md'); await engine.whenIdle();
+    assert.equal(injected, true);
+    assert.equal(engine.status().error, 'INDEX_PUBLICATION_UNCERTAIN');
+    assert.equal(engine.status().generationId, null);
+    gate.release();
+    const result = await pendingSearch;
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error, 'INDEX_PUBLICATION_UNCERTAIN');
+    assert.equal(result.indexGenerationId, null);
+    assert.equal(result.capabilityReadiness.lexical, 'unavailable');
+    assert.equal(result.executedMode, 'none');
+    assert.deepEqual(result.hits, []);
+    assert.equal((await engine.search(search('REQ-B7-441'))).hits.length, 0);
+    (fsPromises as { rename: typeof realRename }).rename = realRename;
+    restarted = newEngine(reader, await GenerationStore.open(store.dir, reader.rootId));
+    await restarted.start();
+    assert.equal(restarted.status().generationId, a);
+    await restarted.whenIdle();
+    assert.equal(restarted.status().status, 'ready');
+    assert.equal((await restarted.search(search('REQ-B7-442'))).hits.length, 1);
+  } finally {
+    gate.release(); reader.read = realRead;
+    (fsPromises as { rename: typeof realRename }).rename = realRename;
+    await restarted?.close(); await cleanup();
+  }
+});
+
+test('B7: in-flight evidence search cannot return hits after unload', async () => {
+  const { reader, engine, cleanup } = await setup({ 'a.md': 'REQ-B7-UNLOAD-11: original\n' });
+  const actualRead = reader.read.bind(reader);
+  const gate = asynchronousGate();
+  let held = false;
+  try {
+    reader.read = async path => {
+      if (path === 'a.md' && !held) {
+        held = true; gate.enter(); await gate.held;
+      }
+      return actualRead(path);
+    };
+    const searchInFlight = engine.search(search('REQ-B7-UNLOAD-11'));
+    await gate.entered;
+    await engine.close();
+    gate.release();
+    const result = await searchInFlight;
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error, 'LIFECYCLE_INVALID');
+    assert.equal(result.indexGenerationId, null);
+    assert.deepEqual(result.hits, []);
+  } finally {
+    gate.release(); reader.read = actualRead; await cleanup();
+  }
+});
+
+test('B8: rejected CURRENT C preserves PREVIOUS=A, and B corruption recovers A', async () => {
+  const { root, reader, store, engine, cleanup } = await setup({
+    'a.md': 'REQ-B8-A: original A\n',
+  });
+  const realRename = fsPromises.rename;
+  let injected = false;
+  try {
+    const a = engine.status().generationId!;
+    await writeFile(join(root, 'a.md'), 'REQ-B8-B: committed B\n');
+    engine.changed('a.md'); await engine.whenIdle();
+    const b = engine.status().generationId!;
+    assert.notEqual(b, a);
+    assert.equal(JSON.parse(await readFile(join(store.dir, 'PREVIOUS'), 'utf8')).generationId, a);
+    (fsPromises as { rename: typeof realRename }).rename = async (src, dst) => {
+      if (String(dst) === join(store.dir, 'CURRENT')) {
+        injected = true;
+        throw Object.assign(new Error('rename rejected before filesystem mutation'), { code: 'EACCES' });
+      }
+      return realRename(src, dst);
+    };
+    await writeFile(join(root, 'a.md'), 'REQ-B8-C: rejected C\n');
+    engine.changed('a.md'); await engine.whenIdle();
+    assert.equal(injected, true);
+    assert.equal(engine.status().generationId, b);
+    assert.equal(engine.status().status, 'degraded');
+    assert.equal(JSON.parse(await readFile(join(store.dir, 'CURRENT'), 'utf8')).generationId, b);
+    assert.equal(JSON.parse(await readFile(join(store.dir, 'PREVIOUS'), 'utf8')).generationId, a);
+    assert.equal(JSON.parse(await readFile(join(store.dir, 'INFLIGHT_PREVIOUS'), 'utf8')).generationId, b);
+    (fsPromises as { rename: typeof realRename }).rename = realRename;
+    await writeFile(join(store.dir, 'gen-' + b + '.json'), '{damaged-generation');
+    const recovery = await (await GenerationStore.open(store.dir, reader.rootId)).load();
+    assert.equal(recovery.recovered, true);
+    assert.equal(recovery.error, 'INDEX_CORRUPT');
+    assert.equal(recovery.generation?.generationId, a);
+  } finally {
+    (fsPromises as { rename: typeof realRename }).rename = realRename;
+    await cleanup();
+  }
+});
+
+test('B8: cancel before CURRENT rename keeps PREVIOUS=A despite durable in-flight B', async () => {
+  const { root, store, engine, cleanup } = await setup({ 'a.md': 'REQ-B8-A: baseline\n' });
+  const realRename = fsPromises.rename;
+  const gate = asynchronousGate();
+  let held = false;
+  try {
+    const a = engine.status().generationId!;
+    await writeFile(join(root, 'a.md'), 'REQ-B8-B: committed\n');
+    engine.changed('a.md'); await engine.whenIdle();
+    const b = engine.status().generationId!;
+    (fsPromises as { rename: typeof realRename }).rename = async (src, dst) => {
+      await realRename(src, dst);
+      if (!held && String(dst) === join(store.dir, 'INFLIGHT_PREVIOUS')) {
+        held = true; gate.enter(); await gate.held;
+      }
+    };
+    await writeFile(join(root, 'a.md'), 'REQ-B8-C: canceled\n');
+    engine.changed('a.md'); await gate.entered;
+    assert.equal(engine.cancel(), true);
+    gate.release(); await engine.whenIdle();
+    assert.equal(engine.status().generationId, b);
+    assert.equal(JSON.parse(await readFile(join(store.dir, 'CURRENT'), 'utf8')).generationId, b);
+    assert.equal(JSON.parse(await readFile(join(store.dir, 'PREVIOUS'), 'utf8')).generationId, a);
+  } finally {
+    gate.release(); (fsPromises as { rename: typeof realRename }).rename = realRename;
+    await cleanup();
+  }
+});
+
+test('B8: crash after CURRENT but before PREVIOUS finalization recovers from INFLIGHT_PREVIOUS', async () => {
+  const { root, reader, store, engine, cleanup } = await setup({ 'a.md': 'REQ-B8-A: original\n' });
+  const realRename = fsPromises.rename;
+  let injected = false;
+  try {
+    const a = engine.status().generationId!;
+    await writeFile(join(root, 'a.md'), 'REQ-B8-B: committed\n');
+    engine.changed('a.md'); await engine.whenIdle();
+    const b = engine.status().generationId!;
+    (fsPromises as { rename: typeof realRename }).rename = async (src, dst) => {
+      if (!injected && String(dst) === join(store.dir, 'PREVIOUS')) {
+        injected = true;
+        throw Object.assign(new Error('PREVIOUS publication EACCES'), { code: 'EACCES' });
+      }
+      return realRename(src, dst);
+    };
+    await writeFile(join(root, 'a.md'), 'REQ-B8-C: committed but rollback update failed\n');
+    engine.changed('a.md'); await engine.whenIdle();
+    const c = engine.status().generationId!;
+    assert.equal(injected, true);
+    assert.notEqual(c, b);
+    assert.equal(engine.status().maintenanceWarning, 'INDEX_DURABILITY_UNCERTAIN');
+    assert.equal(JSON.parse(await readFile(join(store.dir, 'CURRENT'), 'utf8')).generationId, c);
+    assert.equal(JSON.parse(await readFile(join(store.dir, 'PREVIOUS'), 'utf8')).generationId, a);
+    assert.equal(JSON.parse(await readFile(join(store.dir, 'INFLIGHT_PREVIOUS'), 'utf8')).generationId, b);
+    (fsPromises as { rename: typeof realRename }).rename = realRename;
+    await writeFile(join(store.dir, 'gen-' + c + '.json'), '{corrupt-current-generation');
+    const recovered = await (await GenerationStore.open(store.dir, reader.rootId)).load();
+    assert.equal(recovered.recovered, true);
+    assert.equal(recovered.generation?.generationId, b);
+  } finally {
+    (fsPromises as { rename: typeof realRename }).rename = realRename;
+    await cleanup();
+  }
+});
+
+test('B8: next failed publication repairs an older pending rollback before replacing in-flight slot', async () => {
+  const { root, reader, store, engine, cleanup } = await setup({ 'a.md': 'REQ-B8-A: original\n' });
+  const realRename = fsPromises.rename;
+  let injectedPrev = false, injectedCurrent = false;
+  try {
+    const a = engine.status().generationId!;
+    await writeFile(join(root, 'a.md'), 'REQ-B8-B: committed\n');
+    engine.changed('a.md'); await engine.whenIdle();
+    const b = engine.status().generationId!;
+    (fsPromises as { rename: typeof realRename }).rename = async (src, dst) => {
+      if (!injectedPrev && String(dst) === join(store.dir, 'PREVIOUS')) {
+        injectedPrev = true;
+        throw Object.assign(new Error('PREVIOUS finalize EACCES'), { code: 'EACCES' });
+      }
+      return realRename(src, dst);
+    };
+    await writeFile(join(root, 'a.md'), 'REQ-B8-C: published\n');
+    engine.changed('a.md'); await engine.whenIdle();
+    const c = engine.status().generationId!;
+    assert.equal(injectedPrev, true);
+    assert.equal(engine.status().maintenanceWarning, 'INDEX_DURABILITY_UNCERTAIN');
+    assert.equal(JSON.parse(await readFile(join(store.dir, 'PREVIOUS'), 'utf8')).generationId, a);
+    (fsPromises as { rename: typeof realRename }).rename = async (src, dst) => {
+      if (!injectedCurrent && String(dst) === join(store.dir, 'CURRENT')) {
+        injectedCurrent = true;
+        throw Object.assign(new Error('next CURRENT rename EACCES'), { code: 'EACCES' });
+      }
+      return realRename(src, dst);
+    };
+    await writeFile(join(root, 'a.md'), 'REQ-B8-D: rejected\n');
+    engine.changed('a.md'); await engine.whenIdle();
+    assert.equal(injectedCurrent, true);
+    assert.equal(engine.status().generationId, c);
+    assert.equal(JSON.parse(await readFile(join(store.dir, 'PREVIOUS'), 'utf8')).generationId, b);
+    assert.equal(JSON.parse(await readFile(join(store.dir, 'INFLIGHT_PREVIOUS'), 'utf8')).generationId, c);
+    (fsPromises as { rename: typeof realRename }).rename = realRename;
+    await writeFile(join(store.dir, 'gen-' + c + '.json'), '{corrupted-current');
+    const recovered = await (await GenerationStore.open(store.dir, reader.rootId)).load();
+    assert.equal(recovered.recovered, true);
+    assert.equal(recovered.generation?.generationId, b);
+  } finally {
+    (fsPromises as { rename: typeof realRename }).rename = realRename;
+    await cleanup();
+  }
+});

@@ -104,6 +104,9 @@ function samePointer(a: Pointer | null, b: Pointer | null): boolean {
 }
 export class GenerationStore {
   private publicationUncertain = false;
+  // A concurrent search can resume before the engine's commit-catch executes.
+  // Query-side fail-closed checks observe the store's immediate uncertainty.
+  isPublicationUncertain(): boolean { return this.publicationUncertain; }
   private currentPointer: Pointer | null = null;
   private previousPointer: Pointer | null = null;
   private constructor(readonly dir: string, readonly rootId: string) {}
@@ -114,7 +117,7 @@ export class GenerationStore {
     await generationCapacity(resolve(dir), 0);
     return new GenerationStore(resolve(dir), rootId);
   }
-  private async readPointer(name: 'CURRENT' | 'PREVIOUS'): Promise<Pointer | null> {
+  private async readPointer(name: 'CURRENT' | 'PREVIOUS' | 'INFLIGHT_PREVIOUS'): Promise<Pointer | null> {
     const bytes = await readBounded(join(this.dir, name), 4096);
     if (!bytes) return null;
     let value: unknown;
@@ -140,17 +143,20 @@ export class GenerationStore {
   }
   async load(): Promise<LoadResult> {
     let currentError: string | null = null;
-    for (const name of ['CURRENT', 'PREVIOUS'] as const) {
+    // INFLIGHT_PREVIOUS is fsynced before CURRENT publication. It remains
+    // recoverable even when a crash happens after CURRENT rename but before
+    // PREVIOUS can be updated, without clobbering the old PREVIOUS beforehand.
+    for (const name of ['CURRENT', 'INFLIGHT_PREVIOUS', 'PREVIOUS'] as const) {
       try {
         const pointer = await this.readPointer(name);
         if (!pointer) continue;
         const generation = await this.generation(pointer);
-        // A recovered PREVIOUS is the authoritative in-memory current snapshot.
+        // A recovered rollback pointer is the authoritative in-memory snapshot.
         // Its original pointer must survive the next commit as the new PREVIOUS;
         // retaining a null currentPointer would garbage-collect its generation.
         this.currentPointer = pointer;
         this.previousPointer = null;
-        return { generation, recovered: name === 'PREVIOUS', error: name === 'PREVIOUS' ? currentError : null };
+        return { generation, recovered: name !== 'CURRENT', error: name !== 'CURRENT' ? currentError : null };
       } catch (error) {
         if (error instanceof StandaloneError && error.code === 'VAULT_IDENTITY_CHANGED') throw error;
         currentError = error instanceof StandaloneError ? error.code : 'INDEX_IO_ERROR';
@@ -159,7 +165,7 @@ export class GenerationStore {
     this.currentPointer = null;
     this.previousPointer = null;
     const directory = await readdir(this.dir);
-    const existing = directory.some(x => x === 'CURRENT' || x === 'PREVIOUS' || /^gen-[0-9a-f]{64}\.json$/.test(x));
+    const existing = directory.some(x => x === 'CURRENT' || x === 'PREVIOUS' || x === 'INFLIGHT_PREVIOUS' || /^gen-[0-9a-f]{64}\.json$/.test(x));
     return { generation: null, recovered: false, error: currentError ?? (existing ? 'INDEX_CORRUPT' : null) };
   }
   async commit(generation: IndexGeneration,
@@ -189,8 +195,30 @@ export class GenerationStore {
       schemaVersion: SCHEMA, rootId: this.rootId, generationId: generation.generationId,
       contentSha256: hash(serialized),
     };
-    // Safe rollback: preserve the old CURRENT snapshot while the next pointer is staged.
-    if (this.currentPointer) await atomicFile(this.dir, 'PREVIOUS', Buffer.from(JSON.stringify(this.currentPointer)));
+    // PREVIOUS is the *last completed* publication's rollback, and must NOT
+    // change before CURRENT publishes. A durable prepublication pointer bridges
+    // the crash window between CURRENT rename and the later PREVIOUS update.
+    if (this.currentPointer) {
+      const inFlight = await this.readPointer('INFLIGHT_PREVIOUS');
+      if (inFlight && !samePointer(inFlight, this.currentPointer)) {
+        // A previous publication may have committed CURRENT but failed to
+        // finalize PREVIOUS. Repair that valid rollback BEFORE replacing the
+        // in-flight slot; otherwise a failed later commit could erase it.
+        await this.generation(inFlight);
+        let saved: Pointer | null;
+        try { saved = await this.readPointer('PREVIOUS'); } catch { saved = null; }
+        if (!samePointer(saved, inFlight))
+          await atomicFile(this.dir, 'PREVIOUS', Buffer.from(JSON.stringify(inFlight)));
+      }
+      // An initial publication has no older rollback pointer. Seed this
+      // empty slot with the current valid generation, never overwrite an
+      // existing PREVIOUS before a later CURRENT is published.
+      if (!(await this.readPointer('PREVIOUS')))
+        await atomicFile(this.dir, 'PREVIOUS',
+          Buffer.from(JSON.stringify(this.currentPointer)));
+      await atomicFile(this.dir, 'INFLIGHT_PREVIOUS',
+        Buffer.from(JSON.stringify(this.currentPointer)));
+    }
     // The only cancellable boundary is immediately before the CURRENT rename.
     // Once rename succeeds, both store and engine switch in memory synchronously;
     // subsequent directory fsync / GC failures must not report an uncommitted write.
@@ -215,7 +243,7 @@ export class GenerationStore {
             // The rename happened but was reported as failed. Authenticate the
             // generation AND rollback pointer before promoting it in memory.
             const verified = await this.generation(pointer);
-            const rollback = await this.readPointer('PREVIOUS');
+            const rollback = await this.readPointer('INFLIGHT_PREVIOUS');
             if (!samePointer(rollback, this.currentPointer))
               throw new StandaloneError('INDEX_PUBLICATION_UNCERTAIN');
             if (rollback) await this.generation(rollback);
@@ -245,12 +273,24 @@ export class GenerationStore {
         warning = 'INDEX_DURABILITY_UNCERTAIN';
       }
     }
+    // CURRENT is now published and its old generation is protected by the
+    // fsynced INFLIGHT_PREVIOUS. Only now can PREVIOUS advance. A failure is
+    // visible as degraded durability and MUST leave the in-flight slot intact.
+    if (this.previousPointer) {
+      try {
+        await atomicFile(this.dir, 'PREVIOUS',
+          Buffer.from(JSON.stringify(this.previousPointer)));
+      } catch {
+        warning = 'INDEX_DURABILITY_UNCERTAIN';
+      }
+    }
     if (!warning) {
       // GC is post-commit maintenance, never part of the publication outcome.
       // Leave unreachable generations for the bounded quota/recovery policy if
       // cleanup fails. Never delete CURRENT, PREVIOUS or any Vault source.
       try {
-        const live = new Set([this.currentPointer!.generationId, this.previousPointer?.generationId]);
+        const live = new Set([this.currentPointer!.generationId, this.previousPointer?.generationId,
+          (await this.readPointer('INFLIGHT_PREVIOUS'))?.generationId]);
         for (const file of await readdir(this.dir)) {
           const match = /^gen-([0-9a-f]{64})\.json$/.exec(file);
           if (match && !live.has(match[1])) await unlink(join(this.dir, file));
