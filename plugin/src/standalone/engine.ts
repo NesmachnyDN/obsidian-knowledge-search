@@ -4,6 +4,7 @@ import {
   type ParsedBlock,
 } from './contracts';
 import { terms } from './markdown';
+import { metadataAnchor } from './metadata';
 import type { MarkdownParser } from './worker';
 import type { SourceProvider } from './source';
 import type { GenerationStore } from './storage';
@@ -258,17 +259,27 @@ export class StandaloneEngine {
       if ((drift || due) && !this.stopped && !this.paused && !this.work) this.reconcile();
       // Protocol-v2 default is unchanged ranked terms. The explicit literal mode
       // checks original physical source lines, not query tokens or heading context.
+      const metadataOnly = req.query === '';
       const literal = req.matchMode === 'literal';
       const needle = literal ? req.query.toLowerCase() : '';
-      const tokens = literal ? [] : [...new Set(terms(req.query))];
+      const tokens = literal || metadataOnly ? [] : [...new Set(terms(req.query))];
       if (tokens.length > BOUNDS.termsPerQuery) throw new StandaloneError('QUERY_INVALID');
-      const mandatoryIds = literal ? [] : req.query.toLowerCase().match(/[\p{L}\p{N}]+(?:[._/-][\p{L}\p{N}]+)+/gu) ?? [];
+      const mandatoryIds = literal || metadataOnly ? [] : req.query.toLowerCase().match(/[\p{L}\p{N}]+(?:[._/-][\p{L}\p{N}]+)+/gu) ?? [];
       const scope = req.scope ? new Set(req.scope) : null;
       const predicates = req.predicates ?? [];
       const candidates: { doc: SourceVersion; block: ParsedBlock; score: number }[] = [];
       for (const doc of gen.documents) {
         if ((scope && !scope.has(doc.sourceId)) || !matches(doc.properties, predicates)) continue;
         if (doc.extractionStatus !== 'ok' && doc.extractionStatus !== 'partial') continue;
+        const metadataEvidence = req.metadata || metadataOnly
+          ? metadataAnchor(doc, req.metadata, predicates) : null;
+        if ((req.metadata || metadataOnly) && !metadataEvidence) continue;
+        if (metadataOnly) {
+          // Empty text is never a wildcard: cite exactly one authentic source
+          // line bearing the matched property, tag or authored wiki-link.
+          candidates.push({ doc, block: metadataEvidence!, score: 1 });
+          continue;
+        }
         for (const block of doc.blocks) {
           let score: number;
           if (literal) {
