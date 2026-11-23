@@ -289,6 +289,31 @@ test('cancellation prevents publication; failed commit keeps committed generatio
     assert.equal((await engine.search(search('GPU'))).hits.length, 1);
   } finally { await engine.close(); await cleanup(); }
 });
+test('05D B2 regression: canceled first CURRENT publish removes authenticated orphan before plugin reload',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'oks05d-standalone-first-cancel-'));
+  try{
+    await writeFile(join(root,'fixture.md'),'# Synthetic\\nREQ-LIFE-1\\n');
+    const reader=await BoundedVaultReader.open(root,()=>['fixture.md']);
+    const dir=join(root,'derived');
+    const store=await GenerationStore.open(dir,reader.rootId);
+    const initial=makeGeneration(reader.rootId,[]);
+    await assert.rejects(store.commit(initial,()=>{
+      throw new StandaloneError('CANCELLED');
+    }),error('CANCELLED'));
+    const names=await fsPromises.readdir(dir);
+    assert.equal(names.includes('CURRENT'),false);
+    assert.equal(names.some(name=>name.startsWith('gen-')),false,
+      'never leave first unpublished generation to poison a reloaded Standalone');
+    const reopened=await GenerationStore.open(dir,reader.rootId);
+    const empty=await reopened.load();
+    assert.equal(empty.generation,null);
+    assert.equal(empty.error,null);
+    await reopened.commit(initial);
+    assert.equal((await (await GenerationStore.open(dir,reader.rootId)).load()).generation?.generationId,
+      initial.generationId);
+  }finally{await rm(root,{recursive:true,force:true});}
+});
+
 test('B1: cancel inside a pending store commit vetoes CURRENT and survives restart', async () => {
   const { root, reader, store, cleanup } = await setup();
   const original = (await store.load()).generation!;

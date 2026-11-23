@@ -1,0 +1,23 @@
+# Dependabot reads this file from the repository DEFAULT branch (currently main).
+# Until a separately authorized promotion to main, this is a candidate configuration.
+# Version updates target develop; security updates always target default branch.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      npm-development:
+        dependency-type: development
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
