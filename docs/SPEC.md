@@ -39,6 +39,7 @@ See [ADR-0006](adr/0006-standalone-execution-profiles.md) for canonical contract
 | CAP-09 | Local resource control | AC-09: bounded queue and concurrency, CPU/memory/disk guardrails, cancellation and workload prioritization. Model workloads outside UI. Explicit provisioning; no automatic heavyweight downloads. Resource exhaustion is observable and recoverable. |
 | CAP-10 | Quality and confidentiality | AC-10: reproducible frozen corpus, per-query evidence labels and baseline comparison. Zero unexplained truncation, forbidden-file indexing or external document transmission in tests. No adoption before quality and stability gates pass. |
 | CAP-11 | Advanced retrieval (post-MVP) | AC-11: optional cross-encoder rerank and bounded link/property context expansion; each independently improves agreed quality metrics without unacceptable latency; no graph database required. |
+| CAP-12 | Portable embedding reuse (optional post-MVP) | AC-12: import/export exact-compatible BGE-M3 document vectors across distinct private Vault indexes without duplicate inference; enforce verified embedding identity and input digests, current source/scope checks, atomic complete-generation activation, opt-in privacy, safe failure/offline operation and no mandatory cloud. Tracked by [ADR-0010](adr/0010-portable-bge-m3-embedding-cache.md); **does not extend MVP CAP-01–10 acceptance**. |
 
 ## Proposed performance and quality gates
 
