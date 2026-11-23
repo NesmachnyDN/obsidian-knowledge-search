@@ -14,7 +14,7 @@ const exec = promisify(execFile);
 const UNIT_LIMIT = 120000;
 const MAX_STDERR = 16384;
 const RESOURCE_MEMORY = 4 * 1024 ** 3;
-const FREE_RESERVE = 3 * 1024 ** 3;
+const FREE_RESERVE = (5 * 1024 ** 3) / 2;
 const FREE_DISK = 1024 ** 3;
 const PROPERTIES = [
   'MemoryMax=4G','MemorySwapMax=0','CPUQuota=200%','TasksMax=64',

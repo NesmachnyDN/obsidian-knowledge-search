@@ -18,7 +18,7 @@ if __name__ == "__main__":
 from engine import advanced_protocol as wire
 
 MEMORY_LIMIT = 4 * 1024 ** 3
-MEMORY_RESERVE = 3 * 1024 ** 3
+MEMORY_RESERVE = (5 * 1024 ** 3) // 2
 DISK_RESERVE = 1024 ** 3
 MAX_CPU = 2.0
 MAX_PIDS = 64

@@ -164,3 +164,31 @@ test('disabled ingestion refuses starting external backend without any filesyste
       'x.md',()=>true),(e:unknown)=>e instanceof IngestError && e.code==='ADVANCED_UNAVAILABLE');
   } finally {await instance.dispose();}
 });
+
+test('descriptor-anchored TS source read denies parent symlink escape, file symlink, and changed/deleted source',async()=>{
+  const {mkdtemp,mkdir,writeFile,symlink,rename,rm}=await import('node:fs/promises');
+  const {tmpdir}=await import('node:os');
+  const {join}=await import('node:path');
+  const {readSource,trustedVaultRoot}=await import('../plugin/src/advanced/source');
+  const temp=await mkdtemp(join(tmpdir(),'oks05c-scope-'));
+  const root=join(temp,'root');const outside=join(temp,'secret');
+  try {
+    await mkdir(root);await mkdir(outside);await mkdir(join(root,'folder'));
+    await writeFile(join(outside,'payload.md'),'private outside');
+    await writeFile(join(root,'folder','payload.md'),'synthetic inside');
+    await symlink(outside,join(root,'escape'));
+    await symlink(join(outside,'payload.md'),join(root,'secret.md'));
+    const identity=await trustedVaultRoot(root);
+    await assert.rejects(readSource(identity,'escape/payload.md'));
+    await assert.rejects(readSource(identity,'secret.md'));
+    await assert.rejects(readSource(identity,'../secret/payload.md'));
+    const original=await readSource(identity,'folder/payload.md');
+    assert.equal(Buffer.from(original.bytes).toString(),'synthetic inside');
+    await rename(join(root,'folder'),join(root,'old-folder'));
+    await symlink(outside,join(root,'folder'));
+    await assert.rejects(readSource(identity,'folder/payload.md'));
+    await rm(join(root,'folder'));
+    await assert.rejects(readSource(identity,'folder/payload.md'));
+    assert.equal((await readSource(identity,'old-folder/payload.md')).sha256,original.sha256);
+  } finally {await rm(temp,{recursive:true,force:true});}
+});
