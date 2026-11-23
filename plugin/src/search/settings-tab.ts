@@ -1,11 +1,14 @@
 import type { AdvancedHealth } from '../advanced/health';
+import type { IngestionStatus } from '../advanced/manager';
 import { Modal, PluginSettingTab, Setting, Notice, type App, type Plugin } from 'obsidian';
 import type { SearchSettings } from './settings';
 export class SearchSettingsTab extends PluginSettingTab {
   constructor(app: App, plugin: Plugin, private readonly current: () => SearchSettings,
     private readonly patchSettings: (change: (s: SearchSettings) => void) => Promise<void>,
     private readonly purge: () => Promise<number>,
-    private readonly health: () => AdvancedHealth, private readonly checkHealth: () => Promise<void>) { super(app, plugin); }
+    private readonly health: () => AdvancedHealth, private readonly checkHealth: () => Promise<void>,
+    private readonly ingestionStatus?: () => IngestionStatus,
+    private readonly ingestActive?: () => Promise<void>) { super(app, plugin); }
   display(): void {
     const root = this.containerEl; root.replaceChildren();
     const save = async (change: (s: SearchSettings) => void): Promise<void> => {
@@ -41,6 +44,34 @@ export class SearchSettingsTab extends PluginSettingTab {
       .addButton(b => b.setButtonText('Recheck health')
         .setDisabled(!this.current().advanced.enabled)
         .onClick(async () => { await this.checkHealth(); this.display(); }));
+    new Setting(root).setName('Advanced document ingestion (separate opt-in)')
+      .setDesc('Local-only; manual active-file ingestion. Uses a verified resource-limited cgroup unit. Configure trusted paths first. Does not enable dense/hybrid search.')
+      .addToggle(t=>t.setValue(this.current().ingestion.enabled)
+        .onChange(v=>save(s=>{s.ingestion.enabled=v;})));
+    for(const [key,name] of [
+      ['interpreter','Ingestion Python interpreter (trusted absolute file)'],
+      ['entry','Ingestion backend script (advanced_ingest.py)'],
+      ['tokenizerSnapshot','Pinned local tokenizer snapshot directory'],
+      ['tessdataPath','Local RU/EN OCR tessdata directory'],
+      ['artifactsPath','Pinned local structured PDF artifacts directory'],
+    ] as const)
+      new Setting(root).setName(name).addText(t=>t.setValue(this.current().ingestion[key])
+        .onChange(v=>save(s=>{s.ingestion[key]=v;})));
+    new Setting(root).setName('PDF extraction mode')
+      .setDesc('Text-only PDF exposes layout/table limitations; OCR and structured models are explicit, never fallback.')
+      .addDropdown(d=>d.addOption('text','Native text')
+        .addOption('ocr','Scanned PDF (RU/EN Tesseract)')
+        .addOption('structured','Structured layout/table')
+        .addOption('structured-ocr','Structured + OCR')
+        .setValue(this.current().ingestion.pdfMode)
+        .onChange(v=>save(s=>{s.ingestion.pdfMode=v as SearchSettings['ingestion']['pdfMode'];})));
+    const ing=this.ingestionStatus?.();
+    const item=new Setting(root).setName('Advanced ingestion result')
+      .setDesc('Ingestion: '+(ing?.status??'disabled')+(ing?.error?' ('+ing.error+')':'')+
+        '. Status is not retrieval/model readiness. Evidence requires fresh source verification.');
+    if(this.ingestActive) item.addButton(b=>b.setButtonText('Ingest active document')
+      .setDisabled(!this.current().ingestion.enabled)
+      .onClick(async()=>{try{await this.ingestActive?.();}catch{new Notice('OKS: Advanced ingestion failed.');}this.display();}));
     const purge = this.purge;
     new Setting(root).setName('Clear derived Standalone index')
       .setDesc('Only while indexing is disabled. Removes recognized private index files, never notes. Rebuild after re-enabling.')
