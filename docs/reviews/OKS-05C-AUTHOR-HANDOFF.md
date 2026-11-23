@@ -48,3 +48,28 @@
 ## Merge gate
 
 Keep Draft if any mandatory blocker or no separate-session independent review. Only after separate reviewed exact HEAD, independent APPROVE, CI success on that HEAD, confirmed mergeability and no blockers may the reviewer mark Ready, squash merge into develop and record remote SHA. New HEAD after remediation **invalidates** previous approval. Do not start OKS-05D before merge.
+
+## 2026-11-23 remediation handoff — B1, B2 and G1 (author validation only)
+
+Trigger: separate-session independent SDD review [REQUEST CHANGES](https://github.com/NesmachnyDN/obsidian-knowledge-search/pull/16#issuecomment-7097100620) against prior HEAD `f0965bf57dc51de04842251b533a8f7f8fd49363`. This remediation was **authored after that review**; it does not inherit independent approval. Re-pin the actual new GitHub HEAD when reviewing.
+
+### Scope and regression fixes
+
+- **B1 — canonical production v3 wire parity:** Python recursively emits Unicode-codepoint-sorted JSON with ECMAScript JSON.stringify-compatible finite binary64 number spelling (shortest round-trip, fixed/scientific thresholds, normalized exponents and negative zero). It rejects unrepresentable integer/Unicode payloads instead of silently coercing them. TypeScript now sorts by Unicode code points rather than UTF-16 units and rejects unpaired surrogates. The protocol contract specifies these invariants. Frozen boundary tests independently check 1e-7, 1e-6, 1e20, 1e21, negative zero, subnormals, integer precision, non-BMP keys, and cross-process Python/TypeScript byte identity.
+- **B2 — native table-cell provenance:** reject incoherent or forged cell bbox/coordinate origins, invalid or absent origin for a present bbox, missing/nonpositive row/column spans, out-of-range geometry, and reversed left/right bounds without assuming ascending Y for valid native BOTTOMLEFT geometry. Both the schema validator and independent provenance checker enforce shape and boundedness. New DOCX negative tests cover the original independently reproduced forgery and related variants, plus an accepted valid geometry case.
+- **G1 — actual-host Advanced acceptance:** an already-provisioned pinned local Docling Slim 2.151.1, tokenizers 0.23.3, exact BGE-M3 tokenizer snapshot, and byte-verified eng/rus Tesseract data were used **offline**. For the real host preflight, a separate trusted, user-controlled validation-only virtual environment and regular executable were copied from existing local files because the scratch executable's original path was untrusted to `checkedPath`. No program security policy was loosened; no runtime, model or tessdata was downloaded. Verified cgroup v2/user service, 4 GiB enforced memory, 2.5 GiB host reserve, no swap, 200% CPU quota, 64 tasks and disk reserve before heavy tests. The local validation runtime is not part of the release package.
+
+### Author-measured validation
+
+- `npm test`: **213 total, 210 pass, 3 skipped** (3 opt-in real cgroup cases run separately).
+- `npm run test:python`: **134 total, 129 pass, 5 skipped**.
+- `npm run typecheck`, `npm run build`, `npm run licenses`, `npm run test:package`, `npm run benchmark:standalone`, `git diff --check`: required; see the final PR handoff comment for actual post-remediation outcomes.
+- Cross-language numerical stress: **2999 deterministic finite binary64 examples**, actual Python producer versus bundled TypeScript codec: identical frames.
+- Independent-from-unit-test **real Node→systemd user cgroup→Python** adversarial suite: **3/3 pass**. Markdown `ok` 7 blocks/2 chunks; native PDF `partial` 13/1; DOCX `partial` 11/6; RU/EN OCR `partial` 2/2. Verified cold generation recovery, stale refusal, corrupt pointer refusal, malformed PDF refusal, mutation during extraction, cancellation, concurrent stop and SIGTERM-resistant descendants; no active ingestion cgroup remained.
+- Real **Obsidian Desktop/CLI 1.15.1** isolated no-route synthetic-Vault Advanced smoke: `OBSIDIAN_ADVANCED_INGESTION_PASS`, `OBSIDIAN_UI_SMOKE_PASS`, `OBSIDIAN_HOST_SMOKE_PASS`, `OBSIDIAN_HOST_STORAGE_PASS`, `OBSIDIAN_HOST_CLEAN_REMOVAL_PASS`; process exit 0. Explicit dense/hybrid unavailable, not disguised as lexical. The separate Standalone package-only scenario also passed in the author session; both host modes must still be independently confirmed by a new reviewer.
+- Neither the working Vault nor external services were used, and no model weights were loaded.
+- Final post-fix **exact packaged build** rerun: both separate no-route Obsidian 1.15.1 scenarios (**Standalone package-only** and **Advanced Markdown/PDF/DOCX/RU/EN OCR**) finished with process exit **0**, all `OBSIDIAN_*_PASS` markers and no lingering ingestion unit. Final 3/3 real cgroup/adversarial tests also passed after correcting the native BOTTOMLEFT coordinate-order false rejection. This is **author validation**, not independent SDD approval.
+
+### Independent-review requirement
+
+The reviewer must re-check **the complete Base SHA → new remediation HEAD** across all previous OKS-05C commits plus the remediation commit, not just B1/B2. Review source/native provenance and numeric cross-language parity, artifact trust, resource admission, whole-process-tree cancellation, stale/publication recovery and actual Obsidian Desktop acceptance with the reviewed exact package. A changed HEAD invalidates the earlier review. Post independent APPROVE or REQUEST CHANGES in PR Conversation. Only a new separate-session APPROVE, new-head CI and all SDD gates permit Ready and squash merge. Keep this PR Draft until then.

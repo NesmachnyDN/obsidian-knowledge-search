@@ -36,6 +36,30 @@ class CanonicalWireTests(unittest.TestCase):
                 self.assertEqual(wire.generation_id(reply['source'],reply['chunks']),
                                  reply['generationId'])
 
+    def test_canonical_numeric_edges_and_unicode_codepoint_keys(self):
+        cases = [
+            ({'bbox': [1e-7, 0, 1, 1]}, b'{"bbox":[1e-7,0,1,1]}\n'),
+            ({'x': 1e-6}, b'{"x":0.000001}\n'),
+            ({'x': 9e-7}, b'{"x":9e-7}\n'),
+            ({'x': 1e20}, b'{"x":100000000000000000000}\n'),
+            ({'x': 1e21}, b'{"x":1e+21}\n'),
+            ({'x': -0.0}, b'{"x":0}\n'),
+            ({'x': 5e-324}, b'{"x":5e-324}\n'),
+            ({'x': 1000000000000000100}, b'{"x":1000000000000000100}\n'),
+        ]
+        for original, expected in cases:
+            with self.subTest(original=original):
+                frame=wire.encode(original)
+                self.assertEqual(frame, expected)
+                self.assertEqual(wire.encode(wire.decode(frame,wire.MAX_RESPONSE)), frame)
+        frame=wire.encode({'\uE000':'bmp','😀':'supplementary'})
+        self.assertEqual(frame.decode(), '{"\uE000":"bmp","😀":"supplementary"}\n')
+        for value in (9007199254740993, 10**100, float('nan'), float('inf')):
+            with self.assertRaises(ValueError):
+                wire.encode({'value':value})
+        with self.assertRaises(ValueError):
+            wire.encode({'bad':'\ud800'})
+
     def test_frozen_markdown_unicode_crlf_bytes_properties_and_wikilinks(self):
         case=FIXTURES[0]
         raw=base64.b64decode(case['rawBase64'])

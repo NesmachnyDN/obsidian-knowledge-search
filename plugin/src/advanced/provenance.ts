@@ -63,13 +63,18 @@ export function verifyProvenance(reply: IngestResponse,raw:Uint8Array):void {
             && location.charEnd>Array.from(original).length
             && kind==='block' && !loc.diagnostics.includes('native-text-not-verbatim')) invalid();
         }
-        if(kind==='cell' && loc.cellBBox){
-          const [left,top,right,bottom]=loc.cellBBox;
-          if(left===undefined||top===undefined||right===undefined||bottom===undefined
-            ||[left,top,right,bottom].some(x=>!Number.isFinite(x)||x<0||x>2000)
-            ||left>right||!loc.rowRange||!loc.colRange
-            ||loc.rowRange[1]!<=loc.rowRange[0]!
-            ||loc.colRange[1]!<=loc.colRange[0]!) invalid();
+        if(kind==='cell'){
+          const bbox=loc.cellBBox??null, origin=loc.cellCoordinateOrigin??null;
+          if ((bbox===null)!==(origin===null)) invalid();
+          if(bbox!==null){
+            const [left,top,right,bottom]=bbox;
+            if(left===undefined||top===undefined||right===undefined||bottom===undefined
+              ||[left,top,right,bottom].some(x=>!Number.isFinite(x)||x<0||x>2000)
+              ||left>right||!loc.rowRange||!loc.colRange
+              ||(origin!=='TOPLEFT' && origin!=='BOTTOMLEFT')
+              ||loc.rowRange[1]!<=loc.rowRange[0]!
+              ||loc.colRange[1]!<=loc.colRange[0]!) invalid();
+          }
         }
       }
       if(loc.locatorKind==='unavailable' && !loc.diagnostics.length) invalid();

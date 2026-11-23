@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { canonical, canonicalFrame, decodeFrame, INGEST_VERSION,
   IngestError, parseIngestFrame, sha, validRequest, validateReply,
   MAX_RESPONSE, MAX_REQUEST, type IngestRequest, type IngestResponse } from '../plugin/src/advanced/protocol';
@@ -51,6 +52,41 @@ test('cross-language v3 canonical wire accepts pinned Markdown, PDF and DOCX fix
     }
   }
 });
+test('v3 Python/TypeScript bidirectional numeric and Unicode canonical byte parity',()=>{
+  // Frozen edge values plus a cross-process comparison prevent shared fixture
+  // blind spots: the Python producer and TS consumer must agree on exact bytes.
+  const samples: unknown[]=[
+    {bbox:[1e-7,0,1,1],property:1e-7},
+    {values:[1e-6,9e-7,1e20,1e21,5e-324,-0,1.2345e-6]},
+    {limits:[Number.MAX_SAFE_INTEGER,9007199254740992,1.7976931348623157e308]},
+    {'\uE000':'bmp','😀':'supplementary',nested:{'😀':1e-7,'\uE000':1e21}},
+    {negative:-0.0000001,large:1000000000000000100,unicode:'Договор 🚀'},
+  ];
+  const pythonScript=[
+    'import sys,json',
+    'sys.path.insert(0,".")',
+    'from engine.advanced_protocol import encode,decode,MAX_RESPONSE',
+    'value=json.load(sys.stdin)',
+    'out=encode(value)',
+    'assert decode(out,MAX_RESPONSE)==value',
+    'sys.stdout.buffer.write(out)',
+  ].join(';');
+  for(const sample of samples){
+    const ts=canonicalFrame(sample,MAX_RESPONSE);
+    const producer=spawnSync('python3',['-I','-B','-c',pythonScript],{
+      input:Buffer.from(JSON.stringify(sample),'utf8'),timeout:5000,
+    });
+    assert.equal(producer.status,0,producer.stderr?.toString());
+    assert.deepEqual(producer.stdout,ts,'Python and TS must emit identical bytes');
+    assert.deepEqual(decodeFrame(producer.stdout,MAX_RESPONSE),JSON.parse(JSON.stringify(sample)));
+  }
+  assert.equal(canonicalFrame({bbox:[1e-7,0,1,1]},MAX_RESPONSE).toString(),
+    '{"bbox":[1e-7,0,1,1]}\n');
+  assert.equal(canonical({'\uE000':'bmp','😀':'supplementary'}),
+    '{"\uE000":"bmp","😀":"supplementary"}');
+  rejected(()=>canonicalFrame({invalid:'\ud800'},MAX_REQUEST));
+});
+
 test('Python and TypeScript framing cannot ambiguously parse duplicate fields, BOM, invalid UTF-8, junk or oversize',()=>{
   const {request,response}=fixtures[0]!;
   const base=canonicalFrame(response,MAX_RESPONSE).toString('utf8');
@@ -129,6 +165,34 @@ test('native locators have bounded pages/geometry; forged native coordinates ref
   assert.deepEqual(cell.locator.colRange,[1,2]);
   assert.equal(cell.locator.nativeItemRef,verified.source!.blocks[0]!.locator.nativeItemRef);
 });
+test('native table cell schema rejects forged or incoherent geometry, origins and ranges',()=>{
+  const fixture=fixtures.find(entry=>entry.name==='table.docx')!;
+  const raw=Buffer.from(fixture.rawBase64,'base64');
+  const damage=(mutate:(response:IngestResponse)=>void)=>{
+    const fake=clone(fixture.response);
+    mutate(fake);
+    rejected(()=>{
+      const checked=parseIngestFrame(canonicalFrame(fake,MAX_RESPONSE),fixture.request);
+      verifyProvenance(checked,raw);
+    });
+  };
+  const cell=(r:IngestResponse)=>r.source!.blocks[0]!.cells[1]!.locator;
+  damage(r=>{cell(r).cellCoordinateOrigin='INVALID';});
+  damage(r=>{cell(r).cellCoordinateOrigin='TOPLEFT';}); // no bbox
+  damage(r=>{cell(r).cellBBox=[5,5,10,10];cell(r).cellCoordinateOrigin='INVALID';});
+  damage(r=>{cell(r).cellBBox=[5,5,10,10];}); // no coordinate origin
+  damage(r=>{cell(r).cellBBox=[5,5,10,10];cell(r).cellCoordinateOrigin='TOPLEFT';cell(r).rowRange=[1,1];});
+  damage(r=>{cell(r).cellBBox=[5,5,10,10];cell(r).cellCoordinateOrigin='TOPLEFT';cell(r).colRange=[2,1];});
+  damage(r=>{cell(r).cellBBox=[5,10,4,12];cell(r).cellCoordinateOrigin='BOTTOMLEFT';});
+  damage(r=>{cell(r).cellBBox=[5,-1,10,12];cell(r).cellCoordinateOrigin='BOTTOMLEFT';});
+  damage(r=>{cell(r).cellBBox=[5,5,2001,10];cell(r).cellCoordinateOrigin='TOPLEFT';});
+  const good=clone(fixture.response);
+  cell(good).cellBBox=[5,5,10,10];
+  cell(good).cellCoordinateOrigin='TOPLEFT';
+  const checked=parseIngestFrame(canonicalFrame(good,MAX_RESPONSE),fixture.request);
+  verifyProvenance(checked,raw);
+});
+
 test('explicit ingestion configuration defaults disabled and old versions never silently enable it',()=>{
   assert.equal(defaultSettings().version,4);
   assert.equal(defaultSettings().ingestion.enabled,false);

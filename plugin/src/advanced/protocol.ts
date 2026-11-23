@@ -75,14 +75,40 @@ const str = (v: unknown, limit = 4096): v is string =>
 const strs = (v: unknown, max: number, size = 4096): v is string[] =>
   Array.isArray(v) && v.length <= max && v.every(s => str(s, size));
 const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+const validNativeBox = (v: unknown): v is number[] =>
+  Array.isArray(v) && v.length===4
+    && v.every(x=>num(x) && x>=0 && x<=2000)
+    // Docling BOTTOMLEFT uses top>bottom; never assume ascending Y.
+    && v[0]<=v[2];
 const maybe = (v: unknown, pred: (x: unknown) => boolean): boolean => v === null || pred(v);
+// Array.sort() uses UTF-16 code units; the v3 protocol sorts Unicode code
+// points, including keys beyond the BMP. Never normalize text or coerce it.
+const scalarString = (v: string): boolean => {
+  for (let i = 0; i < v.length; i++) {
+    const unit = v.charCodeAt(i);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = v.charCodeAt(++i);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+  }
+  return true;
+};
+const compareCodepoints = (left: string, right: string): number => {
+  const a=Array.from(left), b=Array.from(right);
+  for (let i=0; i<Math.min(a.length,b.length); i++) {
+    const diff=a[i]!.codePointAt(0)!-b[i]!.codePointAt(0)!;
+    if (diff!==0) return diff;
+  }
+  return a.length-b.length;
+};
 export const canonical = (value: unknown): string => {
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
-  if (record(value)) return '{' + Object.keys(value).sort().map(k => {
-    if (value[k] === undefined) bad();
+  if (record(value)) return '{' + Object.keys(value).sort(compareCodepoints).map(k => {
+    if (!scalarString(k) || value[k] === undefined) bad();
     return JSON.stringify(k) + ':' + canonical(value[k]);
   }).join(',') + '}';
   if (typeof value === 'number' && !Number.isFinite(value)) bad();
+  if (typeof value === 'string' && !scalarString(value)) bad();
   const serialized = JSON.stringify(value);
   if (typeof serialized !== 'string') bad();
   return serialized;
@@ -140,9 +166,8 @@ function validLocator(v: unknown, sha256: string, order: number, sourceType: str
     || !Array.isArray(v.locations) || v.locations.length > 32) return false;
   if (!v.locations.every(location =>
     exact(location,['page','bbox','coordinateOrigin','charStart','charEnd'])
-    && uint(location.page) && location.page > 0 && Array.isArray(location.bbox)
-    && location.bbox.length === 4 && location.bbox.every(num)
-    && str(location.coordinateOrigin,64)
+    && uint(location.page) && location.page > 0 && validNativeBox(location.bbox)
+    && ['TOPLEFT','BOTTOMLEFT'].includes(String(location.coordinateOrigin))
     && maybe(location.charStart,uint) && maybe(location.charEnd,uint)
     && (location.charStart === null && location.charEnd === null ||
         uint(location.charStart) && uint(location.charEnd) && location.charEnd >= location.charStart))) return false;
@@ -160,12 +185,19 @@ function validLocator(v: unknown, sha256: string, order: number, sourceType: str
       || !str(v.nativeRepresentation,128) || !str(v.contentLayer,128))) return false;
   if (v.locatorKind === 'unavailable' && v.nativeItemRef !== null) return false;
   for (const key of ['rowRange','colRange'] as const) {
-    if (v[key] !== undefined && v[key] !== null &&
-        (!Array.isArray(v[key]) || v[key]?.length !== 2 || !v[key]?.every(uint))) return false;
+    const span=v[key];
+    if (span !== undefined && span !== null &&
+        (!Array.isArray(span) || span.length !== 2 || !span.every(uint)
+         || span[1]! <= span[0]!)) return false;
   }
-  if (v.cellBBox !== undefined && v.cellBBox !== null &&
-      (!Array.isArray(v.cellBBox) || v.cellBBox.length !== 4 || !v.cellBBox.every(num))) return false;
-  if (v.cellCoordinateOrigin !== undefined && !maybe(v.cellCoordinateOrigin,x=>str(x,64))) return false;
+  const bbox=v.cellBBox;
+  const origin=v.cellCoordinateOrigin;
+  if (bbox !== undefined && bbox !== null) {
+    if (v.locatorKind!=='native' || !validNativeBox(bbox)
+      || (origin!=='TOPLEFT' && origin!=='BOTTOMLEFT')
+      || !v.rowRange || !v.colRange) return false;
+  } else if (origin !== undefined && origin !== null) return false;
+  if (v.locatorKind!=='native' && (v.rowRange || v.colRange || bbox || origin)) return false;
   return true;
 }
 function validateBlock(block: unknown, index: number, source: IngestSource): void {

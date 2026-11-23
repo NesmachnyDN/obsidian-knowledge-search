@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 import hashlib
 import json
 import math
@@ -40,23 +41,68 @@ def _object(pairs: list[tuple[str, Any]]) -> dict:
     return obj
 
 
-def _json_compatible(value: Any) -> Any:
-    # Match JS Number canonicalization for common native geometry: 12.0 -> 12,
-    # but keep finite fractional coordinates and refuse NaN/infinity.
-    if type(value) is float:
-        if not math.isfinite(value):
-            raise ValueError("nonfinite JSON number")
-        return int(value) if value.is_integer() and abs(value) < 2**53 else value
-    if type(value) is dict:
-        return {key: _json_compatible(item) for key, item in value.items()}
+# v3 uses ECMAScript JSON.stringify-compatible shortest binary64 numbers, not
+# Python's JSON exponent padding or its different fixed/scientific thresholds.
+# Both language codecs sort object keys by Unicode *code points*.
+MAX_SAFE_INTEGER = 2**53 - 1
+
+
+def _number_text(value: float | int) -> str:
+    if type(value) is int:
+        if abs(value) > MAX_SAFE_INTEGER:
+            # JSON parses unquoted 1e20 and other ECMAScript numeric spellings
+            # as Python int. Accept only numbers whose shortest binary64 JSON
+            # rendering is *exactly* that same decimal spelling.
+            try:
+                number = float(value)
+            except OverflowError as exc:
+                raise ValueError("non-interoperable JSON integer") from exc
+            if not math.isfinite(number) or _number_text(number) != str(value):
+                raise ValueError("non-interoperable JSON integer")
+        return str(value)
+    if not math.isfinite(value):
+        raise ValueError("nonfinite JSON number")
+    if value == 0:
+        return "0"  # JSON.stringify(-0) is 0.
+    shortest = repr(value)
+    if 1e-6 <= abs(value) < 1e21:
+        # Python and JavaScript use the same shortest round-trip digits, but
+        # Python switches to exponent notation at different magnitudes.
+        fixed = format(Decimal(shortest), "f")
+        return fixed.rstrip("0").rstrip(".") if "." in fixed else fixed
+    if "e" not in shortest:
+        return shortest.removesuffix(".0")
+    mantissa, exponent = shortest.split("e")
+    return mantissa.removesuffix(".0") + "e" + f"{int(exponent):+d}"
+
+
+def _canonical(value: Any) -> str:
+    if value is None:
+        return "null"
+    if type(value) is bool:
+        return "true" if value else "false"
+    if type(value) in (int, float):
+        return _number_text(value)
+    if type(value) is str:
+        # Unpaired surrogates have no UTF-8 representation; never serialize
+        # them as seemingly valid JSON text in only one runtime.
+        value.encode("utf-8", errors="strict")
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     if type(value) in (tuple, list):
-        return [_json_compatible(item) for item in value]
-    return value
+        return "[" + ",".join(_canonical(item) for item in value) + "]"
+    if type(value) is dict:
+        if any(type(key) is not str for key in value):
+            raise ValueError("non-string JSON key")
+        return "{" + ",".join(_canonical(key) + ":" + _canonical(value[key])
+                              for key in sorted(value)) + "}"
+    raise ValueError("unsupported canonical JSON type")
 
 
-def encode(value: dict, limit: int = MAX_RESPONSE) -> bytes:
-    payload = json.dumps(_json_compatible(value), sort_keys=True, ensure_ascii=False, allow_nan=False,
-                         separators=(",", ":")).encode("utf-8") + b"\n"
+def encode(value: Any, limit: int = MAX_RESPONSE) -> bytes:
+    try:
+        payload = _canonical(value).encode("utf-8") + b"\n"
+    except UnicodeError as exc:
+        raise ValueError("invalid Unicode JSON scalar") from exc
     if len(payload) > limit:
         raise ValueError("oversized frame")
     return payload
@@ -141,7 +187,9 @@ def _property_value(raw: str) -> tuple[Any, str]:
         value = json.loads(raw, object_pairs_hook=_object)
         if (type(value) is not list or len(value) > 64 or
                 any(type(v) not in (str, int, float, bool, type(None)) or
-                    type(v) is float and not math.isfinite(v) for v in value)):
+                    type(v) in (int, float) and (
+                        not math.isfinite(v) or
+                        type(v) is int and abs(v) > MAX_SAFE_INTEGER) for v in value)):
             raise ValueError("unsupported property list")
         return value, "list"
     if raw in ("", "null", "~"):
@@ -150,7 +198,7 @@ def _property_value(raw: str) -> tuple[Any, str]:
         return raw == "true", "boolean"
     if re.fullmatch(r"-?(?:0|[1-9]\d*)(?:\.\d+)?", raw):
         number = json.loads(raw)
-        if not math.isfinite(number):
+        if not math.isfinite(number) or type(number) is int and abs(number) > MAX_SAFE_INTEGER:
             raise ValueError("unbounded numeric property")
         return number, "number"
     if raw.startswith('"'):
