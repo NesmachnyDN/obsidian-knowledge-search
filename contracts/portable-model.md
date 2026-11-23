@@ -38,3 +38,27 @@ Status: **architecture contract**, not a frozen JSON Schema or a production wire
 6. No production fixtures from a real Vault, no raw source text in logs, and no unconsented external transfer.
 
 The above establishes shared **semantics** now, not a claim that the current two runtimes implement this future schema. The first implementing PR must choose exact field names/types and prove conformance before claiming any accepted bridge.
+
+## Concrete OKS-04A native Markdown lexical profile (candidate)
+
+The concrete **in-process TypeScript** records in `plugin/src/standalone/contracts.ts` implement the abstract records above, not a competing domain model. This profile is intentionally separate from the historical `v1` synthetic-probe stdio envelope and from experimental Python FTS5/vector backend implementations. It is not yet a frozen cross-process wire format.
+
+| Concern | Native encoding / validation |
+|---|---|
+| API request | `protocolVersion: 2`, `requestId` (bounded identifier), `requestedMode`, `query`, optional vault-relative `scope: string[]`, `limit`, optional `predicates` |
+| Modes | `lexical` executes; `dense`/`hybrid` respond `CAPABILITY_UNAVAILABLE`, `executedMode: none`, no fake vectors/fallback |
+| Root identity | Local provider-only SHA-256 of canonical Vault root, device and inode; never accepted from user query; partitioned durable cache |
+| `SourceVersion` | `sourceId` = `vaultRelativePath`; `sha256` over raw input, `sourceType: markdown`, `scopeId: rootId`, `profileId`, `extractionStatus`, `properties`, `wikiLinks`, `diagnostics`, `blocks` |
+| `ParsedBlock` | `blockId` SHA-256 of source/version/order/byte range, `order`, `kind`, original physical line `originalText`, exact `headings`, `wikiLinks`, bounded lexical `terms` and one strict `SourceLocator` |
+| `SourceLocator` | `locatorKind: markdown`, `sourceVersion`, `blockOrder`, `byteStart/End`, `charStart/End` as Unicode scalar values and `lineStart/End` one-based |
+| `TypedProperty` | `key`, `valueType: string/number/boolean/date/null/list`, `value`; finite numeric only, dates ISO `YYYY-MM-DD`, lists of JSON primitives; no coercion |
+| Property filtering | `Predicate {key,valueType,value,operator:eq|contains}`; type match required before evaluating, `contains` limited to list membership and preserves primitive value type |
+| `IndexGeneration` | `schemaVersion`, `rootId`, `generationId`, `publishedAt` ISO UTC, `sourceVersionSet`, `lexicalIndexId`, `readiness: ready`, `documents`; digest based on stable ordered content **excluding wall-clock publication time** |
+| `EvidenceHit` | `sourceId`, `sourceSha256`, exact `originalExcerpt`, verified `sourceLocators[]`, `rank`, `lexicalRank`, `score`, `retrievalMode: lexical`, `indexGenerationId`, headings/links/properties |
+| Response | request version/ID/modes, capability readiness, generation ID, `status: ok/degraded/failed`, hits, typed error code and count of stale suppressed sources |
+
+Canonical source text for this profile is a **verified physical Markdown line** rather than a synthetic context prefix or reassembled chunk. The Python structural chunking policy stays an independent reference/advanced candidate, not a hidden native dependency. Headings are preserved as metadata and used in ranking without inventing new source locators. Known unsupported markup is marked with extraction diagnostics. Full CommonMark/YAML coverage remains a separate compatibility gate.
+
+**Language-neutral parity fixtures:** `contracts/fixtures/standalone-v2.json`. Both `tests/standalone.test.ts` and `tests/test_standalone_conformance.py` independently validate source hash, Unicode/CRLF spans, original text, link metadata, block order and heading hierarchy. The reference line parser alone does not reject duplicate typed YAML properties, but the Python retrieval property validator does; the native parser marks the source `partial` and clears typed properties. The fixture explicitly encodes both statuses rather than falsely claiming byte-for-byte identical internal parser behavior.
+
+No compatibility is claimed for binary-native source locators, embeddings, external IPC, or `Chunk` records in this Markdown-only lexical slice. Future 04B/05 extensions **must preserve these canonical semantics** and are not allowed to silently accept unknown `protocolVersion` or `schemaVersion`.

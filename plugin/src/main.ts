@@ -2,6 +2,12 @@ import { FileSystemAdapter, Modal, Notice, Plugin, PluginSettingTab, Setting, TF
 import { ProbeController, type ProbeConfig } from './controller';
 import { FIXTURE_PATH, type Response } from './protocol';
 import { Supervisor } from './supervisor';
+import { StandaloneEngine } from './standalone/engine';
+import { BoundedVaultReader, privateIndexPath } from './standalone/source';
+import { GenerationStore } from './standalone/storage';
+import { WorkerMarkdownParser } from './standalone/worker';
+import { StandaloneError } from './standalone/contracts';
+import { join } from 'node:path';
 
 const DEFAULTS: ProbeConfig = { fixtureMode: false, interpreter: '', entry: '' };
 class ResultModal extends Modal {
@@ -20,6 +26,9 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private unloaded = false;
   private controller?: ProbeController;
   private resultModal?: ResultModal;
+  // Plugin-native search core; UI/settings/navigation are assigned to OKS-04B.
+  standalone?: StandaloneEngine;
+  standaloneError: string | null = null;
   async onload(): Promise<void> {
     const saved: unknown = await this.loadData();
     if (this.unloaded) return;
@@ -45,6 +54,45 @@ export default class SyntheticEvidencePlugin extends Plugin {
     this.registerEvent(this.app.vault.on('modify', file => invalidate(file)));
     this.registerEvent(this.app.vault.on('delete', file => invalidate(file)));
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => invalidate(file, oldPath)));
+    // Changes can arrive before the asynchronous core has opened; startup does
+    // a full authoritative reconciliation after the event handlers are registered.
+    const nativeChange = (file: TAbstractFile, oldPath?: string): void => {
+      this.standalone?.changed(file.path);
+      if (oldPath !== undefined) this.standalone?.changed(oldPath);
+    };
+    this.registerEvent(this.app.vault.on('create', file => nativeChange(file)));
+    this.registerEvent(this.app.vault.on('modify', file => nativeChange(file)));
+    this.registerEvent(this.app.vault.on('delete', file => nativeChange(file)));
+    this.registerEvent(this.app.vault.on('rename', (file, oldPath) => nativeChange(file, oldPath)));
+    this.registerEvent(this.app.metadataCache.on('changed', file => this.standalone?.changed(file.path)));
+    // The renderer remains responsive during Obsidian's initial layout/mount.
+    // A full reconciliation covers all source changes before layout readiness.
+    this.app.workspace.onLayoutReady(() => {
+      if (!this.unloaded) void this.initializeStandalone();
+    });
+  }
+  private async initializeStandalone(): Promise<void> {
+    // No UI command or external backend is needed to initialize the native core.
+    const adapter = this.app.vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter)) {
+      this.standaloneError = 'UNSUPPORTED_FILESYSTEM';
+    } else {
+      try {
+        const root = adapter.getBasePath();
+        const provider = await BoundedVaultReader.open(root,
+          () => this.app.vault.getMarkdownFiles().map(file => file.path));
+        if (this.unloaded) return;
+        const store = await GenerationStore.open(
+          privateIndexPath(root, provider.rootId, this.manifest.id), provider.rootId);
+        if (this.unloaded) return;
+        this.standalone = new StandaloneEngine(provider, store,
+          new WorkerMarkdownParser(join(root, this.app.vault.configDir,
+            'plugins', this.manifest.id, 'standalone-worker.js')));
+        await this.standalone.start();
+      } catch (error) {
+        this.standaloneError = error instanceof StandaloneError ? error.code : 'INITIALIZATION_FAILED';
+      }
+    }
   }
   private async runProbe(): Promise<void> {
     const adapter = this.app.vault.adapter;
@@ -63,6 +111,8 @@ export default class SyntheticEvidencePlugin extends Plugin {
     this.resultModal?.close();
     this.resultModal = undefined;
     void this.controller?.unload();
+    void this.standalone?.close();
+    this.standalone = undefined;
     this.controller = undefined;
   }
 }
