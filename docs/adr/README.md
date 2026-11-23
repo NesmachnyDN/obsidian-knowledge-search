@@ -12,4 +12,8 @@ Use states Proposed, Accepted, Superseded or Rejected. Do not mark an experiment
 - [ADR-0004](0004-native-extraction-profiles.md) — Measured native extraction profiles; the structured-PDF candidate remains subject to its recorded semantic limitations.
 - [ADR-0005](0005-provisional-structural-chunking.md) — Measured tokenizer identity, source-preserving chunking comparison and provisional independent-structure shortlist; retrieval-quality acceptance deferred to OKS-03B.
 - [ADR-0009 — Opt-in local Advanced transport](0009-opt-in-local-advanced-transport.md) (05B proposal; health-only, independent review pending).
+- [ADR-0010 — Portable embedding reuse](0010-portable-bge-m3-embedding-cache.md) — Proposed optional provider/model-compatible immutable vectors and opt-in Cloud.ru S3 transfer, never a shared working index.
+- [ADR-0011 — Local Docling extraction cache](0011-local-docling-extraction-cache.md) — Proposed private versioned ParsedDocument cache, no remote parsing.
+- [ADR-0012 — Cloud.ru BGE-M3 candidate](0012-optional-cloudru-bge-m3-provider.md) — Proposed conditional embedding API under ADR-0015; scoped explicit consent, no mandatory cloud.
+- [ADR-0013 — New-Vault Cloud.ru S3 sync](0013-cloudru-s3-vault-sync.md) — Proposed separate operator deployment, requires corporate security and multi-device synthetic validation.
 - [ADR-0015 — API-first optional AI retrieval](0015-api-first-ai-optional-dense.md) — Product-owner target direction of 2026-11-23: autonomous basic search, local/cloud provider APIs, one active dense index, separated conditional acceptance gates; repository review pending.
