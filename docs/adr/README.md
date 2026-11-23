@@ -13,3 +13,5 @@ Use states Proposed, Accepted, Superseded or Rejected. Do not mark an experiment
 - [ADR-0005](0005-provisional-structural-chunking.md) — Measured tokenizer identity, source-preserving chunking comparison and provisional independent-structure shortlist; retrieval-quality acceptance deferred to OKS-03B.
 - [ADR-0009 — Opt-in local Advanced transport](0009-opt-in-local-advanced-transport.md) (05B proposal; health-only, independent review pending).
 - [ADR-0010 — Portable BGE-M3 embedding cache and multi-device sync](0010-portable-bge-m3-embedding-cache.md) — Proposed post-MVP decision on local indexes, reusable immutable vectors and opt-in synchronized-folder transport; review pending.
+- [ADR-0011 — Local Docling extraction and ParsedDocument cache](0011-local-docling-extraction-cache.md) — Proposed local-only Docling/OCR and derived document cache, no cloud Docling; post-MVP acceptance.
+- [ADR-0012 — Optional Cloud.ru BGE-M3 provider](0012-optional-cloudru-bge-m3-provider.md) — Proposed opt-in text-embedding API, separate provider space and strict confidentiality/cost controls; offline MVP unchanged.

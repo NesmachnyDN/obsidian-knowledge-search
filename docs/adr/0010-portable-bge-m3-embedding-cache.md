@@ -19,6 +19,10 @@ The required outcome is **portable reuse of computed document vectors**, while e
 5. **Publisher model:** first delivery supports exactly **one publisher** of completed immutable generations and multiple read-only consumers. Multi-writer conflict resolution, cross-Vault sharing, object garbage collection and automatic revocation propagation are deferred. Never delete shared artifacts simply because one device no longer references them.
 6. **No repeat document inference:** consumers import verified, compatible document embeddings into their own local vector structures **without calculating document embeddings again**. Changed effective inputs, absent artifacts or incompatible profiles require new embeddings or explicit degraded/unavailable status. Each **new dense query still requires a compatible query encoder**, local or through separately authorized inference.
 
+## Separation from extraction caching and provider policy
+
+ADR-0011 selects **local-only Docling/OCR** and a private extraction cache that retains ParsedDocument text/locators; those parsed artifacts are never part of the portable vector-only sync format. A compatible parsed-document cache survives downstream chunk/embedding/index changes; the separately keyed BGE-M3 vector cache survives local ANN/SQLite index rebuilds. ADR-0012 selects **optional** Cloud.ru BGE-M3 text embedding computation only with explicit user scope consent, local indexing, spending limits and a **separate cloud embedding space** until exact model-output parity is proven. No Cloud Docling or remote source-file upload is implied by Yandex Disk vector sharing.
+
 ## Identities, keys and compatibility
 
 - `LocalVaultId`: host-private trusted root fingerprint per ADR-0008, retaining file path/device/inode boundary and local scope enforcement.

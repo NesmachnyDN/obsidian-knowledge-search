@@ -52,6 +52,25 @@ Bound queue, use a single heavy job at a time initially, enforce process-level l
 
 Use the bounded synthetic evidence probe in ADR-0002 and the OKS-01A execution contract to validate the plugin/process boundary without an index or ML dependency. Prototype single-shot stdio first; measure production IPC independently in OKS-01B. Before arbitrary-source processing, validate stronger filesystem and resource controls. Adopt native parser structure through an independent canonical mapping rather than reconstructing all hierarchy from flattened Markdown. Separate the candidate tokenizer-only validation/provisioning gate from full embedding runtime validation; count the exact contextualized input, including special tokens, and never infer compatibility from vector dimension alone. No prior application code or runtime dependency is required.
 
+## Local document ingestion and derived caches (proposed ADR-0011)
+
+Advanced PDF/DOCX and RU/EN OCR extraction is **local Docling/Tesseract only**. Cloud Docling, Docling Serve deployments, remote OCR, and implicit cloud parsing fallback are excluded. Parsed native structure and source locators are held in a host-private, versioned `ParsedDocument` extraction cache, keyed by actual source bytes and exact extractor/layout/OCR configuration and artifacts. A compatible cache hit avoids rerunning Docling after re-chunking, re-embedding, index repair/rebuild, restart or rename; current source hashes/scope and locators must still be verified. The extraction cache contains source text: **never** export it to Yandex Disk/cloud by default.
+
+The independent processing layers are:
+
+```text
+authoritative Vault -> local Docling/OCR -> private extraction cache (ParsedDocument)
+    -> structural chunking / contextual serialization
+    -> BGE-M3 document embedding cache (local, optionally portable)
+    -> host-private lexical + vector index -> verified EvidenceHits
+```
+
+Each stage has a separate versioned identity, invalidation, quotas, checkpoint/recovery and truthful partial/failure semantics. Rebuilding downstream artifacts must not invalidate compatible upstream extraction. Full acceptance is a separate post-MVP OKS-06D slice, not an expansion of in-flight OKS-05C review; see [ADR-0011](adr/0011-local-docling-extraction-cache.md).
+
+## Optional Cloud.ru BGE-M3 computation (proposed ADR-0012)
+
+`Cloud.ru Evolution Foundation Models` with API model identifier `BAAI/bge-m3` is the selected **optional** paid embedding provider; a single synthetic Linux smoke returned HTTP 200, 1024 finite L2-normalized dimensions and 19 billed input tokens, but **local/cloud model-output parity remains unproven**. Only explicitly consented contextual chunk text may cross the TLS boundary; never raw source files, full parsed artifacts or local database files. Treat cloud and local embeddings as incompatible distinct `embeddingSpaceId` profiles until exact fixed-corpus parity/revision checks succeed. Keep source ingestion/Docling/OCR, embedding cache, indexes and retrieval local. Explicit per-Vault scope consent, private credential storage, token/budget hard stops, bounded requests/retries and failure diagnostics are mandatory; no outbound connection is enabled by default. Cloud failure cannot break standalone or offline local Advanced. This is optional post-MVP OKS-06E, not a 05D/05E requirement; see [ADR-0012](adr/0012-optional-cloudru-bge-m3-provider.md).
+
 ## Post-MVP portable Advanced embedding reuse (proposed ADR-0010)
 
 The selected Advanced target embedding profile is pinned `BAAI/bge-m3` dense 1024-dimensional L2-normalized vectors. Exact model/tokenizer revision, contextual input serialization and output compatibility must be verified. SQLite is the local Advanced metadata/persistence candidate; `sqlite-vec` is an initial vector backend candidate subject to measured alternatives, not a final production selection. This does not alter the plugin-native Standalone index or its no-extra-dependencies offline default.
