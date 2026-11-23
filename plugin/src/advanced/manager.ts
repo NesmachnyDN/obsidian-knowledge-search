@@ -122,6 +122,17 @@ export class AdvancedIngestionManager {
     const store=await AdvancedGenerationStore.open(root,pluginId);
     if(!this.store) {this.store=store;this.root=root;}
   }
+  async verifiedAll(isAuthorized:(path:string)=>boolean):Promise<{documents:IngestResponse[];staleCount:number}> {
+    if(!this.store) throw new IngestError('ADVANCED_UNAVAILABLE');
+    const paths=this.store.paths();
+    const documents:IngestResponse[]=[];
+    let staleCount=0;
+    for(const path of paths){
+      const value=await this.verified(path,()=>isAuthorized(path));
+      if(value)documents.push(value);else staleCount++;
+    }
+    return {documents,staleCount};
+  }
   /** The caller checks Obsidian TFile authorization before touching source data. */
   async verified(path:string,isAuthorized:()=>boolean):Promise<IngestResponse|null> {
     const result=this.store?.get(path);

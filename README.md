@@ -27,6 +27,10 @@ Desktop Linux is the first supported target. Other desktop platforms and Obsidia
 
 Exactly one active local dense index binds to the chosen embedding model. A model switch triggers a staged full reindex and atomic activation, not permanent storage of indexes for every candidate. Basic search remains available while the AI API is unavailable. Mandatory MVP Gate A and conditional AI/advanced-format acceptance are defined in [ADR-0015](docs/adr/0015-api-first-ai-optional-dense.md) and the [specification](docs/SPEC.md); local offline AI is not an MVP-wide release gate.
 
+### Experimental local BGE-M3 profile (OKS-05D candidate)
+
+The unmerged OKS-05D candidate implements a **separately opted-in, local-only** CPU BGE-M3 retrieval profile, **not** a configurable embedding/reranker/LLM API-provider adapter, the default Standalone runtime, or a mandatory Gate A prerequisite. It reuses authenticated v3 Markdown/PDF/DOCX/RU+EN OCR extraction and offers manual indexing, lexical/dense/hybrid RRF and source-verified navigation in Obsidian. It requires separately provisioned and verified local Python, BGE-M3 weights/tokenizer and OCR data, a bounded user-systemd cgroup, and no network access or automatic downloads. Initial limits are 32 sources / 256 vectors; a cold model-backed query may take approximately 10–20 seconds on the measured CPU host. Native PDF/DOCX page/cell navigation is not guaranteed. Configure trusted Advanced paths in the plugin settings and use the active-source indexing and Advanced search commands only in an authorized Vault. See the [OKS-05D retrieval contract](contracts/advanced-retrieval-v1.md), [proposed ADR-0014](docs/adr/0014-offline-advanced-retrieval-generation.md), and [author handoff](docs/reviews/OKS-05D-AUTHOR-HANDOFF.md). API-first provider capabilities remain separately gated by ADR-0015.
+
 ## Project documentation
 
 - [Product specification](docs/SPEC.md)

@@ -1,7 +1,7 @@
 import type { AdvancedHealth } from '../advanced/health';
 import type { IngestionStatus } from '../advanced/manager';
 import { isRecord, StandaloneError, validateRequest, validProperty, BOUNDS,
-  type SearchRequest, type SearchResponse, type Predicate, type EvidenceHit } from '../standalone/contracts';
+  type SearchRequest, type SearchResponse, type Predicate, type EvidenceHit, type SearchMetadata } from '../standalone/contracts';
 import type { StandaloneEngine } from '../standalone/engine';
 import { diagnostics, safeCode, statusSnapshot, type SearchStatus } from './status';
 
@@ -17,6 +17,8 @@ export function parseSearch(value: unknown): SearchRequest {
     if (bytes > 16384) throw new StandaloneError('INVALID_REQUEST');
   };
   for (const path of value.scope ?? []) count(path);
+  if (value.metadata?.tag !== undefined) count(value.metadata.tag);
+  if (value.metadata?.linkTarget !== undefined) count(value.metadata.linkTarget);
   if (typeof value.requestedMode !== 'string' || value.predicates?.some(p =>
     typeof p.valueType !== 'string' || typeof p.operator !== 'string'
     || Object.keys(p).some(k => !['key','valueType','value','operator'].includes(k))))
@@ -141,7 +143,9 @@ export class StandaloneApi {
     } catch { return failure('INVALID_REQUEST'); }
   }
 }
-export function uiRequest(query: string, limit: number, predicates: Predicate[] = []): SearchRequest {
+export function uiRequest(query: string, limit: number, predicates: Predicate[] = [],
+  matchMode: 'literal' | 'terms' = 'literal', metadata?: SearchMetadata): SearchRequest {
   if (Buffer.byteLength(query) > BOUNDS.queryBytes) throw new StandaloneError('INVALID_REQUEST');
-  return parseSearch({ protocolVersion: 2, requestId: 'ui', query, limit, predicates, requestedMode: 'lexical' });
+  return parseSearch({ protocolVersion: 2, requestId: 'ui', query, limit, predicates,
+    requestedMode: 'lexical', matchMode, ...(metadata ? { metadata } : {}) });
 }

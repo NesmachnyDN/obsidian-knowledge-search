@@ -1,5 +1,6 @@
 import type { AdvancedHealth } from '../advanced/health';
 import type { IngestionStatus } from '../advanced/manager';
+import type { RetrievalStatus } from '../advanced/retrieval-manager';
 import { Modal, PluginSettingTab, Setting, Notice, type App, type Plugin } from 'obsidian';
 import type { SearchSettings } from './settings';
 export class SearchSettingsTab extends PluginSettingTab {
@@ -8,7 +9,12 @@ export class SearchSettingsTab extends PluginSettingTab {
     private readonly purge: () => Promise<number>,
     private readonly health: () => AdvancedHealth, private readonly checkHealth: () => Promise<void>,
     private readonly ingestionStatus?: () => IngestionStatus,
-    private readonly ingestActive?: () => Promise<void>) { super(app, plugin); }
+    private readonly ingestActive?: () => Promise<void>,
+    private readonly retrievalStatus?: () => RetrievalStatus,
+    private readonly indexActive?: () => Promise<void>,
+    private readonly openAdvanced?: () => void,
+    private readonly cancelAdvanced?: () => Promise<void>,
+    private readonly rebuildActive?: () => Promise<void>) { super(app, plugin); }
   display(): void {
     const root = this.containerEl; root.replaceChildren();
     const save = async (change: (s: SearchSettings) => void): Promise<void> => {
@@ -45,7 +51,7 @@ export class SearchSettingsTab extends PluginSettingTab {
         .setDisabled(!this.current().advanced.enabled)
         .onClick(async () => { await this.checkHealth(); this.display(); }));
     new Setting(root).setName('Advanced document ingestion (separate opt-in)')
-      .setDesc('Local-only; manual active-file ingestion. Uses a verified resource-limited cgroup unit. Configure trusted paths first. Does not enable dense/hybrid search.')
+      .setDesc('Local-only explicit source ingestion (v3). Dense and hybrid require a separate BGE-M3 index and a successful real model leg; never enabled by ingestion alone.')
       .addToggle(t=>t.setValue(this.current().ingestion.enabled)
         .onChange(v=>save(s=>{s.ingestion.enabled=v;})));
     for(const [key,name] of [
@@ -72,6 +78,23 @@ export class SearchSettingsTab extends PluginSettingTab {
     if(this.ingestActive) item.addButton(b=>b.setButtonText('Ingest active document')
       .setDisabled(!this.current().ingestion.enabled)
       .onClick(async()=>{try{await this.ingestActive?.();}catch{new Notice('OKS: Advanced ingestion failed.');}this.display();}));
+    const retrieval=this.retrievalStatus?.();
+    new Setting(root).setName('Advanced retrieval (real BGE-M3)')
+      .setDesc(`State=${retrieval?.status??'disabled'}, lexical=${retrieval?.lexical??'unavailable'}, `+
+        `dense=${retrieval?.dense??'unavailable'}, sources=${retrieval?.indexedSources??0}, `+
+        `chunks=${retrieval?.indexedChunks??0}, error=${retrieval?.error??'none'}. `+
+        'Explicitly index each ingested source before dense/hybrid. No fallback.')
+      .addButton(b=>b.setButtonText('Index active source').setDisabled(!this.current().ingestion.enabled)
+        .onClick(async()=>{try{await this.indexActive?.();}catch(e){new Notice('OKS Advanced: '+
+          (e instanceof Error?e.message:'INDEX_FAILED'));}this.display();}))
+      .addButton(b=>b.setButtonText('Rebuild active').setDisabled(!this.current().ingestion.enabled)
+        .onClick(async()=>{try{await this.rebuildActive?.();}catch(e){new Notice('OKS Advanced: '+
+          (e instanceof Error?e.message:'INDEX_FAILED'));}this.display();}))
+      .addButton(b=>b.setButtonText('Search').setDisabled(!this.current().ingestion.enabled)
+        .onClick(()=>this.openAdvanced?.()))
+      .addButton(b=>b.setButtonText('Cancel').onClick(async()=>{
+        try{await this.cancelAdvanced?.();}catch{new Notice('OKS Advanced: cancel failed');}
+        this.display();}));
     const purge = this.purge;
     new Setting(root).setName('Clear derived Standalone index')
       .setDesc('Only while indexing is disabled. Removes recognized private index files, never notes. Rebuild after re-enabling.')
