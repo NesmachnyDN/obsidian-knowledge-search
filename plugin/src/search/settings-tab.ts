@@ -1,9 +1,11 @@
+import type { AdvancedHealth } from '../advanced/health';
 import { Modal, PluginSettingTab, Setting, Notice, type App, type Plugin } from 'obsidian';
 import type { SearchSettings } from './settings';
 export class SearchSettingsTab extends PluginSettingTab {
   constructor(app: App, plugin: Plugin, private readonly current: () => SearchSettings,
     private readonly patchSettings: (change: (s: SearchSettings) => void) => Promise<void>,
-    private readonly purge: () => Promise<number>) { super(app, plugin); }
+    private readonly purge: () => Promise<number>,
+    private readonly health: () => AdvancedHealth, private readonly checkHealth: () => Promise<void>) { super(app, plugin); }
   display(): void {
     const root = this.containerEl; root.replaceChildren();
     const save = async (change: (s: SearchSettings) => void): Promise<void> => {
@@ -20,10 +22,25 @@ export class SearchSettingsTab extends PluginSettingTab {
       t.setValue(this.current()[key]).onChange(v => save(s => { s[key] = v; })));
     new Setting(root).setName('Default Top K (1–50)').addText(t => t.setValue(String(this.current().topK))
       .onChange(v => save(s => { s.topK = Number(v); })));
-    new Setting(root).setName('Advanced backend configuration (inactive)')
-      .setDesc('Configuration only. Always disabled in this version; no connection, runtime, model or network activity.')
-      .addDropdown(d => d.addOption('none','None').addOption('local-stdio','Future local stdio profile')
-        .setValue(this.current().advanced.profile).onChange(v => save(s => { s.advanced.profile = v as 'none' | 'local-stdio'; })));
+    new Setting(root).setName('Advanced local backend (explicit opt-in)')
+      .setDesc('Health-only local Python stdio, no document transfer. Dense/hybrid remain unavailable.')
+      .addToggle(t => t.setValue(this.current().advanced.enabled)
+        .onChange(v => save(s => { s.advanced.enabled = v; })));
+    new Setting(root).setName('Advanced profile')
+      .setDesc('Optional external local backend. Never required by Standalone.')
+      .addDropdown(d => d.addOption('none','None').addOption('local-stdio','Local stdio (trusted)')
+        .setValue(this.current().advanced.profile)
+        .onChange(v => save(s => { s.advanced.profile = v as 'none' | 'local-stdio'; })));
+    for (const [key, name] of [['interpreter','Trusted local Python executable (absolute)'],
+      ['entry','Trusted advanced health entry (absolute)']] as const)
+      new Setting(root).setName(name).addText(t => t.setValue(this.current().advanced[key])
+        .onChange(v => save(s => { s.advanced[key] = v; })));
+    const h = this.health();
+    new Setting(root).setName('Advanced transport status')
+      .setDesc(`Health-only: ${h.status}${h.error ? ' (' + h.error + ')' : ''}. Never implies dense/hybrid readiness.`)
+      .addButton(b => b.setButtonText('Recheck health')
+        .setDisabled(!this.current().advanced.enabled)
+        .onClick(async () => { await this.checkHealth(); this.display(); }));
     const purge = this.purge;
     new Setting(root).setName('Clear derived Standalone index')
       .setDesc('Only while indexing is disabled. Removes recognized private index files, never notes. Rebuild after re-enabling.')

@@ -2,9 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, copyFile, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { parseMarkdown } from '../plugin/src/standalone/markdown';
 import { defaultSettings } from '../plugin/src/search/settings';
+const TEST_PYTHON = '/usr/bin/python3.12';
 // Controlled Node-only host adapter. Actual DOM/editor acceptance remains host smoke.
 const Module = require('node:module') as { _load: (name: string, ...args: unknown[]) => unknown };
 class HostPlugin {
@@ -207,4 +208,161 @@ test('B2: cold-disabled reload can purge only derived index without starting a w
     await replacement.standalone!.whenIdle();
     assert.equal(replacement.standalone!.status().status,'ready');
   } finally { replacement?.onunload(); await f.cleanup(); }
+});
+
+test('05B advanced health is opt-in, survives Standalone indexing and revokes child on disable', async () => {
+  const f = await fixture();
+  try {
+    await f.plugin.onload(); f.layout(); await f.internal.initializing;
+    await f.plugin.standalone!.whenIdle();
+    assert.equal(f.plugin.advancedHealth.snapshot().status,'disabled');
+    assert.equal(f.plugin.advancedHealth.pid,undefined);
+    await f.plugin.patchSettings(s => {s.advanced={enabled:true, profile:'local-stdio',
+      interpreter:TEST_PYTHON, entry:join(process.cwd(),'engine/persistent.py')};});
+    assert.equal(f.plugin.advancedHealth.snapshot().status,'ready');
+    assert.equal(f.plugin.searchController.status().capabilityReadiness.dense,'unavailable');
+    const pid=f.plugin.advancedHealth.pid!;
+    process.kill(pid,0);
+    assert.equal(f.plugin.standalone!.status().status,'ready');
+    await f.plugin.patchSettings(s => {s.advanced.enabled=false;});
+    assert.equal(f.plugin.advancedHealth.snapshot().status,'disabled');
+    assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
+    assert.equal(f.plugin.standalone!.status().status,'ready');
+  } finally { await f.cleanup(); }
+});
+test('05B advanced reload barrier waits for prior subprocess stop with explicit saved opt-in',async()=>{
+  const f=await fixture();
+  let replacement: InstanceType<typeof PluginClass>|undefined;
+  try {
+    await f.plugin.onload();f.layout();await f.internal.initializing;
+    await f.plugin.patchSettings(s=>{s.advanced={enabled:true,profile:'local-stdio',
+      interpreter:TEST_PYTHON,entry:join(process.cwd(),'engine/persistent.py')};});
+    const first=f.plugin.advancedHealth.pid!;
+    assert.ok(first);process.kill(first,0);
+    const saved=(f.plugin as unknown as {saved:unknown}).saved;
+    f.plugin.onunload();
+    replacement=new PluginClass(f.plugin.app,f.plugin.manifest);
+    Object.assign(replacement,{app:f.plugin.app,manifest:f.plugin.manifest,saved});
+    await replacement.onload();f.layout();
+    await (replacement as unknown as {advancedStartup:Promise<void>}).advancedStartup;
+    assert.equal(replacement.advancedHealth.snapshot().status,'ready');
+    assert.throws(()=>process.kill(first,0),{code:'ESRCH'});
+    const second=replacement.advancedHealth.pid!;
+    assert.ok(second && second!==first);
+    replacement.onunload();
+  } finally { replacement?.onunload();await f.cleanup(); }
+});
+
+
+test('05B B2: overlapping recheck/disable/unload and replacement reload never overlap Advanced workers', async () => {
+  const f = await fixture();
+  let replacement: InstanceType<typeof PluginClass> | undefined;
+  const raceRoot = await mkdtemp(resolve('.test-build/advanced-plugin-race-'));
+  const entry = join(raceRoot, 'health-race.py');
+  const registry = join(raceRoot, 'advanced-pids.log');
+  await writeFile(entry, [
+    'import sys,json,os,time,signal',
+    'signal.signal(signal.SIGTERM,signal.SIG_IGN)',
+    'with open(' + JSON.stringify(registry) + ",'a') as f:f.write(str(os.getpid())+'\\n')",
+    'r=json.loads(sys.stdin.readline())',
+    'sys.stdout.write(json.dumps(dict(version=2,id=r["id"],ok=True),separators=(",",":"))+"\\n")',
+    'sys.stdout.flush()',
+    'time.sleep(30)',
+  ].join('\n') + '\n');
+  const cfg = { enabled:true, profile:'local-stdio' as const, interpreter:TEST_PYTHON, entry };
+  const isAlive = async (pid: number): Promise<boolean> => {
+    try {
+      const stat = await readFile('/proc/' + pid + '/stat','utf8');
+      return !['Z','X'].includes(stat.slice(stat.lastIndexOf(')')+2).trim().split(/\s+/)[0]!);
+    } catch (error) {
+      if (['ENOENT','ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) return false;
+      throw error;
+    }
+  };
+  let watching = true, maxAlive = 0;
+  let monitor = Promise.resolve();
+  try {
+    await f.plugin.onload(); f.layout();
+    await (f.internal as unknown as { initializing?: Promise<void> }).initializing;
+    await f.plugin.patchSettings(s => { s.advanced = cfg; });
+    assert.equal(f.plugin.advancedHealth.snapshot().status,'ready');
+    const initial = f.plugin.advancedHealth.pid!;
+    const savedOptIn = { ...f.plugin.settings };
+    monitor = (async () => {
+      while (watching) {
+        const list = (await readFile(registry,'utf8')).trim().split('\n').map(Number);
+        maxAlive = Math.max(maxAlive, (await Promise.all(list.map(isAlive))).filter(Boolean).length);
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+    })();
+    const rechecks = [f.plugin.checkAdvancedHealth(),f.plugin.checkAdvancedHealth(),
+      f.plugin.checkAdvancedHealth()];
+    const disable = f.plugin.patchSettings(s => { s.advanced.enabled = false; });
+    f.plugin.onunload();
+    replacement = new PluginClass(f.plugin.app, f.plugin.manifest);
+    Object.assign(replacement,{app:f.plugin.app,manifest:f.plugin.manifest,saved:savedOptIn});
+    await replacement.onload();
+    f.layout();
+    await Promise.allSettled([...rechecks,disable]);
+    await (replacement as unknown as {advancedStartup?:Promise<void>}).advancedStartup;
+    assert.equal(replacement.advancedHealth.snapshot().status,'ready');
+    assert.equal(await isAlive(initial),false);
+    assert.ok(replacement.advancedHealth.pid && replacement.advancedHealth.pid !== initial);
+    assert.equal(replacement.standalone!.status().status,'ready');
+    replacement.onunload();
+    await replacement.advancedHealth.stop();
+    await f.plugin.advancedHealth.stop();
+    const list = (await readFile(registry,'utf8')).trim().split('\n').map(Number);
+    for (const pid of list) assert.equal(await isAlive(pid),false,'reload survivor: ' + pid);
+    assert.ok(maxAlive <= 1,'overlapping advanced workers: ' + maxAlive);
+  } finally {
+    watching = false;
+    await monitor;
+    replacement?.onunload();
+    await replacement?.advancedHealth.stop();
+    await f.plugin.advancedHealth.stop();
+    await f.cleanup();
+    await rm(raceRoot, { recursive:true, force:true });
+  }
+});
+
+
+test('05B B2: failed process-group termination blocks reload and health recheck across instances', async () => {
+  const f = await fixture();
+  let replacement: InstanceType<typeof PluginClass> | undefined;
+  const originalKill = process.kill.bind(process);
+  let previousPid = 0;
+  try {
+    await f.plugin.onload(); f.layout();
+    await f.plugin.patchSettings(s => {s.advanced={enabled:true,profile:'local-stdio',
+      interpreter:TEST_PYTHON,entry:join(process.cwd(),'engine/persistent.py')};});
+    assert.equal(f.plugin.advancedHealth.snapshot().status,'ready');
+    previousPid = f.plugin.advancedHealth.pid!;
+    const saved = structuredClone(f.plugin.settings);
+    // Deny the exact group signal only, as if cleanup lost permissions. Do not
+    // let this synthetic failure affect any other process or the real host.
+    process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+      if (pid === -previousPid && signal === 'SIGTERM')
+        throw Object.assign(new Error('injected signal refusal'),{code:'EPERM'});
+      return originalKill(pid,signal);
+    }) as typeof process.kill;
+    f.plugin.onunload();
+    replacement = new PluginClass(f.plugin.app,f.plugin.manifest);
+    Object.assign(replacement,{app:f.plugin.app,manifest:f.plugin.manifest,saved});
+    await replacement.onload(); f.layout();
+    await (replacement as unknown as {advancedStartup?:Promise<void>}).advancedStartup;
+    assert.equal(replacement.advancedHealth.snapshot().status,'failed');
+    assert.equal(replacement.advancedHealth.snapshot().error,'ADVANCED_UNAVAILABLE');
+    assert.equal(replacement.advancedHealth.pid,undefined);
+    await replacement.checkAdvancedHealth();
+    assert.equal(replacement.advancedHealth.pid,undefined);
+    originalKill(previousPid,0); // predecessor is deliberately still alive
+  } finally {
+    process.kill = originalKill as typeof process.kill;
+    await f.plugin.advancedHealth.stop();
+    replacement?.onunload();
+    await replacement?.advancedHealth.stop();
+    await f.cleanup();
+  }
+  assert.throws(() => originalKill(previousPid,0),{code:'ESRCH'});
 });

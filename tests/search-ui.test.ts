@@ -35,12 +35,12 @@ test('settings strictly migrate v1 probe fields; unknown versions/keys/types fai
   assert.deepEqual(parseSettings(null), defaultSettings());
   for (const version of [undefined, 1]) {
     const migrated = parseSettings({ version, fixtureMode: true, interpreter: '/synthetic/python', entry: '/synthetic/probe.py' });
-    assert.equal(migrated.version, 2); assert.equal(migrated.probe.fixtureMode, true);
+    assert.equal(migrated.version, 3); assert.equal(migrated.probe.fixtureMode, true);
     assert.equal(migrated.advanced.enabled, false);
   }
   for (const v of [{}, { version: 9 }, { ...defaultSettings(), enabled: 'true' },
     { ...defaultSettings(), topK: 51 }, { ...defaultSettings(), topK: 1.5 },
-    { ...defaultSettings(), unknown: 'secret' }, { ...defaultSettings(), advanced: { enabled: true, profile: 'local-stdio' } },
+    { ...defaultSettings(), unknown: 'secret' }, { ...defaultSettings(), advanced: { enabled: true, profile: 'local-stdio', interpreter: '', entry: '' } },
     { ...defaultSettings(), advanced: { enabled: false, profile: 'https://example.invalid' } },
     { ...defaultSettings(), probe: { fixtureMode: false, interpreter: '\0', entry: '' } }]) assert.throws(() => parseSettings(v));
   const original = defaultSettings(), copy = parseSettings(original); copy.probe.entry = 'changed';

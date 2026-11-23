@@ -1,3 +1,4 @@
+import type { AdvancedHealth } from '../advanced/health';
 import { isRecord, StandaloneError, validateRequest, validProperty, BOUNDS,
   type SearchRequest, type SearchResponse, type Predicate, type EvidenceHit } from '../standalone/contracts';
 import type { StandaloneEngine } from '../standalone/engine';
@@ -47,13 +48,15 @@ export class SearchController {
   private pending?: { request: SearchRequest; revision: number; resolve: (v: ApiResult<SearchResponse>) => void };
   private listeners = new Set<() => void>();
   private state: UiState = { phase: 'idle', message: 'Enter a query to search original Markdown.', response: null };
-  constructor(private readonly navigate: (hit: EvidenceHit) => Promise<void>) {}
+  constructor(private readonly navigate: (hit: EvidenceHit) => Promise<void>,
+    private readonly advancedStatus?: () => AdvancedHealth) {}
   attach(engine: Engine): void { if (!this.disposed) { this.engine = engine; this.error = null; this.emit(); } }
   configure(enabled: boolean, paused: boolean, error: string | null = null): void {
     this.enabled = enabled; this.paused = paused; this.error = safeCode(error); this.invalidate();
   }
   detach(): void { this.engine = undefined; this.invalidate(); }
-  status(): SearchStatus { return statusSnapshot(this.engine?.status(), !this.disposed && this.enabled, this.paused, this.error); }
+  status(): SearchStatus { return statusSnapshot(this.engine?.status(), !this.disposed && this.enabled, this.paused,
+    this.error, this.advancedStatus?.()); }
   snapshot(): UiState { return structuredClone(this.state); }
   subscribe(listener: () => void): () => void {
     if (this.disposed) return () => {};

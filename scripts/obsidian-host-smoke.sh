@@ -30,6 +30,11 @@ for asset in main.js manifest.json standalone-worker.js; do
 done
 printf '%s\n' '["oks-synthetic-evidence"]' > "$tmp/vault/.obsidian/community-plugins.json"
 printf '%s\n' '{"safeMode":false}' > "$tmp/vault/.obsidian/app.json"
+# Only a separate opt-in synthetic test exposes local trusted host paths to the child Obsidian.
+if [[ "${OKS_ADVANCED_HEALTH_TEST:-0}" == 1 ]]; then
+  export OKS_ADVANCED_PYTHON="/usr/bin/python3.12"
+  export OKS_ADVANCED_ENTRY="$repo/engine/persistent.py"
+fi
 export tmp app cli repo
 python3 - <<'PY'
 import json,os,time
@@ -86,6 +91,12 @@ env HOME="$tmp/home" timeout 150s xvfb-run -a -e "$tmp/display.log" -s '-screen 
   [[ "$ui" == *"OBSIDIAN_UI_SMOKE_PASS:"* ]] ||
     { echo "HOST_SMOKE_FAILURE: extended UI scenarios ($ui)" >&2; exit 1; }
   printf "%s\n" "$ui"
+  if [[ "${OKS_ADVANCED_HEALTH_TEST:-0}" == 1 ]]; then
+    advanced="$(timeout 25s "$cli" eval "code=$(cat "$repo/scripts/obsidian-advanced-smoke.js")")"
+    [[ "$advanced" == *"OBSIDIAN_ADVANCED_HEALTH_PASS:"* ]] ||
+      { echo "HOST_SMOKE_FAILURE: advanced explicit health scenario ($advanced)" >&2; exit 1; }
+    printf "%s\n" "$advanced"
+  fi
   timeout 8s "$cli" command id=oks-synthetic-evidence:open-first-search-source >/dev/null
   sleep 1
   navigation="$(timeout 8s "$cli" eval "code=JSON.stringify({path:app.workspace.getMostRecentLeaf()?.view?.file?.path,selected:app.workspace.getMostRecentLeaf()?.view?.editor?.getSelection()})")"
