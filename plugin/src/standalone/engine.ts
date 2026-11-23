@@ -13,6 +13,11 @@ export type EngineState = {
   generationId: string | null; sources: number; records: number;
   error: string | null; maintenanceWarning: string | null; busy: boolean;
 };
+// Query-driven bounded audit; no recurring timer or hidden background scanner.
+// lstat-based hints detect normal misses immediately. Unchanged hints are never
+// treated as a cryptographic guarantee: full source hashes are rechecked at most
+// once per interval during active searches, and every EvidenceHit is rehashed.
+const SOURCE_AUDIT_INTERVAL_MS = 30_000;
 const yieldToHost = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0));
 
 export class StandaloneEngine {
@@ -29,9 +34,12 @@ export class StandaloneEngine {
   private recoveryNeedsPublication = false;
   private maintenanceWarning: string | null = null;
   private initialized = false;
+  private versionHints: string[] | null = null;
+  private verifiedAt = 0;
   constructor(private readonly provider: SourceProvider, private readonly store: GenerationStore,
     private readonly parser: MarkdownParser,
-    private readonly yieldJob: () => Promise<void> = yieldToHost) {
+    private readonly yieldJob: () => Promise<void> = yieldToHost,
+    private readonly now: () => number = Date.now) {
     if (provider.rootId !== store.rootId) throw new StandaloneError('VAULT_IDENTITY_CHANGED');
   }
   status(): EngineState { return { ...this.state }; }
@@ -127,17 +135,22 @@ export class StandaloneEngine {
     try {
       const paths = await this.provider.list();
       if (this.stopped || this.paused || revision !== this.revision) return;
+      const beforeHints = await this.provider.versionHints(paths);
+      if (this.stopped || this.paused || revision !== this.revision) return;
       const live = new Set(paths);
       const prior = new Map((this.generation?.documents ?? []).map(doc => [doc.sourceId, doc]));
       for (const path of [...prior.keys()]) if (!live.has(path)) prior.delete(path);
-      let blocks = full ? 0 : [...prior.values()].reduce((count, doc) => count + doc.blocks.length, 0);
+      let blocks = [...prior.values()].reduce((count, doc) => count + doc.blocks.length, 0);
       const targets = full ? paths : paths.filter(path => changes.has(path) || !prior.has(path));
-      if (full) prior.clear();
       for (const path of targets) {
         if (this.stopped || this.paused || revision !== this.revision) return;
         const previous = prior.get(path);
-        if (previous) blocks -= previous.blocks.length;
         const bytes = await this.provider.read(path);
+        if (previous && hash(bytes) === previous.sha256) {
+          await this.yieldJob();
+          continue; // Full audit reuses unchanged, already authenticated documents.
+        }
+        if (previous) blocks -= previous.blocks.length;
         const doc = await this.parser.parse(path, bytes, this.provider.rootId);
         blocks += doc.blocks.length;
         if (blocks > BOUNDS.blocks) throw new StandaloneError('INDEX_LIMIT');
@@ -155,6 +168,9 @@ export class StandaloneEngine {
       }
       const currentPaths = await this.provider.list();
       if (paths.length !== currentPaths.length || paths.some((p, i) => p !== currentPaths[i]))
+        throw new StandaloneError('SOURCE_CHANGED');
+      const afterHints = await this.provider.versionHints(currentPaths);
+      if (beforeHints.some((hint, i) => hint !== afterHints[i]))
         throw new StandaloneError('SOURCE_CHANGED');
       if (this.stopped || this.paused || revision !== this.revision) return;
       const next = makeGeneration(this.provider.rootId, [...prior.values()]);
@@ -182,6 +198,8 @@ export class StandaloneEngine {
         }
       }
       if (this.stopped) return;
+      this.versionHints = afterHints;
+      this.verifiedAt = this.now();
       if (this.paused) {
         this.recordState('degraded', 'CANCEL_DEFERRED');
       } else if (revision !== this.revision) {
@@ -192,26 +210,45 @@ export class StandaloneEngine {
         this.recordState('ready', null);
       }
     } catch (error) {
-      // An interrupted/failed update cannot promote a partially indexed dataset.
+      // An unknowable CURRENT must never expose an old in-memory generation as
+      // searchable. Stop writes until a fresh authenticated store is opened.
+      if (code(error) === 'INDEX_PUBLICATION_UNCERTAIN') {
+        this.generation = null;
+        this.versionHints = null;
+        this.paused = true;
+      }
       this.recordState(this.generation ? 'degraded' : 'failed', code(error));
     }
   }
   async search(input: unknown): Promise<SearchResponse> {
     validateRequest(input);
     const req: SearchRequest = input;
+    const gen = this.generation; // Pin ALL response fields to this immutable snapshot.
     const response = (status: SearchResponse['status'], error: string | null,
       hits: EvidenceHit[], stale: number): SearchResponse => ({
       protocolVersion: PROTOCOL, requestId: req.requestId, requestedMode: req.requestedMode,
       executedMode: status === 'failed' ? 'none' : 'lexical', status, error,
-      indexGenerationId: this.generation?.generationId ?? null, hits,
-      capabilityReadiness: { lexical: !this.generation ? 'unavailable'
+      indexGenerationId: gen?.generationId ?? null, hits,
+      capabilityReadiness: { lexical: !gen ? 'unavailable'
         : status === 'ok' ? 'ready' : status === 'failed' ? 'failed' : 'degraded', dense: 'unavailable' },
       staleSourceCount: stale,
     });
+    if (this.stopped) return response('failed', 'LIFECYCLE_INVALID', [], 0);
     if (req.requestedMode !== 'lexical') return response('failed', 'CAPABILITY_UNAVAILABLE', [], 0);
-    const gen = this.generation;
     if (!gen) return response('failed', this.state.error ?? 'INDEX_UNAVAILABLE', [], 0);
     try {
+      // Events alone are insufficient. Every search validates the bounded path
+      // list AND cheap filesystem version hints, including when there are no
+      // lexical candidates. Only a drift/aged audit invokes full content reads.
+      const paths = await this.provider.list();
+      const hints = await this.provider.versionHints(paths);
+      const drift = this.versionHints === null || paths.length !== gen.documents.length
+        || paths.some((path, i) => path !== gen.documents[i]?.sourceId)
+        || hints.length !== this.versionHints.length
+        || hints.some((hint, i) => hint !== this.versionHints![i]);
+      const age = this.now() - this.verifiedAt;
+      const due = age < 0 || age >= SOURCE_AUDIT_INTERVAL_MS;
+      if ((drift || due) && !this.stopped && !this.paused && !this.work) this.reconcile();
       const tokens = [...new Set(terms(req.query))];
       if (tokens.length > BOUNDS.termsPerQuery) throw new StandaloneError('QUERY_INVALID');
       const mandatoryIds = req.query.toLowerCase().match(/[\p{L}\p{N}]+(?:[._/-][\p{L}\p{N}]+)+/gu) ?? [];
@@ -273,12 +310,16 @@ export class StandaloneEngine {
         if (hits.length >= req.limit) break;
       }
       // A missed event never defeats live hash suppression; queue reconciliation for recovery.
-      if (stale && !this.stopped && !this.paused) this.reconcile();
-      const degraded = this.state.status !== 'ready' || this.work !== null || stale > 0;
+      if (stale && !this.stopped && !this.paused && !this.work) this.reconcile();
+      const switched = this.generation !== gen;
+      const degraded = drift || due || switched || this.state.status !== 'ready'
+        || this.work !== null || stale > 0;
       return response(degraded ? 'degraded' : 'ok',
-        degraded ? this.state.error ?? (stale ? 'SOURCE_STALE' : 'RECONCILING') : null,
+        degraded ? (drift || due || switched ? 'RECONCILING'
+          : this.state.error ?? (stale ? 'SOURCE_STALE' : 'RECONCILING')) : null,
         hits, stale);
     } catch (error) {
+      if (!this.stopped && !this.paused && !this.work) this.reconcile();
       return response('failed', code(error), [], 0);
     }
   }
@@ -288,6 +329,7 @@ export class StandaloneEngine {
     this.pending.clear(); this.all = false;
     await this.parser.close(); // Interrupt CPU-bound parse immediately on unload.
     if (this.work) await this.work;
+    this.recordState('unavailable', 'LIFECYCLE_INVALID');
   }
 }
 function code(error: unknown): string {

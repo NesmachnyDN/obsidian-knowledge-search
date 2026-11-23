@@ -15,10 +15,11 @@ import { BoundedVaultReader, privateIndexPath } from '../plugin/src/standalone/s
 import { GenerationStore } from '../plugin/src/standalone/storage';
 import { StandaloneEngine } from '../plugin/src/standalone/engine';
 
-function newEngine(reader: BoundedVaultReader, store: GenerationStore, yieldJob?: () => Promise<void>): StandaloneEngine {
+function newEngine(reader: BoundedVaultReader, store: GenerationStore, yieldJob?: () => Promise<void>,
+  now?: () => number): StandaloneEngine {
   return new StandaloneEngine(reader, store,
     new WorkerMarkdownParser(join(process.cwd(), '.test-build', 'standalone-worker.js'),
-      syntheticNodeWorkerPort), yieldJob);
+      syntheticNodeWorkerPort), yieldJob, now);
 }
 
 const FIXTURE = [
@@ -323,6 +324,11 @@ test('B3: post-publish GC EACCES with deferred cancel preserves CURRENT and memo
     assert.notEqual(c, b);
     assert.equal(engine.status().generationId, c);
     assert.equal(engine.status().error, 'COMMIT_FINALIZING');
+    const duringGc = await engine.search(search('NPU'));
+    assert.equal(duringGc.status, 'degraded');
+    assert.equal(duringGc.indexGenerationId, c);
+    assert.ok(duringGc.hits.length > 0);
+    assert.ok(duringGc.hits.every(hit => hit.indexGenerationId === c));
     assert.equal(engine.cancel(), false);
     assert.equal(engine.status().error, 'CANCEL_DEFERRED');
     releaseGc(); await engine.whenIdle();
@@ -793,4 +799,322 @@ test('generation hard quota blocks repeated interrupted commits without source d
     await assert.rejects(GenerationStore.open(store.dir,reader.rootId),error('INDEX_LIMIT'));
     assert.deepEqual(await readFile(join(root,'boreal.md')),original);
   }finally{await cleanup();}
+});
+
+function asynchronousGate() {
+  let enter!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  return { entered, held, enter: () => enter(), release: () => release() };
+}
+
+test('B4: search pinned to generation A while B publishes across delayed real-file evidence read', async () => {
+  const { root, paths, reader, engine, store, cleanup } = await setup({ 'a.md': '# A\nREQ-RACE-11: stable evidence\n' });
+  const actualRead = reader.read.bind(reader);
+  const gate = asynchronousGate();
+  let held = false;
+  try {
+    const a = engine.status().generationId!;
+    reader.read = async path => {
+      if (path === 'a.md' && !held) {
+        held = true; gate.enter(); await gate.held;
+      }
+      return actualRead(path);
+    };
+    const oldSearch = engine.search(search('REQ-RACE-11'));
+    await gate.entered;
+    await writeFile(join(root, 'b.md'), '# B\nREQ-RACE-12: new evidence\n');
+    paths.add('b.md'); engine.changed('b.md'); await engine.whenIdle();
+    const b = engine.status().generationId!;
+    assert.notEqual(b, a);
+    gate.release();
+    const result = await oldSearch;
+    assert.equal(result.indexGenerationId, a);
+    assert.equal(result.hits.length, 1);
+    assert.equal(result.hits[0]?.indexGenerationId, a);
+    assert.equal(result.hits[0]?.sourceSha256, hash('# A\nREQ-RACE-11: stable evidence\n'));
+    assert.equal(result.status, 'degraded'); // Cannot claim A is still the current snapshot.
+    const current = await engine.search(search('REQ-RACE-12'));
+    assert.equal(current.status, 'ok');
+    assert.equal(current.indexGenerationId, b);
+    assert.equal(current.hits[0]?.indexGenerationId, b);
+    assert.equal((await (await GenerationStore.open(store.dir, reader.rootId)).load()).generation?.generationId, b);
+  } finally { gate.release(); await cleanup(); }
+});
+
+test('B5: actual CURRENT rename followed by EIO authenticates B, preserves PREVIOUS and permits next commit', async () => {
+  const { root, engine, reader, store, cleanup } = await setup();
+  const actualRename = fsPromises.rename;
+  const a = engine.status().generationId!;
+  let injected = false;
+  let publication: string | null = null;
+  const actualCommit = store.commit.bind(store);
+  store.commit = async (...args) => {
+    const outcome = await actualCommit(...args);
+    publication = outcome.publication;
+    return outcome;
+  };
+  let restarted: StandaloneEngine | null = null;
+  try {
+    (fsPromises as { rename: typeof actualRename }).rename = async (src, dst) => {
+      await actualRename(src, dst);
+      if (!injected && String(dst) === join(store.dir, 'CURRENT')) {
+        injected = true;
+        throw Object.assign(new Error('synthetic post-rename EIO'), { code: 'EIO' });
+      }
+    };
+    await writeFile(join(root, 'boreal.md'), FIXTURE.replace('SSD','GPU'));
+    engine.changed('boreal.md'); await engine.whenIdle();
+    assert.equal(injected, true);
+    assert.equal(publication, 'rename-authenticated-after-error');
+    const b = JSON.parse(await readFile(join(store.dir, 'CURRENT'), 'utf8')).generationId as string;
+    assert.notEqual(b, a);
+    assert.equal(engine.status().generationId, b);
+    assert.equal(engine.status().maintenanceWarning, 'INDEX_DURABILITY_UNCERTAIN');
+    assert.equal(engine.status().status, 'degraded');
+    assert.equal((await engine.search(search('GPU'))).hits[0]?.indexGenerationId, b);
+    assert.equal(JSON.parse(await readFile(join(store.dir,'PREVIOUS'),'utf8')).generationId, a);
+    assert.equal((await (await GenerationStore.open(store.dir, reader.rootId)).load()).generation?.generationId, b);
+    (fsPromises as { rename: typeof actualRename }).rename = actualRename;
+    restarted = newEngine(reader, await GenerationStore.open(store.dir, reader.rootId));
+    await restarted.start(); await restarted.whenIdle();
+    assert.equal(restarted.status().generationId, b);
+    await restarted.close(); restarted = null;
+    await writeFile(join(root,'boreal.md'), FIXTURE.replace('SSD','NPU'));
+    engine.changed('boreal.md'); await engine.whenIdle();
+    assert.equal(engine.status().status, 'ready');
+    assert.equal(engine.status().maintenanceWarning, null);
+    assert.equal((await engine.search(search('NPU'))).hits.length, 1);
+    assert.equal((await (await GenerationStore.open(store.dir, reader.rootId)).load()).generation?.generationId,
+      engine.status().generationId);
+  } finally {
+    (fsPromises as { rename: typeof actualRename }).rename = actualRename;
+    await restarted?.close(); await cleanup();
+  }
+});
+
+for (const action of ['cancel', 'unload'] as const) {
+  test(`B5: ${action} after filesystem CURRENT rename but before EIO resolution is deferred and restart-safe`, async () => {
+    const { root, engine, reader, store, cleanup } = await setup();
+    const actualRename = fsPromises.rename;
+    const gate = asynchronousGate();
+    const a = engine.status().generationId!;
+    let injected = false;
+    let restart: StandaloneEngine | null = null;
+    try {
+      (fsPromises as { rename: typeof actualRename }).rename = async (src, dst) => {
+        await actualRename(src, dst);
+        if (!injected && String(dst) === join(store.dir, 'CURRENT')) {
+          injected = true; gate.enter(); await gate.held;
+          throw Object.assign(new Error('synthetic uncertain rename EIO'), { code: 'EIO' });
+        }
+      };
+      await writeFile(join(root, 'boreal.md'), FIXTURE.replace('SSD','GPU'));
+      engine.changed('boreal.md'); await gate.entered;
+      const durableId = JSON.parse(await readFile(join(store.dir,'CURRENT'),'utf8')).generationId as string;
+      assert.notEqual(durableId, a);
+      let closing: Promise<void> | null = null;
+      if (action === 'cancel') assert.equal(engine.cancel(), false);
+      else closing = engine.close();
+      gate.release();
+      if (closing) await closing;
+      else await engine.whenIdle();
+      assert.equal(engine.status().generationId, durableId);
+      assert.equal(engine.status().maintenanceWarning, 'INDEX_DURABILITY_UNCERTAIN');
+      if (action === 'cancel') assert.equal(engine.status().error, 'CANCEL_DEFERRED');
+      assert.equal(JSON.parse(await readFile(join(store.dir,'PREVIOUS'),'utf8')).generationId, a);
+      (fsPromises as { rename: typeof actualRename }).rename = actualRename;
+      restart = newEngine(reader, await GenerationStore.open(store.dir, reader.rootId));
+      await restart.start(); await restart.whenIdle();
+      assert.equal(restart.status().generationId, durableId);
+      assert.equal((await restart.search(search('GPU'))).hits.length, 1);
+    } finally {
+      gate.release(); (fsPromises as { rename: typeof actualRename }).rename = actualRename;
+      await restart?.close(); await cleanup();
+    }
+  });
+}
+
+test('B5: unidentifiable CURRENT after ambiguous rename fails closed, PREVIOUS recovers on restart', async () => {
+  const { root, engine, reader, store, cleanup } = await setup();
+  const actualRename = fsPromises.rename;
+  const a = engine.status().generationId!;
+  let injected = false;
+  let restart: StandaloneEngine | null = null;
+  try {
+    (fsPromises as { rename: typeof actualRename }).rename = async (src, dst) => {
+      await actualRename(src, dst);
+      if (!injected && String(dst) === join(store.dir,'CURRENT')) {
+        injected = true;
+        await writeFile(String(dst), '{ambiguous-corruption');
+        throw Object.assign(new Error('synthetic uncertain outcome'), { code: 'EIO' });
+      }
+    };
+    await writeFile(join(root,'boreal.md'), FIXTURE.replace('SSD','GPU'));
+    engine.changed('boreal.md'); await engine.whenIdle();
+    assert.equal(injected, true);
+    assert.equal(engine.status().status, 'failed');
+    assert.equal(engine.status().generationId, null);
+    assert.equal(engine.status().error, 'INDEX_PUBLICATION_UNCERTAIN');
+    assert.deepEqual((await engine.search(search('SSD'))).hits, []);
+    await assert.rejects(store.commit(makeGeneration(reader.rootId, [])), error('INDEX_PUBLICATION_UNCERTAIN'));
+    assert.equal(JSON.parse(await readFile(join(store.dir,'PREVIOUS'),'utf8')).generationId, a);
+    (fsPromises as { rename: typeof actualRename }).rename = actualRename;
+    restart = newEngine(reader, await GenerationStore.open(store.dir, reader.rootId));
+    await restart.start();
+    assert.equal(restart.status().generationId, a); // authenticated rollback snapshot
+    await restart.whenIdle(); // repairs CURRENT from sources
+    assert.equal(restart.status().status, 'ready');
+    assert.equal((await restart.search(search('GPU'))).hits.length, 1);
+  } finally {
+    (fsPromises as { rename: typeof actualRename }).rename = actualRename;
+    await restart?.close(); await cleanup();
+  }
+});
+
+test('B6: missed create and missed modify with entirely new terms are diagnosed before false OK', async () => {
+  const { root, paths, engine, cleanup } = await setup({ 'a.md': '# A\nREQ-BASE-01: base\n' });
+  try {
+    await writeFile(join(root,'b.md'),'# B\nREQ-NEW-42: created without event\n');
+    paths.add('b.md');
+    const missedCreate = await engine.search(search('REQ-NEW-42'));
+    assert.equal(missedCreate.status, 'degraded');
+    assert.equal(missedCreate.error, 'RECONCILING');
+    assert.equal(missedCreate.hits.length, 0);
+    await engine.whenIdle();
+    assert.equal(engine.status().status, 'ready');
+    assert.equal((await engine.search(search('REQ-NEW-42'))).hits.length, 1);
+    await writeFile(join(root,'a.md'),'# A\nREQ-EDIT-99: changed without event\n');
+    const missedEdit = await engine.search(search('REQ-EDIT-99'));
+    assert.equal(missedEdit.status, 'degraded');
+    assert.equal(missedEdit.hits.length, 0);
+    await engine.whenIdle();
+    assert.equal(engine.status().status, 'ready');
+    assert.equal((await engine.search(search('REQ-EDIT-99'))).hits.length, 1);
+    assert.equal((await engine.search(search('REQ-BASE-01'))).hits.length, 0);
+  } finally { await cleanup(); }
+});
+
+test('B6: missed rename/delete update authoritative path set and restore ready on reconciliation', async () => {
+  const { root, paths, engine, cleanup } = await setup({ 'a.md':'REQ-MOVE-34: source\n' });
+  try {
+    await rename(join(root,'a.md'),join(root,'moved.md'));
+    paths.delete('a.md'); paths.add('moved.md');
+    const before = await engine.search(search('REQ-MOVE-34'));
+    assert.equal(before.status,'degraded');
+    assert.equal(before.hits.length,0);
+    await engine.whenIdle();
+    assert.equal((await engine.search(search('REQ-MOVE-34'))).hits[0]?.sourceId,'moved.md');
+    await rm(join(root,'moved.md')); paths.delete('moved.md');
+    const deleted = await engine.search(search('REQ-MOVE-34'));
+    assert.equal(deleted.status,'degraded');
+    assert.equal(deleted.hits.length,0);
+    await engine.whenIdle();
+    assert.equal(engine.status().status,'ready');
+    assert.equal(engine.status().sources,0);
+    assert.equal((await engine.search(search('REQ-MOVE-34'))).hits.length,0);
+  } finally { await cleanup(); }
+});
+
+test('B6: restart reconciles event loss, no full content read for ordinary stable negative queries', async () => {
+  const { root, paths, engine, reader, store, cleanup } = await setup({ 'a.md':'REQ-ONE-11: initial\n' });
+  let restarted: StandaloneEngine | null = null;
+  const actualRead = reader.read.bind(reader);
+  try {
+    await writeFile(join(root,'b.md'),'REQ-TWO-12: missed\n'); paths.add('b.md');
+    restarted = newEngine(reader, await GenerationStore.open(store.dir,reader.rootId));
+    await restarted.start(); await restarted.whenIdle();
+    assert.equal(restarted.status().sources,2);
+    assert.equal(restarted.status().status,'ready');
+    let reads = 0;
+    reader.read = async path => { reads++; return actualRead(path); };
+    const absent = await restarted.search(search('NONEXISTENT-ABC-999'));
+    assert.equal(absent.status,'ok');
+    assert.equal(absent.hits.length,0);
+    assert.equal(reads,0); // Only capped lstat hint verification, not content reads.
+  } finally { reader.read = actualRead; await restarted?.close(); await cleanup(); }
+});
+
+for (const action of ['cancel', 'unload'] as const) {
+  test(`B6: missed-event reconciliation ${action} before publication retains previous CURRENT`, async () => {
+    const { root, reader, engine, store, cleanup } = await setup({ 'a.md':'REQ-CANCEL-11: old\n' });
+    const realRead = reader.read.bind(reader);
+    const gate = asynchronousGate();
+    let hold = false;
+    try {
+      const a = engine.status().generationId!;
+      await writeFile(join(root,'a.md'),'REQ-CANCEL-22: new\n'); // No event.
+      reader.read = async path => {
+        if (!hold && path === 'a.md') { hold = true; gate.enter(); await gate.held; }
+        return realRead(path);
+      };
+      const found = await engine.search(search('REQ-CANCEL-22'));
+      assert.equal(found.status,'degraded');
+      await gate.entered;
+      let closing: Promise<void> | null = null;
+      if (action === 'cancel') assert.equal(engine.cancel(),true);
+      else closing = engine.close();
+      gate.release();
+      if (closing) await closing;
+      else await engine.whenIdle();
+      assert.equal((await (await GenerationStore.open(store.dir,reader.rootId)).load()).generation?.generationId,a);
+      assert.equal(engine.status().generationId,a);
+      if (action === 'cancel') {
+        reader.read = realRead;
+        engine.resume(); await engine.whenIdle();
+        assert.equal(engine.status().status,'ready');
+        assert.equal((await engine.search(search('REQ-CANCEL-22'))).hits.length,1);
+      }
+    } finally { gate.release(); reader.read = realRead; await cleanup(); }
+  });
+}
+
+test('B6: query-driven 30s content audit repairs metadata-invisible edits without an unbounded timer', async () => {
+  const { root, reader, store, cleanup } = await setup({ 'a.md':'REQ-OLD-88: original\n' });
+  let clock = 1_000_000;
+  const engine = newEngine(reader, await GenerationStore.open(store.dir, reader.rootId), undefined, () => clock);
+  const realHints = reader.versionHints.bind(reader);
+  try {
+    await engine.start(); await engine.whenIdle();
+    const baseline = await realHints(['a.md']);
+    await writeFile(join(root,'a.md'),'REQ-NEW-99: updated!\n');
+    // Simulate an indistinguishable metadata snapshot, not merely a lost event.
+    reader.versionHints = async () => baseline;
+    assert.equal((await engine.search(search('REQ-NEW-99'))).hits.length, 0);
+    assert.equal(engine.status().busy, false); // No background polling when idle.
+    clock += 30_001;
+    const pending = await engine.search(search('REQ-NEW-99'));
+    assert.equal(pending.status,'degraded');
+    assert.equal(pending.error,'RECONCILING');
+    await engine.whenIdle();
+    assert.equal(engine.status().status,'ready');
+    assert.equal((await engine.search(search('REQ-NEW-99'))).hits.length,1);
+  } finally { reader.versionHints = realHints; await engine.close(); await cleanup(); }
+});
+
+
+test('B6: concurrent query storm does not repeatedly invalidate an already running reconciliation', async () => {
+  const { root, reader, engine, cleanup } = await setup({ 'a.md':'REQ-STORM-11: old\n' });
+  const actualRead = reader.read.bind(reader);
+  const gate = asynchronousGate();
+  let blocked = false;
+  try {
+    await writeFile(join(root, 'a.md'), 'REQ-STORM-22: new\n');
+    reader.read = async path => {
+      if (!blocked && path === 'a.md') {
+        blocked = true; gate.enter(); await gate.held;
+      }
+      return actualRead(path);
+    };
+    const first = await engine.search(search('REQ-STORM-22'));
+    assert.equal(first.status, 'degraded');
+    await gate.entered;
+    const concurrent = await Promise.all(Array.from({length: 30}, () => engine.search(search('REQ-STORM-22'))));
+    assert.ok(concurrent.every(result => result.status === 'degraded'));
+    gate.release();
+    await engine.whenIdle();
+    assert.equal(engine.status().status,'ready');
+    assert.equal((await engine.search(search('REQ-STORM-22'))).hits.length,1);
+  } finally { gate.release(); reader.read = actualRead; await cleanup(); }
 });

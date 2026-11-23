@@ -28,6 +28,7 @@ for target in [os.environ['XDG_CONFIG_HOME']+'/obsidian/obsidian.json',root+'/el
  with open(target,'w',encoding='utf-8') as stream: json.dump(settings,stream)
 PY
 fixture_sha="$(sha256sum "$tmp/vault/second.md" | cut -d' ' -f1)"
+first_sha="$(sha256sum "$tmp/vault/first.md" | cut -d' ' -f1)"; export first_sha
 assert_contains() {
   local got="$1" expected="$2"
   if [[ "$got" != *"$expected"* ]]; then
@@ -50,21 +51,37 @@ timeout 57s xvfb-run -a -s '-screen 0 1280x800x24' bash -c '
   initial="$(timeout 8s "$cli" eval "code=JSON.stringify({plugin:!!app.plugins.plugins[\"oks-synthetic-evidence\"],status:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standalone?.status(),error:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standaloneError})")"
   [[ "$initial" == *"\"status\":\"ready\""* && "$initial" == *"\"sources\":2"* ]] ||
     { printf "HOST_SMOKE_FAILURE: native plugin not indexed; result=%s\n" "$initial" >&2; exit 1; }
-  searched="$(timeout 8s "$cli" eval "code=(async()=>{const p=app.plugins.plugins[\"oks-synthetic-evidence\"];const r=await p.standalone.search({protocolVersion:2,requestId:\"host\",query:\"REQ-OKS-SMOKE\",requestedMode:\"lexical\",limit:5});return JSON.stringify({status:r.status,hits:r.hits.length,line:r.hits[0]?.sourceLocators[0]?.lineStart,excerpt:r.hits[0]?.originalExcerpt})})()")"
+  searched="$(timeout 8s "$cli" eval "code=(async()=>{const p=app.plugins.plugins[\"oks-synthetic-evidence\"];const r=await p.standalone.search({protocolVersion:2,requestId:\"host\",query:\"REQ-OKS-SMOKE\",requestedMode:\"lexical\",limit:5});return JSON.stringify({status:r.status,hits:r.hits.length,line:r.hits[0]?.sourceLocators[0]?.lineStart,byteStart:r.hits[0]?.sourceLocators[0]?.byteStart,sha:r.hits[0]?.sourceSha256,excerpt:r.hits[0]?.originalExcerpt})})()")"
   [[ "$searched" == *"\"status\":\"ok\""* && "$searched" == *"\"hits\":1"* &&
-     "$searched" == *"\"line\":2"* && "$searched" == *"REQ-OKS-SMOKE: local only."* ]] ||
+     "$searched" == *"\"line\":2"* && "$searched" == *"\"sha\":\"$first_sha\""* &&
+     "$searched" == *"\"byteStart\":"* && "$searched" == *"REQ-OKS-SMOKE: local only."* ]] ||
     { echo "HOST_SMOKE_FAILURE: lexical original evidence" >&2; exit 1; }
   timeout 8s "$cli" append path=first.md content="REQ-OKS-UPDATE: synthetic only." >/dev/null
   sleep 2
   updated="$(timeout 8s "$cli" eval "code=(async()=>{const p=app.plugins.plugins[\"oks-synthetic-evidence\"];await p.standalone.whenIdle();const r=await p.standalone.search({protocolVersion:2,requestId:\"update\",query:\"REQ-OKS-UPDATE\",requestedMode:\"lexical\",limit:5});return JSON.stringify({status:r.status,hits:r.hits.length})})()")"
   [[ "$updated" == *"\"hits\":1"* ]] ||
     { echo "HOST_SMOKE_FAILURE: Obsidian modify event" >&2; exit 1; }
+  # Create through the actual Obsidian Vault API (not through a filesystem mock).
+  timeout 8s "$cli" eval "code=(async()=>{await app.vault.create(\"third.md\",\"# Third\\nREQ-OKS-CREATE-19: synthetic only.\\n\");return \"created\"})()" >/dev/null
+  sleep 2
+  created="$(timeout 8s "$cli" eval "code=(async()=>{const p=app.plugins.plugins[\"oks-synthetic-evidence\"];await p.standalone.whenIdle();const r=await p.standalone.search({protocolVersion:2,requestId:\"create\",query:\"REQ-OKS-CREATE-19\",requestedMode:\"lexical\",limit:5});return JSON.stringify({status:r.status,sources:p.standalone.status().sources,hits:r.hits.length,line:r.hits[0]?.sourceLocators[0]?.lineStart,sha:r.hits[0]?.sourceSha256})})()")"
+  created_sha="$(sha256sum "$tmp/vault/third.md" | cut -d" " -f1)"
+  [[ "$created" == *"\"status\":\"ok\""* && "$created" == *"\"sources\":3"* &&
+     "$created" == *"\"hits\":1"* && "$created" == *"\"line\":2"* &&
+     "$created" == *"\"sha\":\"$created_sha\""* ]] ||
+    { echo "HOST_SMOKE_FAILURE: Obsidian create + raw source hash ($created)" >&2; exit 1; }
+  before_reload="$(timeout 8s "$cli" eval "code=(globalThis.__oksPreviousParser=app.plugins.plugins[\"oks-synthetic-evidence\"].standalone.parser,app.plugins.plugins[\"oks-synthetic-evidence\"].standalone.status().generationId)")"
+  before_id="$(printf "%s" "$before_reload" | grep -oE "[0-9a-f]{64}" | head -1)"
+  test -n "$before_id" || { echo "HOST_SMOKE_FAILURE: missing before-reload generation" >&2; exit 1; }
   timeout 8s "$cli" plugin:reload id=oks-synthetic-evidence >/dev/null
   sleep 3
   restarted="$(timeout 8s "$cli" eval "code=JSON.stringify({status:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standalone?.status(),error:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standaloneError})")"
-  [[ "$restarted" == *"\"status\":\"ready\""* ]] ||
+  [[ "$restarted" == *"\"status\":\"ready\""* && "$restarted" == *"\"sources\":3"* ]] ||
     { echo "HOST_SMOKE_FAILURE: reload" >&2; exit 1; }
-  printf "OBSIDIAN_HOST_SMOKE_PASS: version=%s native=ready sourceCount=2 originalLine=2 modify=pass reload=pass\n" "$version"
+  after_reload="$(timeout 8s "$cli" eval "code=JSON.stringify({generationId:app.plugins.plugins[\"oks-synthetic-evidence\"].standalone.status().generationId,oldWorkerStopped:globalThis.__oksPreviousParser?.stopped})")"
+  [[ "$after_reload" == *"$before_id"* && "$after_reload" == *"\"oldWorkerStopped\":true"* ]] ||
+    { echo "HOST_SMOKE_FAILURE: durable generation or worker unload ($before_reload, $after_reload)" >&2; exit 1; }
+  printf "OBSIDIAN_HOST_SMOKE_PASS: version=%s native=ready sourceCount=3 originalLine=2 sha256=pass modify=pass create=pass reload=pass oldWorkerStopped=true\n" "$version"
 '
 test "$(sha256sum "$tmp/vault/second.md" | cut -d' ' -f1)" = "$fixture_sha" ||
   { echo "HOST_SMOKE_FAILURE: read-only source mutated" >&2; exit 1; }

@@ -11,6 +11,7 @@ type Pointer = { schemaVersion: typeof SCHEMA; rootId: string; generationId: str
 export type LoadResult = { generation: IndexGeneration | null; recovered: boolean; error: string | null };
 export type CommitOutcome = {
   generation: IndexGeneration;
+  publication: 'rename-confirmed' | 'rename-authenticated-after-error';
   maintenanceWarning: 'INDEX_GC_FAILED' | 'INDEX_DURABILITY_UNCERTAIN' | null;
 };
 
@@ -96,7 +97,13 @@ async function atomicFile(dir: string, dest: string, data: Buffer,
     throw error;
   }
 }
+function samePointer(a: Pointer | null, b: Pointer | null): boolean {
+  return a === null || b === null ? a === b
+    : a.schemaVersion === b.schemaVersion && a.rootId === b.rootId
+      && a.generationId === b.generationId && a.contentSha256 === b.contentSha256;
+}
 export class GenerationStore {
+  private publicationUncertain = false;
   private currentPointer: Pointer | null = null;
   private previousPointer: Pointer | null = null;
   private constructor(readonly dir: string, readonly rootId: string) {}
@@ -158,6 +165,7 @@ export class GenerationStore {
   async commit(generation: IndexGeneration,
     beginPublication?: () => void,
     onPublished?: (generation: IndexGeneration) => void): Promise<CommitOutcome> {
+    if (this.publicationUncertain) throw new StandaloneError('INDEX_PUBLICATION_UNCERTAIN');
     validateGeneration(generation, this.rootId);
     let serialized: Buffer<ArrayBufferLike> = Buffer.from(JSON.stringify(generation), 'utf8');
     if (serialized.length > BOUNDS.generationBytes) throw new StandaloneError('INDEX_LIMIT');
@@ -188,6 +196,7 @@ export class GenerationStore {
     // subsequent directory fsync / GC failures must not report an uncommitted write.
     let renamed = false;
     let warning: CommitOutcome['maintenanceWarning'] = null;
+    let publication: CommitOutcome['publication'] = 'rename-confirmed';
     try {
       await atomicFile(this.dir, 'CURRENT', Buffer.from(JSON.stringify(pointer)), beginPublication, () => {
         renamed = true;
@@ -196,11 +205,45 @@ export class GenerationStore {
         onPublished?.(actual);
       });
     } catch (error) {
-      if (!renamed) throw error; // Stage/rename failed: CURRENT was not published.
-      // Rename succeeded but directory fsync failed: current bytes are visible,
-      // while power-loss durability is not established. Retain PREVIOUS and fail
-      // visibly degraded rather than incorrectly claiming rollback or success.
-      warning = 'INDEX_DURABILITY_UNCERTAIN';
+      if (!renamed) {
+        // A rejected rename Promise is NOT proof that the filesystem rename
+        // failed. Authenticate the actual CURRENT before choosing either outcome.
+        // Keep the publication boundary noncancellable while this is unresolved.
+        try {
+          const observed = await this.readPointer('CURRENT');
+          if (samePointer(observed, pointer)) {
+            // The rename happened but was reported as failed. Authenticate the
+            // generation AND rollback pointer before promoting it in memory.
+            const verified = await this.generation(pointer);
+            const rollback = await this.readPointer('PREVIOUS');
+            if (!samePointer(rollback, this.currentPointer))
+              throw new StandaloneError('INDEX_PUBLICATION_UNCERTAIN');
+            if (rollback) await this.generation(rollback);
+            this.previousPointer = this.currentPointer;
+            this.currentPointer = pointer;
+            onPublished?.(verified);
+            publication = 'rename-authenticated-after-error';
+            warning = 'INDEX_DURABILITY_UNCERTAIN';
+          } else if (samePointer(observed, this.currentPointer)) {
+            // Confirm a rejected rename only when the OLD pointer itself is
+            // still authentic; do not silently accept damaged/foreign state.
+            if (observed) await this.generation(observed);
+            throw error;
+          } else {
+            throw new StandaloneError('INDEX_PUBLICATION_UNCERTAIN');
+          }
+        } catch (observationError) {
+          if (observationError === error) throw error;
+          // Unknown/mismatched CURRENT: do not accept another write on this
+          // store instance; the engine must suppress all search evidence.
+          this.publicationUncertain = true;
+          throw new StandaloneError('INDEX_PUBLICATION_UNCERTAIN');
+        }
+      } else {
+        // Rename confirmed but directory fsync failed: power-loss durability
+        // remains uncertain. The synchronous published callback already fired.
+        warning = 'INDEX_DURABILITY_UNCERTAIN';
+      }
     }
     if (!warning) {
       // GC is post-commit maintenance, never part of the publication outcome.
@@ -217,6 +260,6 @@ export class GenerationStore {
         warning = 'INDEX_GC_FAILED';
       }
     }
-    return { generation: actual, maintenanceWarning: warning };
+    return { generation: actual, publication, maintenanceWarning: warning };
   }
 }

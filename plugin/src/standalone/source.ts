@@ -7,6 +7,7 @@ import { BOUNDS, StandaloneError, hash, isDigest, validPath } from './contracts'
 export interface SourceProvider {
   readonly rootId: string;
   list(): Promise<string[]>;
+  versionHints(paths: readonly string[]): Promise<string[]>;
   read(path: string): Promise<Uint8Array>;
 }
 // FileSystemAdapter.getBasePath() supplies the trusted authoritative root.
@@ -39,6 +40,38 @@ export class BoundedVaultReader implements SourceProvider {
     if (!files.every(validPath) || new Set(files).size !== files.length)
       throw new StandaloneError('SOURCE_REJECTED');
     return [...files].sort();
+  }
+  // Cheap authoritative metadata check for *all* enumerated notes on search.
+  // The opaque hints are never evidence: a bounded full SHA-256 audit still runs
+  // periodically, and returned evidence always gets a fresh byte-level rehash.
+  async versionHints(paths: readonly string[]): Promise<string[]> {
+    if (paths.length > BOUNDS.sources || !paths.every(validPath))
+      throw new StandaloneError('SOURCE_REJECTED');
+    await this.rootCheck();
+    const hints: string[] = [];
+    // Limit outstanding lstat operations; do not read document contents here.
+    for (let i = 0; i < paths.length; i += 16) {
+      const batch = paths.slice(i, i + 16);
+      const values = await Promise.all(batch.map(async relative => {
+        let path = this.root;
+        const components = relative.split('/');
+        for (const component of components.slice(0, -1)) {
+          path = join(path, component);
+          const directory = await lstat(path);
+          if (!directory.isDirectory() || directory.isSymbolicLink())
+            throw new StandaloneError('SOURCE_REJECTED');
+        }
+        path = join(path, components[components.length - 1]!);
+        const info = await lstat(path, { bigint: true });
+        if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1n)
+          throw new StandaloneError('SOURCE_REJECTED');
+        return JSON.stringify([relative, info.dev.toString(), info.ino.toString(),
+          info.size.toString(), info.mtimeNs.toString(), info.ctimeNs.toString()]);
+      }));
+      hints.push(...values);
+    }
+    await this.rootCheck();
+    return hints;
   }
   async read(relative: string): Promise<Uint8Array> {
     if (!validPath(relative)) throw new StandaloneError('SOURCE_REJECTED');
