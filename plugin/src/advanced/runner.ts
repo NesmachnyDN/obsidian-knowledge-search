@@ -3,6 +3,8 @@ import { spawn, execFile, type ChildProcessWithoutNullStreams } from 'node:child
 import { promisify } from 'node:util';
 import { randomBytes } from 'node:crypto';
 import { readFile, statfs } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { modelRequest, parseModelFrame, ModelError, type ModelReply, type ModelRequest } from './model-protocol';
 import { checkedPath } from './health';
 import { canonicalFrame, IngestError, INGEST_VERSION, MAX_REQUEST, MAX_RESPONSE,
   parseIngestFrame, validRequest, type IngestRequest, type IngestResponse,
@@ -118,7 +120,7 @@ export class AdvancedIngestRunner {
       });
       job.child=child;
       if (job.controller.signal.aborted) throw new IngestError('ADVANCED_CANCELLED');
-      const response = await this.exchange(job,payload,request,deadlineMs+5000);
+      const response = await this.exchange(job,payload,b=>parseIngestFrame(b,request),deadlineMs+5000);
       if (job.controller.signal.aborted) throw new IngestError('ADVANCED_CANCELLED');
       // --wait covers all child unit exit; explicitly verify no active cgroup.
       if (!(await stopped(job.unit))) throw new IngestError('ADVANCED_UNAVAILABLE');
@@ -134,7 +136,47 @@ export class AdvancedIngestRunner {
       if (this.running === job) this.running=undefined;
     }
   }
-  private exchange(job:Job,payload:Buffer,request:IngestRequest,deadlineMs:number): Promise<IngestResponse> {
+  /** Same cgroup, resource admission and whole-tree cancellation as ingestion. */
+  async embed(config:IngestionConfig,texts:string[],maxTokens=384,deadlineMs=UNIT_LIMIT):Promise<ModelReply> {
+    if(this.poison)throw new ModelError('MODEL_UNAVAILABLE');
+    if(this.running)throw new ModelError('MODEL_BUSY');
+    if(!config.enabled)throw new ModelError('MODEL_UNAVAILABLE');
+    const job:Job={unit:'oks-ingest-'+randomBytes(12).toString('hex')+'.service',
+      controller:new AbortController()};
+    this.running=job;
+    try {
+      const entry=join(dirname(config.entry),'advanced_retrieval.py');
+      try {await resourceAdmission();await checkedPath(config.interpreter,true);await checkedPath(entry,false);}
+      catch {throw new ModelError('MODEL_RESOURCE_REFUSED');}
+      if(job.controller.signal.aborted)throw new ModelError('MODEL_CANCELLED');
+      const request:ModelRequest={protocolVersion:4,operation:'embed',
+        requestId:randomBytes(24).toString('hex'),deadlineUnixMs:Date.now()+deadlineMs,
+        modelSnapshot:config.tokenizerSnapshot,maxTokens,texts};
+      const payload=modelRequest(request);
+      const argv=['--user','--quiet','--collect','--wait','--pipe','--service-type=exec',
+        '--unit='+job.unit,...PROPERTIES.map(p=>'--property='+p),
+        ...['HF_HUB_OFFLINE','TRANSFORMERS_OFFLINE','HF_DATASETS_OFFLINE'].map(k=>'--setenv='+k+'=1'),
+        '--setenv=OMP_NUM_THREADS=2','--setenv=OMP_THREAD_LIMIT=2',
+        '--',config.interpreter,'-I','-B',entry];
+      const child=spawn('/usr/bin/systemd-run',argv,{shell:false,detached:true,env:localEnv(),
+        stdio:['pipe','pipe','pipe']});
+      job.child=child;
+      if(job.controller.signal.aborted)throw new ModelError('MODEL_CANCELLED');
+      const reply=await this.exchange(job,payload,b=>parseModelFrame(b,request),deadlineMs+5000);
+      if(job.controller.signal.aborted)throw new ModelError('MODEL_CANCELLED');
+      if(!(await stopped(job.unit)))throw new ModelError('MODEL_UNAVAILABLE');
+      if(reply.status!=='ok')throw new ModelError(reply.error??'MODEL_FAILED');
+      return reply;
+    }catch(error){
+      if(job.child||job.controller.signal.aborted){
+        try{await this.cancelJob(job);}catch{this.poison=true;throw new ModelError('MODEL_UNAVAILABLE');}
+      }
+      if(error instanceof ModelError)throw error;
+      if(error instanceof IngestError)throw new ModelError(error.code);
+      throw new ModelError('MODEL_UNAVAILABLE');
+    }finally {if(this.running===job)this.running=undefined;}
+  }
+  private exchange<R>(job:Job,payload:Buffer,parse:(value:Buffer)=>R,deadlineMs:number): Promise<R> {
     const child=job.child!;
     return new Promise((resolve,reject)=>{
       let output=Buffer.alloc(0),stderr=0,finished=false;
@@ -145,7 +187,7 @@ export class AdvancedIngestRunner {
         job.controller.signal.removeEventListener('abort',abort);
         if (failure) reject(failure);
         else {
-          try { resolve(parseIngestFrame(output,request)); }
+          try { resolve(parse(output)); }
           catch { reject(new IngestError('ADVANCED_PROTOCOL_INVALID')); }
         }
       };

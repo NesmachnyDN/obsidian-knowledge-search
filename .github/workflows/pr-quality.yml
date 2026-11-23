@@ -1,0 +1,29 @@
+name: PR metadata and diff hygiene
+on:
+  pull_request:
+    branches: [develop]
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  sdd-mechanical-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check whitespace and unresolved diff conflicts
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git diff --check "$BASE_SHA" "$HEAD_SHA"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate PR handoff metadata (not independent review)
+        run: node scripts/ci-pr-contract.mjs "$GITHUB_EVENT_PATH"
+      - name: Test PR contract validator
+        run: node --test tests/ci-pr-contract.test.mjs

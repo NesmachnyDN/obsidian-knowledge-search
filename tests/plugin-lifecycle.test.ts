@@ -305,10 +305,12 @@ test('05B B2: overlapping recheck/disable/unload and replacement reload never ov
     f.layout();
     await Promise.allSettled([...rechecks,disable]);
     await (replacement as unknown as {advancedStartup?:Promise<void>}).advancedStartup;
-    assert.equal(replacement.advancedHealth.snapshot().status,'ready');
+    assert.equal(replacement.advancedHealth.snapshot().status,'ready',
+      JSON.stringify(replacement.advancedHealth.snapshot()));
     assert.equal(await isAlive(initial),false);
     assert.ok(replacement.advancedHealth.pid && replacement.advancedHealth.pid !== initial);
-    assert.equal(replacement.standalone!.status().status,'ready');
+    assert.equal(replacement.standalone!.status().status,'ready',
+      JSON.stringify({engine:replacement.standalone!.status(),startup:replacement.standaloneError}));
     replacement.onunload();
     await replacement.advancedHealth.stop();
     await f.plugin.advancedHealth.stop();
