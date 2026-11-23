@@ -30,7 +30,7 @@ export type IndexGeneration = {
 };
 export type SearchRequest = {
   protocolVersion: typeof PROTOCOL; requestId: string; query: string;
-  requestedMode: 'lexical' | 'dense' | 'hybrid'; scope?: string[];
+  requestedMode: 'lexical' | 'dense' | 'hybrid'; matchMode?: 'terms' | 'literal'; scope?: string[];
   limit: number; predicates?: Predicate[];
 };
 export type EvidenceHit = {
@@ -91,6 +91,7 @@ export function validateRequest(value: unknown): asserts value is SearchRequest 
       || Buffer.byteLength(value.query, 'utf8') > BOUNDS.queryBytes || value.query.includes('\0')
       || !Number.isInteger(value.limit) || (value.limit as number) < 1 || (value.limit as number) > BOUNDS.limit
       || !['lexical', 'dense', 'hybrid'].includes(String(value.requestedMode))
+      || (value.matchMode !== undefined && !['terms', 'literal'].includes(String(value.matchMode)))
       || (value.scope !== undefined && (!Array.isArray(value.scope)
         || value.scope.length > BOUNDS.sources || !value.scope.every(validPath)))
       || (value.predicates !== undefined && (!Array.isArray(value.predicates)
@@ -98,7 +99,7 @@ export function validateRequest(value: unknown): asserts value is SearchRequest 
         || !value.predicates.every(p => validProperty(p, true))))) {
     throw new StandaloneError('INVALID_REQUEST');
   }
-  if (Object.keys(value).some(key => !['protocolVersion','requestId','query','requestedMode','scope','limit','predicates'].includes(key))) {
+  if (Object.keys(value).some(key => !['protocolVersion','requestId','query','requestedMode','matchMode','scope','limit','predicates'].includes(key))) {
     throw new StandaloneError('INVALID_REQUEST');
   }
 }

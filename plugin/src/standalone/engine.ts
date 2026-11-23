@@ -256,9 +256,13 @@ export class StandaloneEngine {
       const age = this.now() - this.verifiedAt;
       const due = age < 0 || age >= SOURCE_AUDIT_INTERVAL_MS;
       if ((drift || due) && !this.stopped && !this.paused && !this.work) this.reconcile();
-      const tokens = [...new Set(terms(req.query))];
+      // Protocol-v2 default is unchanged ranked terms. The explicit literal mode
+      // checks original physical source lines, not query tokens or heading context.
+      const literal = req.matchMode === 'literal';
+      const needle = literal ? req.query.toLowerCase() : '';
+      const tokens = literal ? [] : [...new Set(terms(req.query))];
       if (tokens.length > BOUNDS.termsPerQuery) throw new StandaloneError('QUERY_INVALID');
-      const mandatoryIds = req.query.toLowerCase().match(/[\p{L}\p{N}]+(?:[._/-][\p{L}\p{N}]+)+/gu) ?? [];
+      const mandatoryIds = literal ? [] : req.query.toLowerCase().match(/[\p{L}\p{N}]+(?:[._/-][\p{L}\p{N}]+)+/gu) ?? [];
       const scope = req.scope ? new Set(req.scope) : null;
       const predicates = req.predicates ?? [];
       const candidates: { doc: SourceVersion; block: ParsedBlock; score: number }[] = [];
@@ -266,13 +270,27 @@ export class StandaloneEngine {
         if ((scope && !scope.has(doc.sourceId)) || !matches(doc.properties, predicates)) continue;
         if (doc.extractionStatus !== 'ok' && doc.extractionStatus !== 'partial') continue;
         for (const block of doc.blocks) {
-          if (!block.terms.length || mandatoryIds.some(id => !block.terms.includes(id))) continue;
-          const matched = tokens.filter(term => block.terms.includes(term));
-          if (!matched.length) continue;
-          // Complete compound identifier gets stronger weight than individual parts.
-          const score = matched.reduce((sum, term) =>
-            sum + (term.includes('-') || term.includes('/') || term.includes('.') ? 8 : 2), 0)
-            + matched.length / tokens.length;
+          let score: number;
+          if (literal) {
+            // Properties are typed metadata, not searchable body lines. Preserve
+            // exact punctuation, phrase order, Cyrillic and Unicode characters.
+            if (block.kind === 'property' || block.kind === 'blank') continue;
+            const text = block.originalText.toLowerCase();
+            const start = text.indexOf(needle);
+            if (start < 0) continue;
+            let occurrences = 0;
+            for (let offset = start; offset >= 0 && occurrences < 16;
+              offset = text.indexOf(needle, offset + needle.length)) occurrences++;
+            score = 5 + occurrences;
+          } else {
+            if (!block.terms.length || mandatoryIds.some(id => !block.terms.includes(id))) continue;
+            const matched = tokens.filter(term => block.terms.includes(term));
+            if (!matched.length) continue;
+            // Complete compound identifier gets stronger weight than individual parts.
+            score = matched.reduce((sum, term) =>
+              sum + (term.includes('-') || term.includes('/') || term.includes('.') ? 8 : 2), 0)
+              + matched.length / tokens.length;
+          }
           candidates.push({ doc, block, score });
           if (candidates.length > BOUNDS.blocks) throw new StandaloneError('INDEX_LIMIT');
         }

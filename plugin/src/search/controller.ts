@@ -141,7 +141,9 @@ export class StandaloneApi {
     } catch { return failure('INVALID_REQUEST'); }
   }
 }
-export function uiRequest(query: string, limit: number, predicates: Predicate[] = []): SearchRequest {
+export function uiRequest(query: string, limit: number, predicates: Predicate[] = [],
+  matchMode: 'literal' | 'terms' = 'literal'): SearchRequest {
   if (Buffer.byteLength(query) > BOUNDS.queryBytes) throw new StandaloneError('INVALID_REQUEST');
-  return parseSearch({ protocolVersion: 2, requestId: 'ui', query, limit, predicates, requestedMode: 'lexical' });
+  return parseSearch({ protocolVersion: 2, requestId: 'ui', query, limit, predicates,
+    requestedMode: 'lexical', matchMode });
 }
