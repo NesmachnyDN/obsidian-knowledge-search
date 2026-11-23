@@ -11,13 +11,14 @@ import type { GenerationStore } from './storage';
 export type EngineState = {
   status: 'initializing' | 'ready' | 'degraded' | 'failed' | 'unavailable';
   generationId: string | null; sources: number; records: number;
-  error: string | null; busy: boolean;
+  error: string | null; maintenanceWarning: string | null; busy: boolean;
 };
 const yieldToHost = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0));
 
 export class StandaloneEngine {
   private generation: IndexGeneration | null = null;
-  private state: EngineState = { status: 'unavailable', generationId: null, sources: 0, records: 0, error: null, busy: false };
+  private state: EngineState = { status: 'unavailable', generationId: null, sources: 0, records: 0,
+    error: null, maintenanceWarning: null, busy: false };
   private work: Promise<void> | null = null;
   private pending = new Set<string>();
   private all = false;
@@ -26,6 +27,7 @@ export class StandaloneEngine {
   private paused = false;
   private publishing = false;
   private recoveryNeedsPublication = false;
+  private maintenanceWarning: string | null = null;
   private initialized = false;
   constructor(private readonly provider: SourceProvider, private readonly store: GenerationStore,
     private readonly parser: MarkdownParser,
@@ -35,7 +37,8 @@ export class StandaloneEngine {
   status(): EngineState { return { ...this.state }; }
   private recordState(status: EngineState['status'], error: string | null): void {
     this.state = {
-      status, error, generationId: this.generation?.generationId ?? null,
+      status, error, maintenanceWarning: this.maintenanceWarning,
+      generationId: this.generation?.generationId ?? null,
       sources: this.generation?.documents.length ?? 0,
       records: this.generation?.documents.reduce((n, d) => n + d.blocks.filter(b => b.terms.length > 0).length, 0) ?? 0,
       busy: this.work !== null,
@@ -158,25 +161,33 @@ export class StandaloneEngine {
       // Repair a corrupt CURRENT recovered from PREVIOUS even when the source
       // content is unchanged, without risking deletion of the fallback snapshot.
       const publish = this.recoveryNeedsPublication || next.generationId !== this.generation?.generationId;
-      let committed: IndexGeneration | null;
-      try {
-        committed = publish ? await this.store.commit(next, () => {
-          if (this.stopped || this.paused || revision !== this.revision)
-            throw new StandaloneError('CANCELLED');
-          // Commit has passed its last cancellable checkpoint. A later cancel
-          // is deferred; the durable result must also be reflected in memory.
-          this.publishing = true;
-        }) : this.generation;
-      } finally {
-        this.publishing = false;
+      if (publish) {
+        try {
+          const outcome = await this.store.commit(next, () => {
+            if (this.stopped || this.paused || revision !== this.revision)
+              throw new StandaloneError('CANCELLED');
+            // The rename is about to start. A later cancel is deferred.
+            this.publishing = true;
+          }, published => {
+            // No await between successful rename and memory publication.
+            // Failure or delay of the following fsync/GC cannot strand old state.
+            this.generation = published;
+            this.recoveryNeedsPublication = false;
+            this.recordState('degraded', 'COMMIT_FINALIZING');
+          });
+          this.generation = outcome.generation;
+          this.maintenanceWarning = outcome.maintenanceWarning;
+        } finally {
+          this.publishing = false;
+        }
       }
-      this.generation = committed;
-      if (publish) this.recoveryNeedsPublication = false;
       if (this.stopped) return;
       if (this.paused) {
         this.recordState('degraded', 'CANCEL_DEFERRED');
       } else if (revision !== this.revision) {
         this.recordState('degraded', 'RECONCILING');
+      } else if (this.maintenanceWarning) {
+        this.recordState('degraded', this.maintenanceWarning);
       } else {
         this.recordState('ready', null);
       }

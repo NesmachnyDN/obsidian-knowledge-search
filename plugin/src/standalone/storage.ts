@@ -9,6 +9,10 @@ import {
 
 type Pointer = { schemaVersion: typeof SCHEMA; rootId: string; generationId: string; contentSha256: string };
 export type LoadResult = { generation: IndexGeneration | null; recovered: boolean; error: string | null };
+export type CommitOutcome = {
+  generation: IndexGeneration;
+  maintenanceWarning: 'INDEX_GC_FAILED' | 'INDEX_DURABILITY_UNCERTAIN' | null;
+};
 
 async function secureDir(path: string): Promise<void> {
   if (!isAbsolute(path)) throw new StandaloneError('CACHE_PATH_INVALID');
@@ -73,7 +77,7 @@ async function readBounded(path: string, max: number): Promise<Buffer | null> {
   } finally { await fd.close(); }
 }
 async function atomicFile(dir: string, dest: string, data: Buffer,
-  beforeRename?: () => void): Promise<void> {
+  beforeRename?: () => void, afterRename?: () => void): Promise<void> {
   const temporary = join(dir, '.stage-' + randomUUID());
   const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   try {
@@ -83,6 +87,9 @@ async function atomicFile(dir: string, dest: string, data: Buffer,
     // A rename already started cannot be safely revoked by a later cancel.
     beforeRename?.();
     await rename(temporary, join(dir, dest));
+    // A successful rename is already visible; notify the owner before any
+    // subsequent awaited fsync or garbage collection can fail or be delayed.
+    afterRename?.();
     await syncDir(dir);
   } catch (error) {
     await unlink(temporary).catch(() => {});
@@ -149,7 +156,8 @@ export class GenerationStore {
     return { generation: null, recovered: false, error: currentError ?? (existing ? 'INDEX_CORRUPT' : null) };
   }
   async commit(generation: IndexGeneration,
-    beginPublication?: () => void): Promise<IndexGeneration> {
+    beginPublication?: () => void,
+    onPublished?: (generation: IndexGeneration) => void): Promise<CommitOutcome> {
     validateGeneration(generation, this.rootId);
     let serialized: Buffer<ArrayBufferLike> = Buffer.from(JSON.stringify(generation), 'utf8');
     if (serialized.length > BOUNDS.generationBytes) throw new StandaloneError('INDEX_LIMIT');
@@ -175,18 +183,40 @@ export class GenerationStore {
     };
     // Safe rollback: preserve the old CURRENT snapshot while the next pointer is staged.
     if (this.currentPointer) await atomicFile(this.dir, 'PREVIOUS', Buffer.from(JSON.stringify(this.currentPointer)));
-    // Stage and fsync CURRENT first. The owning engine may veto this commit
-    // until the final pointer-rename boundary, including during asynchronous I/O.
-    await atomicFile(this.dir, 'CURRENT', Buffer.from(JSON.stringify(pointer)), beginPublication);
-    this.previousPointer = this.currentPointer;
-    this.currentPointer = pointer;
-    // Only unlink known derived generation filenames; never remove any Vault source.
-    // Orphans of an interrupted stage are discarded after a confirmed publication.
-    const live = new Set([this.currentPointer.generationId, this.previousPointer?.generationId]);
-    for (const file of await readdir(this.dir)) {
-      const match = /^gen-([0-9a-f]{64})\.json$/.exec(file);
-      if (match && !live.has(match[1])) await unlink(join(this.dir, file));
+    // The only cancellable boundary is immediately before the CURRENT rename.
+    // Once rename succeeds, both store and engine switch in memory synchronously;
+    // subsequent directory fsync / GC failures must not report an uncommitted write.
+    let renamed = false;
+    let warning: CommitOutcome['maintenanceWarning'] = null;
+    try {
+      await atomicFile(this.dir, 'CURRENT', Buffer.from(JSON.stringify(pointer)), beginPublication, () => {
+        renamed = true;
+        this.previousPointer = this.currentPointer;
+        this.currentPointer = pointer;
+        onPublished?.(actual);
+      });
+    } catch (error) {
+      if (!renamed) throw error; // Stage/rename failed: CURRENT was not published.
+      // Rename succeeded but directory fsync failed: current bytes are visible,
+      // while power-loss durability is not established. Retain PREVIOUS and fail
+      // visibly degraded rather than incorrectly claiming rollback or success.
+      warning = 'INDEX_DURABILITY_UNCERTAIN';
     }
-    return actual;
+    if (!warning) {
+      // GC is post-commit maintenance, never part of the publication outcome.
+      // Leave unreachable generations for the bounded quota/recovery policy if
+      // cleanup fails. Never delete CURRENT, PREVIOUS or any Vault source.
+      try {
+        const live = new Set([this.currentPointer!.generationId, this.previousPointer?.generationId]);
+        for (const file of await readdir(this.dir)) {
+          const match = /^gen-([0-9a-f]{64})\.json$/.exec(file);
+          if (match && !live.has(match[1])) await unlink(join(this.dir, file));
+        }
+        await syncDir(this.dir);
+      } catch {
+        warning = 'INDEX_GC_FAILED';
+      }
+    }
+    return { generation: actual, maintenanceWarning: warning };
   }
 }

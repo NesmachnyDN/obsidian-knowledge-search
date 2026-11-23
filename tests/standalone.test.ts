@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
+const fsPromises = require('node:fs/promises') as typeof import('node:fs/promises');
 import { WorkerMarkdownParser, type WorkerPort } from '../plugin/src/standalone/worker';
 import { syntheticNodeWorkerPort } from './helpers/browser-worker-port';
 import {
@@ -208,10 +209,10 @@ test('B1: cancel inside a pending store commit vetoes CURRENT and survives resta
   let release: () => void = () => {};
   const enteredCommit = new Promise<void>(resolve => { entered = resolve; });
   const commitGate = new Promise<void>(resolve => { release = resolve; });
-  store.commit = async (next, beginPublication) => {
+  store.commit = async (next, beginPublication, onPublished) => {
     entered();
     await commitGate; // Delayed asynchronous commit: not the earlier parser/yield gate.
-    return commit(next, beginPublication);
+    return commit(next, beginPublication, onPublished);
   };
   const engine = newEngine(reader, store);
   try {
@@ -243,9 +244,9 @@ test('B1: unload during delayed commit vetoes CURRENT before publication', async
   let release: () => void = () => {};
   const enteredCommit = new Promise<void>(resolve => { entered = resolve; });
   const commitGate = new Promise<void>(resolve => { release = resolve; });
-  store.commit = async (next, beginPublication) => {
+  store.commit = async (next, beginPublication, onPublished) => {
     entered(); await commitGate;
-    return commit(next, beginPublication);
+    return commit(next, beginPublication, onPublished);
   };
   const engine = newEngine(reader, store);
   try {
@@ -265,12 +266,12 @@ test('B1: cancel at CURRENT rename boundary is deferred, not falsely acknowledge
   const commit = store.commit.bind(store);
   let engine: StandaloneEngine;
   let observedBoundary = false;
-  store.commit = async (next, beginPublication) => commit(next, () => {
+  store.commit = async (next, beginPublication, onPublished) => commit(next, () => {
     beginPublication?.(); // The actual store invokes this immediately before rename.
     observedBoundary = true;
     assert.equal(engine.cancel(), false);
     assert.equal(engine.status().error, 'CANCEL_DEFERRED');
-  });
+  }, onPublished);
   engine = newEngine(reader, store);
   try {
     await engine.start(); await engine.whenIdle();
@@ -285,6 +286,221 @@ test('B1: cancel at CURRENT rename boundary is deferred, not falsely acknowledge
     engine.resume(); await engine.whenIdle();
     assert.equal(engine.status().status, 'ready');
   } finally { await engine.close(); await cleanup(); }
+});
+
+
+// These cases fault-inject real Node filesystem operations, not GenerationStore.commit.
+// The on-disk CURRENT, PREVIOUS and generation files are independently reopened.
+test('B3: post-publish GC EACCES with deferred cancel preserves CURRENT and memory, then cleans orphans', async () => {
+  const { root, reader, store, engine, cleanup } = await setup();
+  const realUnlink = fsPromises.unlink;
+  let releaseGc: () => void = () => {};
+  let gcEntered: () => void = () => {};
+  const gcGate = new Promise<void>(resolve => { releaseGc = resolve; });
+  const enteredGc = new Promise<void>(resolve => { gcEntered = resolve; });
+  let restart: StandaloneEngine | null = null;
+  let injected = false;
+  try {
+    const a = engine.status().generationId!;
+    await writeFile(join(root, 'boreal.md'), FIXTURE.replace('SSD', 'GPU'));
+    engine.changed('boreal.md'); await engine.whenIdle();
+    const b = engine.status().generationId!;
+    assert.notEqual(a, b);
+
+    (fsPromises as { unlink: typeof realUnlink }).unlink = async path => {
+      if (String(path) === join(store.dir, 'gen-' + a + '.json')) {
+        injected = true;
+        gcEntered(); await gcGate;
+        throw Object.assign(new Error('synthetic GC EACCES'), { code: 'EACCES' });
+      }
+      return realUnlink(path);
+    };
+    await writeFile(join(root, 'boreal.md'), FIXTURE.replace('SSD', 'NPU'));
+    engine.changed('boreal.md');
+    await enteredGc;
+    // The durable and observable generation already switched BEFORE awaited GC.
+    const c = JSON.parse(await readFile(join(store.dir, 'CURRENT'), 'utf8')).generationId as string;
+    assert.notEqual(c, b);
+    assert.equal(engine.status().generationId, c);
+    assert.equal(engine.status().error, 'COMMIT_FINALIZING');
+    assert.equal(engine.cancel(), false);
+    assert.equal(engine.status().error, 'CANCEL_DEFERRED');
+    releaseGc(); await engine.whenIdle();
+    assert.equal(injected, true);
+    assert.equal(engine.status().generationId, c);
+    assert.equal(engine.status().maintenanceWarning, 'INDEX_GC_FAILED');
+    assert.equal(engine.status().status, 'degraded');
+    assert.equal(engine.status().error, 'CANCEL_DEFERRED');
+    const durable = await (await GenerationStore.open(store.dir, reader.rootId)).load();
+    assert.equal(durable.generation?.generationId, c);
+    assert.equal((await engine.search(search('NPU'))).hits.length, 1);
+    assert.equal((await readFile(join(root, 'boreal.md'), 'utf8')).includes('NPU'), true);
+
+    (fsPromises as { unlink: typeof realUnlink }).unlink = realUnlink;
+    restart = newEngine(reader, await GenerationStore.open(store.dir, reader.rootId));
+    await restart.start(); await restart.whenIdle();
+    assert.equal(restart.status().generationId, c);
+    assert.equal((await restart.search(search('NPU'))).hits.length, 1);
+    await restart.close(); restart = null;
+
+    await writeFile(join(root, 'boreal.md'), FIXTURE.replace('SSD', 'TPU'));
+    engine.resume(); await engine.whenIdle();
+    assert.equal(engine.status().status, 'ready');
+    assert.equal(engine.status().maintenanceWarning, null);
+    assert.equal((await engine.search(search('TPU'))).hits.length, 1);
+    const gens = (await fsPromises.readdir(store.dir)).filter(f => /^gen-[0-9a-f]{64}\.json$/.test(f));
+    assert.equal(gens.length, 2); // CURRENT plus valid PREVIOUS, no orphan leak.
+    const clean = await (await GenerationStore.open(store.dir, reader.rootId)).load();
+    assert.equal(clean.generation?.generationId, engine.status().generationId);
+  } finally {
+    releaseGc();
+    (fsPromises as { unlink: typeof realUnlink }).unlink = realUnlink;
+    await restart?.close();
+    await cleanup();
+  }
+});
+
+test('B3: unload during post-publication GC keeps durable CURRENT and permits a clean reload', async () => {
+  const { root, reader, store, engine, cleanup } = await setup();
+  const realUnlink = fsPromises.unlink;
+  let releaseGc: () => void = () => {};
+  let entered: () => void = () => {};
+  const gate = new Promise<void>(resolve => { releaseGc = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  let restart: StandaloneEngine | null = null;
+  try {
+    const a = engine.status().generationId!;
+    await writeFile(join(root, 'boreal.md'), FIXTURE.replace('SSD', 'GPU'));
+    engine.changed('boreal.md'); await engine.whenIdle();
+    (fsPromises as { unlink: typeof realUnlink }).unlink = async path => {
+      if (String(path) === join(store.dir, 'gen-' + a + '.json')) {
+        entered(); await gate;
+      }
+      return realUnlink(path);
+    };
+    await writeFile(join(root, 'boreal.md'), FIXTURE.replace('SSD', 'NPU'));
+    engine.changed('boreal.md');
+    await started;
+    const c = JSON.parse(await readFile(join(store.dir, 'CURRENT'), 'utf8')).generationId as string;
+    assert.equal(engine.status().generationId, c);
+    const closing = engine.close();
+    releaseGc();
+    await closing;
+    (fsPromises as { unlink: typeof realUnlink }).unlink = realUnlink;
+    const disk = await (await GenerationStore.open(store.dir, reader.rootId)).load();
+    assert.equal(disk.generation?.generationId, c);
+    restart = newEngine(reader, await GenerationStore.open(store.dir, reader.rootId));
+    await restart.start(); await restart.whenIdle();
+    assert.equal(restart.status().generationId, c);
+    assert.equal((await restart.search(search('NPU'))).hits.length, 1);
+    assert.equal((await readFile(join(root, 'boreal.md'), 'utf8')).includes('NPU'), true);
+  } finally {
+    releaseGc();
+    (fsPromises as { unlink: typeof realUnlink }).unlink = realUnlink;
+    await restart?.close();
+    await cleanup();
+  }
+});
+
+test('B3: CURRENT rename success with directory fsync failure reports uncertainty and keeps same generation', async () => {
+  const { root, reader, store, engine, cleanup } = await setup();
+  const realRename = fsPromises.rename;
+  const realOpen = fsPromises.open;
+  let renamedCurrent = false, injected = false;
+  let restart: StandaloneEngine | null = null;
+  try {
+    await writeFile(join(root, 'boreal.md'), FIXTURE.replace('SSD', 'GPU'));
+    engine.changed('boreal.md'); await engine.whenIdle();
+    const b = engine.status().generationId!;
+    const current = join(store.dir, 'CURRENT');
+    (fsPromises as { rename: typeof realRename }).rename = async (src, dst) => {
+      await realRename(src, dst);
+      if (String(dst) === current) renamedCurrent = true;
+    };
+    (fsPromises as { open: typeof realOpen }).open = async (path, flags, mode) => {
+      const handle = await realOpen(path, flags, mode);
+      if (renamedCurrent && String(path) === store.dir && !injected) {
+        injected = true;
+        return new Proxy(handle, {
+          get(target, prop) {
+            if (prop === 'sync') return async () => {
+              throw Object.assign(new Error('synthetic directory fsync EIO'), { code: 'EIO' });
+            };
+            const value = Reflect.get(target, prop, target) as unknown;
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
+      }
+      return handle;
+    };
+    await writeFile(join(root, 'boreal.md'), FIXTURE.replace('SSD', 'NPU'));
+    engine.changed('boreal.md'); await engine.whenIdle();
+    assert.equal(injected, true);
+    const c = JSON.parse(await readFile(current, 'utf8')).generationId as string;
+    assert.notEqual(c, b);
+    assert.equal(engine.status().generationId, c);
+    assert.equal(engine.status().status, 'degraded');
+    assert.equal(engine.status().error, 'INDEX_DURABILITY_UNCERTAIN');
+    assert.equal(engine.status().maintenanceWarning, 'INDEX_DURABILITY_UNCERTAIN');
+    assert.equal((await engine.search(search('NPU'))).hits.length, 1);
+
+    (fsPromises as { open: typeof realOpen }).open = realOpen;
+    (fsPromises as { rename: typeof realRename }).rename = realRename;
+    restart = newEngine(reader, await GenerationStore.open(store.dir, reader.rootId));
+    await restart.start(); await restart.whenIdle();
+    assert.equal(restart.status().generationId, c);
+    assert.equal((await restart.search(search('NPU'))).hits.length, 1);
+    const previous = JSON.parse(await readFile(join(store.dir, 'PREVIOUS'), 'utf8'));
+    assert.equal(previous.generationId, b);
+    await restart.close(); restart = null;
+
+    // Reconciliation can clear the uncertainty after a new durable publication.
+    await writeFile(join(root, 'boreal.md'), FIXTURE.replace('SSD', 'TPU'));
+    engine.changed('boreal.md'); await engine.whenIdle();
+    assert.equal(engine.status().maintenanceWarning, null);
+    assert.equal(engine.status().status, 'ready');
+    assert.equal((await engine.search(search('TPU'))).hits.length, 1);
+  } finally {
+    (fsPromises as { open: typeof realOpen }).open = realOpen;
+    (fsPromises as { rename: typeof realRename }).rename = realRename;
+    await restart?.close();
+    await cleanup();
+  }
+});
+
+test('B3: CURRENT rename rejection before publication preserves prior generation and recovers on retry', async () => {
+  const { root, reader, store, engine, cleanup } = await setup();
+  const realRename = fsPromises.rename;
+  const before = engine.status().generationId!;
+  let injected = false;
+  try {
+    (fsPromises as { rename: typeof realRename }).rename = async (src, dst) => {
+      if (String(dst) === join(store.dir, 'CURRENT')) {
+        injected = true;
+        throw Object.assign(new Error('synthetic rename EACCES'), { code: 'EACCES' });
+      }
+      return realRename(src, dst);
+    };
+    await writeFile(join(root, 'boreal.md'), FIXTURE.replace('SSD', 'GPU'));
+    engine.changed('boreal.md'); await engine.whenIdle();
+    assert.equal(injected, true);
+    assert.equal(engine.status().generationId, before);
+    assert.equal(engine.status().status, 'degraded');
+    assert.equal(engine.status().error, 'IO_FAILURE');
+    assert.equal(engine.status().maintenanceWarning, null);
+    assert.equal((await (await GenerationStore.open(store.dir, reader.rootId)).load()).generation?.generationId, before);
+    assert.equal((await engine.search(search('SSD'))).hits.length, 0); // Source freshness suppresses stale bytes.
+
+    (fsPromises as { rename: typeof realRename }).rename = realRename;
+    engine.rebuild(); await engine.whenIdle();
+    assert.equal(engine.status().status, 'ready');
+    assert.equal((await engine.search(search('GPU'))).hits.length, 1);
+    assert.equal((await (await GenerationStore.open(store.dir, reader.rootId)).load()).generation?.generationId,
+      engine.status().generationId);
+  } finally {
+    (fsPromises as { rename: typeof realRename }).rename = realRename;
+    await cleanup();
+  }
 });
 
 test('corrupt CURRENT falls back to previous full generation and suppresses superseded hits', async () => {
