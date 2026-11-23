@@ -161,10 +161,14 @@ export function rankAdvanced(input:RankedOptions):RetrievalResponse{
       seenChunk.add(chunk.chunkId);
       if(wantsDense&&stored!.chunkIds[i]!==chunk.chunkId)
         return fail(mode,'INDEX_INCOMPATIBLE',lexLeg,denseLeg);
-      const blocks=chunk.sourceSlices.map(s=>source.blocks[s.blockOrder]).filter(x=>x!==undefined);
-      const lexText=blocks.map(b=>b.textNature==='table-cell-serialization'
-        ?b.cells.map(c=>c.originalText).join(' '):b.originalText).join(' ')
-        +' '+blocks.map(b=>b.headings.join(' ')).join(' ');
+      // Only physical source spans included in this exact canonical chunk
+      // contribute to lexical scoring. A long block split across chunks must
+      // not give every sibling chunk the same technical identifiers. Heading
+      // context in embeddings is not original lexical evidence.
+      const lexText=chunk.sourceSlices.map(slice=>{
+        const block=source.blocks[slice.blockOrder];
+        return block?Array.from(block.originalText).slice(slice.charStart,slice.charEnd).join(''):'';
+      }).join(' ');
       const candidate:Candidate={source,chunk,key:chunk.chunkId,
         vector:wantsDense?stored!.vectors[i]!:null,lexText};
       if(sourceExcerpt(candidate))records.push(candidate);

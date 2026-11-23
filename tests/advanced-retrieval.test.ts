@@ -40,6 +40,34 @@ test('real v3 source/chunk reuse: exact technical ID, typed Properties, Unicode 
   assert.ok(filtered.hits.length>0);
 });
 
+test('05D remediation B2: lexical and RRF never borrow an identifier from an unsliced sibling span',()=>{
+  const partial=structuredClone(source);
+  const block=partial.source!.blocks[8]!;
+  assert.match(block.originalText,/^REQ-X-1:/);
+  const excluded=[...'REQ-X-1'].length;
+  const chunk=structuredClone(partial.chunks[2]!);
+  chunk.sourceSlices=[{blockOrder:8,charStart:excluded,charEnd:[...block.originalText].length}];
+  chunk.sourceLocators=[{...block.locator,
+    charStart:block.locator.charStart!+excluded,
+    byteStart:block.locator.byteStart!+Buffer.byteLength('REQ-X-1')}];
+  partial.chunks=[chunk];
+  const documents=[{response:partial}];
+  const absent=rankAdvanced({documents,generation:null,queryVector:null,
+    request:req('lexical','REQ-X-1')});
+  assert.equal(absent.status,'ok');
+  assert.deepEqual(absent.hits,[],'technical ID in excluded span cannot score this chunk');
+  const present=rankAdvanced({documents,generation:null,queryVector:null,
+    request:req('lexical','PATCH')});
+  assert.equal(present.hits.length,1);
+  assert.equal(present.hits[0]?.originalExcerpt,': PATCH /v2/items сохраняет запись.');
+  const hybrid=rankAdvanced({documents,generation:build([partial]),queryVector:vector(),
+    request:req('hybrid','REQ-X-1')});
+  assert.equal(hybrid.status,'ok');
+  assert.equal(hybrid.hits.length,1);
+  assert.equal(hybrid.hits[0]?.lexicalRank,null,'hybrid must not count a false lexical leg');
+  assert.equal(hybrid.hits[0]?.denseRank,1);
+});
+
 test('strict typed mismatch, scope denial and absent hits, without fabricated excerpt',()=>{
   assert.throws(()=>rankAdvanced({documents:docs,generation:null,queryVector:null,
     request:{...req('lexical'),predicates:[{key:'active',valueType:'boolean',value:1,operator:'eq'}] as never}}));

@@ -1,9 +1,10 @@
 /** Separate, rebuildable Advanced ingestion generation store, never the Standalone lexical index. */
 import { constants } from 'node:fs';
-import { mkdir, open, lstat, readdir, readFile, rename, unlink } from 'node:fs/promises';
-import { dirname, join, resolve, sep } from 'node:path';
+import { open, lstat, readdir, readFile, rename, unlink } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { privateIndexPath } from '../standalone/source';
+import { withPrivateDerivedDirectory } from './private-directory';
 import { canonical, sha, type IngestResponse, type IngestRequest,
   validateReply, IngestError } from './protocol';
 import type { TrustedVaultRoot } from './source';
@@ -64,30 +65,26 @@ export class AdvancedGenerationStore {
   static async open(root: TrustedVaultRoot, pluginId: string): Promise<AdvancedGenerationStore> {
     const indexDir = privateIndexPath(root.path,root.id,pluginId);
     const path = resolve(dirname(indexDir),'advanced-ingestion');
-    if (path === root.path || path.startsWith(root.path+sep)) throw new IngestError('SOURCE_REJECTED');
     const store = new AdvancedGenerationStore(root,path);
-    // No production Vault files are created or opened for writes.
-    await mkdir(path,{recursive:true,mode:0o700});
-    const dirInfo = await lstat(path);
-    if (!dirInfo.isDirectory() || dirInfo.isSymbolicLink()
-      || dirInfo.uid !== process.getuid?.() || (dirInfo.mode & 0o077) !== 0)
-      throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
+    // Descriptor-anchored walk rejects symlink ancestors before creating any
+    // new path and forbids redirection into the authoritative Vault.
     await store.load();
     return store;
   }
   private async load(): Promise<void> {
-    const names = await readdir(this.path);
+    await withPrivateDerivedDirectory(this.path,this.root.path,async dir=>{
+    const names = await readdir(dir);
     if (names.length > 12 || names.some(n=>n!==pointerName && !namePattern.test(n) && !stagePattern.test(n)))
       throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
     if (!names.includes(pointerName)) {
       if (names.some(n=>namePattern.test(n))) throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
       return;
     }
-    const ptr = parseCanonical(await strictFile(join(this.path,pointerName),2048)) as Pointer;
+    const ptr = parseCanonical(await strictFile(join(dir,pointerName),2048)) as Pointer;
     if (!ptr || ptr.schemaVersion !== 1 || ptr.rootId !== this.root.id
         || !namePattern.test(ptr.filename) || ptr.sha256 !== ptr.filename.slice(0,-5))
       throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
-    const bytes = await strictFile(join(this.path,ptr.filename),MAX_GENERATION_BYTES);
+    const bytes = await strictFile(join(dir,ptr.filename),MAX_GENERATION_BYTES);
     if (sha(bytes) !== ptr.sha256) throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
     const snapshot = parseCanonical(bytes) as Snapshot;
     if (!snapshot || snapshot.schemaVersion !== 1 || snapshot.rootId !== this.root.id
@@ -100,6 +97,7 @@ export class AdvancedGenerationStore {
       next.set(entry.sourcePath,entry.response);
     }
     this.entries=next;
+    });
   }
   paths(): string[] {
     if(this.unavailable) throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
@@ -113,6 +111,7 @@ export class AdvancedGenerationStore {
   async publish(path: string, response: IngestResponse, stillCurrent: ()=>Promise<boolean>,
     signal: AbortSignal): Promise<void> {
     if (this.unavailable) throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
+    return withPrivateDerivedDirectory(this.path,this.root.path,async dir=>{
     probeEntry({sourcePath:path,response},this.root);
     const next = new Map(this.entries);
     next.set(path,response);
@@ -124,44 +123,46 @@ export class AdvancedGenerationStore {
     if (bytes.length > MAX_GENERATION_BYTES) throw new IngestError('ADVANCED_RESOURCE_REFUSED');
     const hash = sha(bytes);
     const name=hash+'.json';
-    const stage = join(this.path,'.stage-'+randomUUID());
+    const stage = join(dir,'.stage-'+randomUUID());
     const check = async () => {
       if (signal.aborted) throw new IngestError('ADVANCED_CANCELLED');
       if (!(await stillCurrent())) throw new IngestError('SOURCE_STALE');
+      if (signal.aborted) throw new IngestError('ADVANCED_CANCELLED');
     };
     await check();
     try {
       try { await persist(stage,bytes); }
       catch { throw new IngestError('INDEX_PUBLICATION_UNCERTAIN'); }
       // Previous generation remains referenced by CURRENT until new pointer is committed.
-      if (!(await readdir(this.path)).includes(name)) await rename(stage,join(this.path,name));
+      if (!(await readdir(dir)).includes(name)) await rename(stage,join(dir,name));
       else {
-        const existing = await strictFile(join(this.path,name),MAX_GENERATION_BYTES);
+        const existing = await strictFile(join(dir,name),MAX_GENERATION_BYTES);
         if (sha(existing) !== hash) throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
         await unlink(stage);
       }
-      await syncDirectory(this.path);
+      await syncDirectory(dir);
       await check();
       const pointer: Pointer={schemaVersion:1,rootId:this.root.id,filename:name,sha256:hash};
-      const pointerStage=join(this.path,'.stage-'+randomUUID());
+      const pointerStage=join(dir,'.stage-'+randomUUID());
       await persist(pointerStage,Buffer.from(canonical(pointer),'utf8'));
       await check();
       // Synchronous publish point. Any rename error is ambiguous; fail closed.
-      try { await rename(pointerStage,join(this.path,pointerName)); }
+      try { await rename(pointerStage,join(dir,pointerName)); }
       catch { this.unavailable=true; throw new IngestError('INDEX_PUBLICATION_UNCERTAIN'); }
       this.entries=next;
-      try { await syncDirectory(this.path); }
+      try { await syncDirectory(dir); }
       catch { this.unavailable=true; throw new IngestError('INDEX_PUBLICATION_UNCERTAIN'); }
       // Remove old generations only after the new CURRENT is durable.
       // A crash may leave up to bounded remnants; load() rejects unbounded garbage.
-      const names=await readdir(this.path);
+      const names=await readdir(dir);
       for (const old of names) if (namePattern.test(old) && old!==name) {
-        await unlink(join(this.path,old)).catch(()=>{ /* next run may signal bounded maintenance */ });
+        await unlink(join(dir,old)).catch(()=>{ /* next run may signal bounded maintenance */ });
       }
     } catch(error) {
       // No entry became visible in memory before authenticated publication.
       if (error instanceof IngestError) throw error;
       throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
     }
+     });
   }
 }

@@ -1,12 +1,13 @@
 /** Durable v4 retrieval generation bound to canonical v3 source/chunk identities.
  * No Vault writes; same 05C atomic publication helpers and private XDG root.
  */
-import { lstat, mkdir, readdir, rename, unlink } from 'node:fs/promises';
-import { dirname, join, resolve, sep } from 'node:path';
+import { lstat, readdir, rename, unlink } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { TrustedVaultRoot } from './source';
 import { privateIndexPath } from '../standalone/source';
-import { canonical, sha, validRelative } from './protocol';
+import { canonical, sha, validRelative, IngestError } from './protocol';
+import { withPrivateDerivedDirectory } from './private-directory';
 import { persist, syncDirectory, strictFile, parseCanonical } from './storage';
 import { verifyIdentity, verifyVector, CHUNK_TOKENIZER_FINGERPRINT, type ModelIdentity } from './model-protocol';
 import { ModelError } from './model-protocol';
@@ -64,50 +65,49 @@ export class AdvancedRetrievalStore {
   static async open(root:TrustedVaultRoot,pluginId:string):Promise<AdvancedRetrievalStore>{
     const parent=dirname(privateIndexPath(root.path,root.id,pluginId));
     const path=resolve(parent,'advanced-retrieval');
-    if(path===root.path||path.startsWith(root.path+sep))invalid();
-    await mkdir(path,{recursive:true,mode:0o700});
-    const dir=await lstat(path);
-    if(!dir.isDirectory()||dir.isSymbolicLink()||dir.uid!==process.getuid?.()||(dir.mode&0o077)!==0)invalid();
     const store=new AdvancedRetrievalStore(root,path);
-    await store.load();
+    try { await store.load(); }
+    catch (error) { if(error instanceof IngestError)invalid(); throw error; }
     return store;
   }
   /** No CURRENT means no committed index. Authenticate abandoned first-publish
    * artifacts before removing them; never promote an orphan into search visibility.
    * An existing but corrupt CURRENT is never recovered through this path.
    */
-  private async discardUnpublished(names:string[]):Promise<void>{
+  private async discardUnpublished(names:string[], dir:string):Promise<void>{
     if(names.includes(CURRENT))invalid();
     const generations=names.filter(x=>genPattern.test(x));
     for(const name of generations){
-      const bytes=await strictFile(join(this.path,name),LIMIT_BYTES);
+      const bytes=await strictFile(join(dir,name),LIMIT_BYTES);
       if(sha(bytes)!==name.slice(0,-5))invalid();
       validateRetrievalGeneration(parseCanonical(bytes),this.root.id);
     }
     for(const name of names.filter(x=>stagePattern.test(x))){
-      const info=await lstat(join(this.path,name));
+      const info=await lstat(join(dir,name));
       if(!info.isFile()||info.isSymbolicLink()||info.nlink!==1
           ||info.uid!==process.getuid?.()||(info.mode&0o077)!==0)invalid();
     }
-    for(const name of names)await unlink(join(this.path,name));
-    if(names.length)await syncDirectory(this.path);
+    for(const name of names)await unlink(join(dir,name));
+    if(names.length)await syncDirectory(dir);
   }
   private async load():Promise<void>{
-    const names=await readdir(this.path);
+    await withPrivateDerivedDirectory(this.path,this.root.path,async dir=>{
+    const names=await readdir(dir);
     if(names.length>12||names.some(x=>x!==CURRENT&&!genPattern.test(x)&&!stagePattern.test(x)))invalid();
     if(!names.includes(CURRENT)){
-      await this.discardUnpublished(names);
+      await this.discardUnpublished(names,dir);
       return;
     }
-    const ptr=parseCanonical(await strictFile(join(this.path,CURRENT),2048)) as Pointer;
+    const ptr=parseCanonical(await strictFile(join(dir,CURRENT),2048)) as Pointer;
     if(!ptr||Object.keys(ptr).sort().join('|')!==['schemaVersion','rootId','filename','sha256'].sort().join('|')
         ||ptr.schemaVersion!==1||ptr.rootId!==this.root.id||!genPattern.test(ptr.filename)
         ||ptr.sha256!==ptr.filename.slice(0,-5))invalid();
-    const bytes=await strictFile(join(this.path,ptr.filename),LIMIT_BYTES);
+    const bytes=await strictFile(join(dir,ptr.filename),LIMIT_BYTES);
     if(sha(bytes)!==ptr.sha256)invalid();
     const value=parseCanonical(bytes);
     validateRetrievalGeneration(value,this.root.id);
     this.generation=value;
+    });
   }
   snapshot():RetrievalGeneration|null{
     if(this.poisoned)invalid();
@@ -127,15 +127,17 @@ export class AdvancedRetrievalStore {
   async publish(entry:IndexedSource,model:ModelIdentity,check:()=>Promise<void>,signal:AbortSignal,
     rebuild=false):Promise<RetrievalGeneration>{
     if(this.poisoned)invalid();
+    try {
+      return await withPrivateDerivedDirectory(this.path,this.root.path,async dir=>{
     verifyIdentity(model);
     const old=this.generation;
     // First-publish abort/crash can leave an immutable generation with no
     // CURRENT. Clear only fully authenticated unpublished derived artifacts.
     if(!old){
-      const names=await readdir(this.path);
+      const names=await readdir(dir);
       if(names.length>12||names.some(x=>x!==CURRENT&&!genPattern.test(x)&&!stagePattern.test(x))
           ||names.includes(CURRENT))invalid();
-      await this.discardUnpublished(names);
+      await this.discardUnpublished(names,dir);
     }
     if(old&&!rebuild&&canonical(old.model)!==canonical(model))invalid();
     const entries=[...(rebuild?[]:old?.entries??[]).filter(x=>x.sourcePath!==entry.sourcePath),entry]
@@ -145,39 +147,45 @@ export class AdvancedRetrievalStore {
     validateRetrievalGeneration(next,this.root.id);
     const payload=Buffer.from(canonical(next),'utf8');
     if(payload.byteLength>LIMIT_BYTES)throw new ModelError('INDEX_LIMIT');
-    const name=sha(payload)+'.json',stage=join(this.path,'.stage-'+randomUUID());
+    const name=sha(payload)+'.json',stage=join(dir,'.stage-'+randomUUID());
     const guard=async()=>{
       if(signal.aborted)throw new ModelError('MODEL_CANCELLED');
       await check();
+      if(signal.aborted)throw new ModelError('MODEL_CANCELLED');
     };
     await guard();
     try{
       await persist(stage,payload);
-      if(!(await readdir(this.path)).includes(name))await rename(stage,join(this.path,name));
+      if(!(await readdir(dir)).includes(name))await rename(stage,join(dir,name));
       else{
-        const existing=await strictFile(join(this.path,name),LIMIT_BYTES);
+        const existing=await strictFile(join(dir,name),LIMIT_BYTES);
         if(sha(existing)!==name.slice(0,-5))invalid();
         await unlink(stage);
       }
-      await syncDirectory(this.path);
+      await syncDirectory(dir);
       await guard();
       const pointer:Pointer={schemaVersion:1,rootId:this.root.id,filename:name,sha256:name.slice(0,-5)};
-      const pstage=join(this.path,'.stage-'+randomUUID());
+      const pstage=join(dir,'.stage-'+randomUUID());
       await persist(pstage,Buffer.from(canonical(pointer),'utf8'));
       await guard();
-      try{await rename(pstage,join(this.path,CURRENT));}
+      try{await rename(pstage,join(dir,CURRENT));}
       catch{this.poisoned=true;invalid();}
       // New version is now the only visible in-memory generation.
       this.generation=next;
-      try{await syncDirectory(this.path);}
+      try{await syncDirectory(dir);}
       catch{this.poisoned=true;invalid();}
-      for(const oldName of await readdir(this.path))
+      for(const oldName of await readdir(dir))
         if(genPattern.test(oldName)&&oldName!==name)
-          await unlink(join(this.path,oldName)).catch(()=>{});
+          await unlink(join(dir,oldName)).catch(()=>{});
       return structuredClone(next);
     }catch(error){
       if(error instanceof ModelError)throw error;
       throw new ModelError('INDEX_PUBLICATION_UNCERTAIN');
+    }
+       });
+    } catch (error) {
+      if(error instanceof IngestError){this.poisoned=true;invalid();}
+      throw error;
     }
   }
 }

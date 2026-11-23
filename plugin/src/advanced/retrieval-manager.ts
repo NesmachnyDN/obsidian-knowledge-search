@@ -103,6 +103,8 @@ export class AdvancedRetrievalManager {
           if(abort.signal.aborted||revision!==this.revision||!config.enabled||!authorized())
             throw new ModelError('MODEL_CANCELLED');
           const now=await this.version(path,authorized);
+          if(abort.signal.aborted||revision!==this.revision||!config.enabled||!authorized())
+            throw new ModelError('MODEL_CANCELLED');
           if(!now.source||now.source.sha256!==source.sha256||now.generationId!==initial.generationId
             ||now.chunks.map(c=>c.chunkId).join('|')!==entry.chunkIds.join('|'))
             throw new ModelError('SOURCE_STALE');

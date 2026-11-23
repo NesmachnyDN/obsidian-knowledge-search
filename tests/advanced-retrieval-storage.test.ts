@@ -2,10 +2,11 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {join} from 'node:path';
-import {mkdtemp,mkdir,readFile,writeFile,symlink,rm,readdir} from 'node:fs/promises';
+import {mkdtemp,mkdir,readFile,writeFile,symlink,rm,readdir,rename} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {readFileSync} from 'node:fs';
 import {AdvancedRetrievalStore, type IndexedSource} from '../plugin/src/advanced/retrieval-storage';
+import {AdvancedGenerationStore} from '../plugin/src/advanced/storage';
 import {trustedVaultRoot} from '../plugin/src/advanced/source';
 import {CHUNK_TOKENIZER_FINGERPRINT,ModelError,type ModelIdentity} from '../plugin/src/advanced/model-protocol';
 const identity:ModelIdentity={...JSON.parse(readFileSync('benchmarks/embedding/results.json','utf8')).identity,
@@ -37,6 +38,58 @@ test('v4 retrieval store: bounded atomic publish, real cold open, rejected corru
       async()=>{},new AbortController().signal));
     await writeFile(join(store.path,'CURRENT'),'{}\n',{mode:0o600});
     await assert.rejects(AdvancedRetrievalStore.open(trusted,'oks-synthetic-evidence'));
+  }finally{
+    if(prior===undefined)delete process.env.XDG_DATA_HOME;else process.env.XDG_DATA_HOME=prior;
+    await rm(root,{recursive:true,force:true});
+  }
+});
+
+test('05D remediation B1: cancellation during FINAL async guard forbids CURRENT and ready evidence',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'oks05d-last-guard-'));
+  const vault=join(root,'vault'),xdg=join(root,'xdg'),prior=process.env.XDG_DATA_HOME;
+  await mkdir(vault,{mode:0o700});await mkdir(xdg,{mode:0o700});process.env.XDG_DATA_HOME=xdg;
+  try{
+    const identityRoot=await trustedVaultRoot(vault);
+    const store=await AdvancedRetrievalStore.open(identityRoot,'oks-synthetic-evidence');
+    let checks=0;
+    const abort=new AbortController();
+    await assert.rejects(store.publish(entry('cancel.md'),identity,async()=>{
+      if(++checks===3)abort.abort();
+    },abort.signal),(e:unknown)=>e instanceof ModelError&&e.code==='MODEL_CANCELLED');
+    assert.equal(checks,3,'abort must occur after the last awaited validation');
+    assert.equal(store.snapshot(),null,'memory must not publish a canceled version');
+    assert.ok(!(await readdir(store.path)).includes('CURRENT'),'durable pointer must not publish');
+    const reopened=await AdvancedRetrievalStore.open(identityRoot,'oks-synthetic-evidence');
+    assert.equal(reopened.snapshot(),null);
+    const valid=await reopened.publish(entry('retry.md'),identity,async()=>{},
+      new AbortController().signal);
+    assert.equal(valid.entries.length,1);
+  }finally{
+    if(prior===undefined)delete process.env.XDG_DATA_HOME;else process.env.XDG_DATA_HOME=prior;
+    await rm(root,{recursive:true,force:true});
+  }
+});
+
+test('05D remediation B3: XDG ancestor symlinks and later swaps cannot write derived data into Vault',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'oks05d-ancestor-'));
+  const vault=join(root,'vault'),xdg=join(root,'xdg'),prior=process.env.XDG_DATA_HOME;
+  await mkdir(vault,{mode:0o700});
+  process.env.XDG_DATA_HOME=xdg;
+  try{
+    const identityRoot=await trustedVaultRoot(vault);
+    await symlink(vault,xdg,'dir');
+    await assert.rejects(AdvancedRetrievalStore.open(identityRoot,'oks-synthetic-evidence'));
+    await assert.rejects(AdvancedGenerationStore.open(identityRoot,'oks-synthetic-evidence'));
+    assert.deepEqual(await readdir(vault),[], 'no derived directory created inside source Vault');
+    await rm(xdg);
+    await mkdir(xdg,{mode:0o700});
+    const store=await AdvancedRetrievalStore.open(identityRoot,'oks-synthetic-evidence');
+    await rename(xdg,join(root,'xdg-safe'));
+    await symlink(vault,xdg,'dir');
+    await assert.rejects(store.publish(entry('a.md'),identity,async()=>{},
+      new AbortController().signal));
+    assert.deepEqual(await readdir(vault),[],
+      'ancestor substitution after a verified open must not redirect writes');
   }finally{
     if(prior===undefined)delete process.env.XDG_DATA_HOME;else process.env.XDG_DATA_HOME=prior;
     await rm(root,{recursive:true,force:true});
