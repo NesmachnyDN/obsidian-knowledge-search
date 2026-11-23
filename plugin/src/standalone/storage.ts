@@ -305,7 +305,25 @@ export class GenerationStore {
             throw new StandaloneError('INDEX_PUBLICATION_UNCERTAIN');
           }
         } catch (observationError) {
-          if (observationError === error) throw error;
+          if (observationError === error) {
+            // On initial publish, an unload/cancel can happen after the durable
+            // generation file was staged but before CURRENT is renamed. The
+            // owned generation is NOT published; remove it after authentication
+            // so a reloaded plugin can safely build its first index. Do not
+            // touch preexisting, foreign or ambiguously published generations.
+            if (!this.currentPointer && !existing
+              && error instanceof StandaloneError && error.code === 'CANCELLED') {
+              try {
+                await this.generation(pointer);
+                await unlink(target);
+                await syncDir(this.dir);
+              } catch {
+                this.publicationUncertain = true;
+                throw new StandaloneError('INDEX_PUBLICATION_UNCERTAIN');
+              }
+            }
+            throw error;
+          }
           // Unknown/mismatched CURRENT: do not accept another write on this
           // store instance; the engine must suppress all search evidence.
           this.publicationUncertain = true;
