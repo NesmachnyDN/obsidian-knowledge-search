@@ -127,6 +127,64 @@ test('lexical exact identifiers, Unicode RU/EN, scope, deterministic tie, filter
     assert.deepEqual(terms('REQ-BOR-21 POST /v2/items'), ['req-bor-21','req','bor','21','post','v2/items','v2','items']);
   } finally { await cleanup(); }
 });
+test('B9: mixed-case and Unicode source order remains stable without false reconciliation', async () => {
+  const { root, reader, store, engine, cleanup } = await setup({
+    'Z.md': 'REQ-MIX-UPPER: original upper-case file\n',
+    'a.md': 'REQ-MIX-LOWER: original lower-case file\n',
+    'Ёж.md': 'REQ-MIX-RU: исходный документ\n',
+    'écho.md': 'REQ-MIX-UNICODE: accented name\n',
+  });
+  const realRead = reader.read.bind(reader);
+  let readCount = 0;
+  let restarted: StandaloneEngine | null = null;
+  try {
+    const generation = engine.status().generationId;
+    assert.equal(engine.status().status, 'ready');
+    reader.read = async path => { readCount++; return realRead(path); };
+    for (let i = 0; i < 3; i++) {
+      const negative = await engine.search(search('REQ-MIX-NOT-FOUND'));
+      assert.equal(negative.status, 'ok');
+      assert.equal(negative.error, null);
+      assert.deepEqual(negative.hits, []);
+      assert.equal(negative.indexGenerationId, generation);
+      assert.equal(engine.status().busy, false);
+    }
+    assert.equal(readCount, 0, 'stable negative queries must not trigger a full source audit');
+    for (const [term, path] of [['REQ-MIX-UPPER', 'Z.md'], ['REQ-MIX-LOWER', 'a.md'],
+      ['REQ-MIX-RU', 'Ёж.md'], ['REQ-MIX-UNICODE', 'écho.md']] as const) {
+      const result = await engine.search(search(term, { scope: [path] }));
+      assert.equal(result.status, 'ok');
+      assert.equal(result.hits.length, 1);
+      assert.equal(result.hits[0]?.sourceId, path);
+      assert.equal(result.indexGenerationId, generation);
+    }
+    await writeFile(join(root, 'Z.md'), 'REQ-MIX-CHANGED: missed modify event\n');
+    const missed = await engine.search(search('REQ-MIX-CHANGED'));
+    assert.equal(missed.status, 'degraded');
+    assert.equal(missed.error, 'RECONCILING');
+    assert.equal(missed.hits.length, 0);
+    await engine.whenIdle();
+    assert.equal(engine.status().status, 'ready');
+    const repaired = await engine.search(search('REQ-MIX-CHANGED'));
+    assert.equal(repaired.status, 'ok');
+    assert.equal(repaired.hits.length, 1);
+    assert.equal((await engine.search(search('REQ-MIX-UPPER'))).hits.length, 0);
+    await engine.close();
+    restarted = newEngine(reader, await GenerationStore.open(store.dir, reader.rootId));
+    await restarted.start();
+    await restarted.whenIdle();
+    assert.equal(restarted.status().status, 'ready');
+    const recovered = await restarted.search(search('REQ-MIX-CHANGED'));
+    assert.equal(recovered.status, 'ok');
+    assert.equal(recovered.hits.length, 1);
+    assert.equal(recovered.indexGenerationId, repaired.indexGenerationId);
+  } finally {
+    reader.read = realRead;
+    await restarted?.close();
+    await cleanup();
+  }
+});
+
 test('invalid protocol, query, scope, type, version, unsupported source', async () => {
   const { engine, reader, cleanup } = await setup();
   try {

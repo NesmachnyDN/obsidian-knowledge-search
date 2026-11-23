@@ -120,7 +120,9 @@ export function generationId(rootId: string, documents: SourceVersion[]): string
   return hash(JSON.stringify({ schemaVersion: SCHEMA, rootId, documents }));
 }
 export function makeGeneration(rootId: string, documents: SourceVersion[]): IndexGeneration {
-  const sorted = [...documents].sort((a,b) => a.sourceId.localeCompare(b.sourceId, 'en'));
+  // Match BoundedVaultReader.list() code-unit ordering. Locale collation can
+  // disagree for valid mixed-case/Unicode filenames and cause false source drift.
+  const sorted = [...documents].sort((a, b) => a.sourceId < b.sourceId ? -1 : a.sourceId > b.sourceId ? 1 : 0);
   return {
     schemaVersion: SCHEMA, rootId, generationId: generationId(rootId, sorted),
     publishedAt: new Date().toISOString(),
