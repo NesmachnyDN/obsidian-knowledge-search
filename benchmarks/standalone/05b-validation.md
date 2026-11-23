@@ -12,7 +12,7 @@ The selected synthetic lightweight backend entry is the repository's pre-existin
 
 | Check | Result |
 |---|---|
-| `npm test` | **PASS: 193/193**, including two new plugin lifecycle/reload tests and 11 direct health-bridge tests; previous 04A/04B regressions retained |
+| `npm test` | **PASS: 193/193**, including two new plugin lifecycle/reload tests and 11 direct health-bridge tests (Ubuntu-24.04/Linux fixture uses the distro-owned `/usr/bin/python3.12`, rather than whatever Python `PATH` points to); previous 04A/04B regressions retained |
 | `npm run test:python` | **PASS: 124, 5 pre-existing skips**, reference-only |
 | `npm run typecheck` / `npm run build` / `npm run licenses` | **PASS** |
 | `npm run test:package` | **PASS: 10/10**, after rebuilding and safely replacing only prior verified generated ignored package assets |

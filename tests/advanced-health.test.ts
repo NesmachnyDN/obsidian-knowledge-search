@@ -1,14 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, symlink, rm } from 'node:fs/promises';
-import { realpathSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { resolve, join } from 'node:path';
 import { AdvancedHealthBridge, parseHealthFrame, type AdvancedConfig } from '../plugin/src/advanced/health';
 import { defaultSettings, parseSettings } from '../plugin/src/search/settings';
 
 const good: AdvancedConfig = { enabled:true, profile:'local-stdio',
-  interpreter:realpathSync(execFileSync('which',['python3']).toString().trim()), entry:resolve('engine/persistent.py') };
+  interpreter:'/usr/bin/python3.12', entry:resolve('engine/persistent.py') };
 const disabled: AdvancedConfig = { ...good, enabled:false };
 const wait = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 const dead = (pid: number): void => assert.throws(() => process.kill(pid, 0), {code:'ESRCH'});

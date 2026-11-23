@@ -1,13 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, copyFile, rm, writeFile, readFile } from 'node:fs/promises';
-import { realpathSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseMarkdown } from '../plugin/src/standalone/markdown';
 import { defaultSettings } from '../plugin/src/search/settings';
-const TEST_PYTHON = realpathSync(execFileSync('which',['python3']).toString().trim());
+const TEST_PYTHON = '/usr/bin/python3.12';
 // Controlled Node-only host adapter. Actual DOM/editor acceptance remains host smoke.
 const Module = require('node:module') as { _load: (name: string, ...args: unknown[]) => unknown };
 class HostPlugin {
