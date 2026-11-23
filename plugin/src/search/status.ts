@@ -1,4 +1,5 @@
 import type { AdvancedHealth } from '../advanced/health';
+import type { IngestionStatus } from '../advanced/manager';
 import type { EngineState } from '../standalone/engine';
 import { isDigest } from '../standalone/contracts';
 
@@ -16,9 +17,10 @@ const CODES = new Set(['INITIALIZATION_FAILED','SETTINGS_INVALID','UNSUPPORTED_F
 export const safeCode = (value: unknown): string | null => value === null ? null
   : typeof value === 'string' && CODES.has(value) ? value : 'INTERNAL_FAILURE';
 export type SearchStatus = EngineState & { enabled: boolean; paused: boolean; advancedTransport: AdvancedHealth;
+  advancedIngestion: IngestionStatus;
   capabilityReadiness: { lexical: EngineState['status']; dense: 'unavailable'; hybrid: 'unavailable' } };
 export function statusSnapshot(engine: EngineState | undefined, enabled: boolean, paused: boolean,
-  error: string | null, advanced?: AdvancedHealth): SearchStatus {
+  error: string | null, advanced?: AdvancedHealth, ingestion?: IngestionStatus): SearchStatus {
   enabled = enabled === true; paused = paused === true;
   const state = engine ?? { status: error ? 'failed' : 'initializing', generationId: null,
     sources: 0, records: 0, busy: false, error, maintenanceWarning: null };
@@ -29,10 +31,11 @@ export function statusSnapshot(engine: EngineState | undefined, enabled: boolean
     sources: count(state.sources), records: count(state.records), busy: state.busy === true,
     error: safeCode(error ?? (!enabled ? 'DISABLED' : state.error)), maintenanceWarning: safeCode(state.maintenanceWarning),
     enabled, paused, advancedTransport: advanced ?? {profile:'none',status:'disabled',error:null,transportOnly:true},
+    advancedIngestion: ingestion ?? {status:'disabled',error:null,lastFormat:null,searchReady:false},
     capabilityReadiness: { lexical: status, dense: 'unavailable', hybrid: 'unavailable' } };
 }
 export function diagnostics(status: SearchStatus): string {
   // Reconstruct, rather than serialize a caller-owned object or engine state.
   return JSON.stringify({ apiVersion: 1, profile: 'standalone-markdown-lexical',
-    ...statusSnapshot(status, status.enabled, status.paused, status.error, status.advancedTransport) }, null, 2);
+    ...statusSnapshot(status, status.enabled, status.paused, status.error, status.advancedTransport, status.advancedIngestion) }, null, 2);
 }

@@ -30,6 +30,16 @@ for asset in main.js manifest.json standalone-worker.js; do
 done
 printf '%s\n' '["oks-synthetic-evidence"]' > "$tmp/vault/.obsidian/community-plugins.json"
 printf '%s\n' '{"safeMode":false}' > "$tmp/vault/.obsidian/app.json"
+# Separate opt-in tests use *only* synthetic sources and existing local artifacts.
+if [[ "${OKS_ADVANCED_INGESTION_TEST:-0}" == 1 ]]; then
+  : "${OKS_05C_PYTHON:?set trusted offline test interpreter}"
+  : "${OKS_05C_TOKENIZER_SNAPSHOT:?set pinned local tokenizer snapshot}"
+  : "${OKS_05C_TESSDATA:?set preinstalled RU/EN OCR data}"
+  for name in policy.pdf policy.docx scan.pdf; do
+    cp "$repo/benchmarks/extraction/fixtures/$name" "$tmp/vault/$name"
+  done
+  export OKS_05C_ENTRY="$repo/engine/advanced_ingest.py"
+fi
 # Only a separate opt-in synthetic test exposes local trusted host paths to the child Obsidian.
 if [[ "${OKS_ADVANCED_HEALTH_TEST:-0}" == 1 ]]; then
   export OKS_ADVANCED_PYTHON="/usr/bin/python3.12"
@@ -52,7 +62,12 @@ assert_contains() {
     return 1
   fi
 }
-env HOME="$tmp/home" timeout 150s xvfb-run -a -e "$tmp/display.log" -s '-screen 0 1280x800x24' bash -c '
+host_isolation=()
+if [[ "${OKS_HOST_NO_ROUTE:-0}" == 1 ]]; then
+  command -v unshare >/dev/null || { echo "HOST_SMOKE_UNAVAILABLE: unshare missing" >&2; exit 2; }
+  host_isolation=(unshare -Urn --)
+fi
+env HOME="$tmp/home" timeout 180s "${host_isolation[@]}" xvfb-run -a -e "$tmp/display.log" -s '-screen 0 1280x800x24' bash -c '
   set -euo pipefail
   "$app" --no-sandbox --disable-gpu --user-data-dir="$tmp/electron" > "$tmp/host.log" 2>&1 &
   p=$!
@@ -102,6 +117,12 @@ env HOME="$tmp/home" timeout 150s xvfb-run -a -e "$tmp/display.log" -s '-screen 
   navigation="$(timeout 8s "$cli" eval "code=JSON.stringify({path:app.workspace.getMostRecentLeaf()?.view?.file?.path,selected:app.workspace.getMostRecentLeaf()?.view?.editor?.getSelection()})")"
   [[ "$navigation" == *"first.md"* && "$navigation" == *"REQ-OKS-SMOKE: local only."* ]] ||
     { echo "HOST_SMOKE_FAILURE: source command selection" >&2; exit 1; }
+  if [[ "${OKS_ADVANCED_INGESTION_TEST:-0}" == 1 ]]; then
+    ingest="$(timeout 130s "$cli" eval "code=$(cat "$repo/scripts/obsidian-ingestion-smoke.js")")"
+    [[ "$ingest" == *"OBSIDIAN_ADVANCED_INGESTION_PASS:"* ]] ||
+      { echo "HOST_SMOKE_FAILURE: real opt-in extraction ($ingest)" >&2; exit 1; }
+    printf "%s\n" "$ingest"
+  fi
   before_reload="$(timeout 8s "$cli" eval "code=(globalThis.__oksPreviousParser=app.plugins.plugins[\"oks-synthetic-evidence\"].standalone.parser,app.plugins.plugins[\"oks-synthetic-evidence\"].standalone.status().generationId)")"
   before_id="$(printf "%s" "$before_reload" | grep -oE "[0-9a-f]{64}" | head -1)"
   test -n "$before_id" || { echo "HOST_SMOKE_FAILURE: missing before-reload generation" >&2; exit 1; }

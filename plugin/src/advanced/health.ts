@@ -41,7 +41,7 @@ async function verifiedRootlessSingleUid(): Promise<boolean> {
   return match !== null;
 }
 /** Avoid symlink ancestry, foreign/world-writable files and nonregular/multiply-linked entry files. */
-async function checkedPath(value: string, executable: boolean): Promise<void> {
+export async function checkedPath(value: string, executable: boolean): Promise<void> {
   if (!isAbsolute(value) || value.length > 4096 || value.includes('\0') || resolve(value) !== value)
     throw new HealthFailure('ADVANCED_CONFIG_INVALID');
   const root = parse(value).root;
