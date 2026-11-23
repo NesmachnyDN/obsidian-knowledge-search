@@ -63,3 +63,7 @@ New `npm run benchmark:standalone` uses the pinned development `esbuild` (alread
 ## OKS-05A Standalone candidate distribution boundary
 
 The release-shaped Standalone package contains only project-owned `main.js`, browser `standalone-worker.js` and `manifest.json`, with deterministic byte/hash inventory adjacent to (not inside) the installed plugin directory. No dependency, model artifact, license-controlled native library, new OCR binary or runtime distribution is introduced. Development tools (Node, npm, TypeScript/esbuild) and the historical opt-in Python experiment are not user-install prerequisites. License and dependency verification remain mandatory before a final public release; model/runtime distribution for either Advanced profile is separately gated.
+
+## OKS-05B candidate boundary
+
+No new npm or default Standalone runtime dependencies. The operator-provisioned local stdio backend uses Python 3.12 and the existing source-owned v2 health-only experiment, `engine/persistent.py`. It is never bundled or started by default; no Docling, Torch, BGE weights, network listener, model download or OS package is distributed by 05B. See ADR-0009; full optional backend runtime/model provenance are later acceptance gates.

@@ -1,3 +1,4 @@
+import { AdvancedHealthBridge } from './advanced/health';
 import { FileSystemAdapter, Modal, Notice, Plugin, TFile, type App, type TAbstractFile } from 'obsidian';
 import { ProbeController } from './controller';
 import { FIXTURE_PATH, type Response } from './protocol';
@@ -24,6 +25,11 @@ const barriers = host[barrierKey] ??= new Map<string, Promise<void>>();
 const pathBarrierKey = Symbol.for('oks.standalone.path-barriers');
 const pathHost = globalThis as typeof globalThis & { [pathBarrierKey]?: Map<string, Promise<void>> };
 const pathBarriers = pathHost[pathBarrierKey] ??= new Map<string, Promise<void>>();
+// Optional stdio worker reload barrier: a new plugin instance cannot start a child
+// until the previous instance's owned process group has been stopped.
+const advancedBarrierKey = Symbol.for('oks.advanced.close-barriers.v1');
+const advancedHost = globalThis as typeof globalThis & { [advancedBarrierKey]?: Map<string, Promise<void>> };
+const advancedBarriers = advancedHost[advancedBarrierKey] ??= new Map<string, Promise<void>>();
 
 class ResultModal extends Modal {
   constructor(app: App, private readonly response: Response) { super(app); }
@@ -45,10 +51,12 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private lifecycleRevision = 0;
   private settingsQueue: Promise<void> = Promise.resolve();
   private purgeInFlight?: Promise<number>;
+  readonly advancedHealth = new AdvancedHealthBridge();
+  private advancedStartup?: Promise<void>;
   readonly searchController = new SearchController(async hit => {
     if (!this.navigator) throw new StandaloneError('NAVIGATION_REJECTED');
     await this.navigator.open(hit);
-  });
+  }, () => this.advancedHealth.snapshot());
   readonly api = new StandaloneApi(this.searchController);
   private loaded = false;
   private unloaded = false;
@@ -78,7 +86,8 @@ export default class SyntheticEvidencePlugin extends Plugin {
       status: value => { this.resultModal?.close(); new Notice(`Synthetic probe: ${value}`); },
       result: response => { this.resultModal?.close(); this.resultModal = new ResultModal(this.app, response); this.resultModal.open(); },
     });
-    this.addSettingTab(new SearchSettingsTab(this.app, this, () => this.settings, change => this.patchSettings(change), () => this.purgeIndex()));
+    this.addSettingTab(new SearchSettingsTab(this.app, this, () => this.settings, change => this.patchSettings(change), () => this.purgeIndex(),
+      () => this.advancedHealth.snapshot(), () => this.checkAdvancedHealth()));
     this.addCommand({ id: 'run-synthetic-evidence-probe', name: 'Run synthetic evidence probe', callback: () => { void this.runProbe(); } });
     this.addCommand({ id: 'cancel-synthetic-evidence-probe', name: 'Cancel synthetic evidence probe', callback: () => this.controller?.cancel() });
     const invalidate = (file: TAbstractFile, oldPath?: string): void => {
@@ -107,7 +116,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     // A full reconciliation covers all source changes before layout readiness.
     this.app.workspace.onLayoutReady(() => {
       this.layoutReady = true;
-      if (!this.unloaded) void this.initializeStandalone();
+      if (!this.unloaded) { void this.initializeStandalone(); void this.initializeAdvanced(); }
     });
   }
   async openSearch(): Promise<void> {
@@ -136,6 +145,10 @@ export default class SyntheticEvidencePlugin extends Plugin {
       this.settings = settings;
       this.standaloneError = null;
       this.searchController.configure(settings.enabled, settings.paused);
+      if (JSON.stringify(before.advanced) !== JSON.stringify(settings.advanced)) {
+        await this.stopAdvanced();
+        if (settings.advanced.enabled && this.layoutReady && !this.unloaded) await this.initializeAdvanced();
+      }
       if (before.enabled !== settings.enabled) {
         this.lifecycleRevision++;
         await this.stopStandalone();
@@ -187,6 +200,37 @@ export default class SyntheticEvidencePlugin extends Plugin {
     if (!result.ok) { new Notice(`OKS: ${result.error}`); return; }
     try { await this.patchSettings(settings => { settings.paused = action === 'pause' || action === 'cancel'; }); }
     catch { new Notice('OKS: settings could not be saved.'); }
+  }
+  private stopAdvanced(): Promise<void> {
+    const stopping = this.advancedHealth.stop();
+    const adapter = this.app.vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter)) return stopping;
+    const key = resolve(adapter.getBasePath());
+    const previous = advancedBarriers.get(key);
+    const barrier = previous ? Promise.all([previous, stopping]).then(() => undefined) : stopping;
+    advancedBarriers.set(key, barrier);
+    void barrier.then(() => { if (advancedBarriers.get(key) === barrier) advancedBarriers.delete(key); });
+    return barrier;
+  }
+  /** Advanced is an independent explicit opt-in; a healthy transport is not a dense-ready leg. */
+  private initializeAdvanced(): Promise<void> {
+    if (!this.layoutReady || this.unloaded || !this.settings.advanced.enabled) return Promise.resolve();
+    if (this.advancedStartup) return this.advancedStartup;
+    const config = { ...this.settings.advanced };
+    const adapter = this.app.vault.adapter;
+    const key = adapter instanceof FileSystemAdapter ? resolve(adapter.getBasePath()) : null;
+    this.advancedStartup = (async () => {
+      if (key) await advancedBarriers.get(key);
+      if (!this.unloaded && this.settings.advanced.enabled &&
+          JSON.stringify(config) === JSON.stringify(this.settings.advanced))
+        await this.advancedHealth.start(config);
+    })().finally(() => { this.advancedStartup = undefined; });
+    return this.advancedStartup;
+  }
+  async checkAdvancedHealth(): Promise<void> {
+    if (this.unloaded || !this.settings.advanced.enabled) return;
+    await this.advancedStartup;
+    if (!this.unloaded && this.settings.advanced.enabled) await this.advancedHealth.start(this.settings.advanced);
   }
   private initializeStandalone(): Promise<void> {
     if (this.initializing) return this.initializing;
@@ -260,6 +304,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     this.searchController.dispose();
     this.app.workspace.detachLeavesOfType(SEARCH_VIEW);
     void this.stopStandalone();
+    void this.stopAdvanced();
     this.controller = undefined;
   }
 }

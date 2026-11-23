@@ -1,10 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, copyFile, rm, writeFile, readFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseMarkdown } from '../plugin/src/standalone/markdown';
 import { defaultSettings } from '../plugin/src/search/settings';
+const TEST_PYTHON = realpathSync(execFileSync('which',['python3']).toString().trim());
 // Controlled Node-only host adapter. Actual DOM/editor acceptance remains host smoke.
 const Module = require('node:module') as { _load: (name: string, ...args: unknown[]) => unknown };
 class HostPlugin {
@@ -207,4 +210,47 @@ test('B2: cold-disabled reload can purge only derived index without starting a w
     await replacement.standalone!.whenIdle();
     assert.equal(replacement.standalone!.status().status,'ready');
   } finally { replacement?.onunload(); await f.cleanup(); }
+});
+
+test('05B advanced health is opt-in, survives Standalone indexing and revokes child on disable', async () => {
+  const f = await fixture();
+  try {
+    await f.plugin.onload(); f.layout(); await f.internal.initializing;
+    await f.plugin.standalone!.whenIdle();
+    assert.equal(f.plugin.advancedHealth.snapshot().status,'disabled');
+    assert.equal(f.plugin.advancedHealth.pid,undefined);
+    await f.plugin.patchSettings(s => {s.advanced={enabled:true, profile:'local-stdio',
+      interpreter:TEST_PYTHON, entry:join(process.cwd(),'engine/persistent.py')};});
+    assert.equal(f.plugin.advancedHealth.snapshot().status,'ready');
+    assert.equal(f.plugin.searchController.status().capabilityReadiness.dense,'unavailable');
+    const pid=f.plugin.advancedHealth.pid!;
+    process.kill(pid,0);
+    assert.equal(f.plugin.standalone!.status().status,'ready');
+    await f.plugin.patchSettings(s => {s.advanced.enabled=false;});
+    assert.equal(f.plugin.advancedHealth.snapshot().status,'disabled');
+    assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
+    assert.equal(f.plugin.standalone!.status().status,'ready');
+  } finally { await f.cleanup(); }
+});
+test('05B advanced reload barrier waits for prior subprocess stop with explicit saved opt-in',async()=>{
+  const f=await fixture();
+  let replacement: InstanceType<typeof PluginClass>|undefined;
+  try {
+    await f.plugin.onload();f.layout();await f.internal.initializing;
+    await f.plugin.patchSettings(s=>{s.advanced={enabled:true,profile:'local-stdio',
+      interpreter:TEST_PYTHON,entry:join(process.cwd(),'engine/persistent.py')};});
+    const first=f.plugin.advancedHealth.pid!;
+    assert.ok(first);process.kill(first,0);
+    const saved=(f.plugin as unknown as {saved:unknown}).saved;
+    f.plugin.onunload();
+    replacement=new PluginClass(f.plugin.app,f.plugin.manifest);
+    Object.assign(replacement,{app:f.plugin.app,manifest:f.plugin.manifest,saved});
+    await replacement.onload();f.layout();
+    await (replacement as unknown as {advancedStartup:Promise<void>}).advancedStartup;
+    assert.equal(replacement.advancedHealth.snapshot().status,'ready');
+    assert.throws(()=>process.kill(first,0),{code:'ESRCH'});
+    const second=replacement.advancedHealth.pid!;
+    assert.ok(second && second!==first);
+    replacement.onunload();
+  } finally { replacement?.onunload();await f.cleanup(); }
 });
