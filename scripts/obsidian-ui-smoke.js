@@ -45,6 +45,35 @@
   await wait(() => app.workspace.getMostRecentLeaf()?.view?.editor?.getSelection() === hit.originalExcerpt, 'OPEN_SELECTION');
   assert(app.workspace.getMostRecentLeaf().view.file === file, 'EXACT_TFILE');
   await p.openSearch();
+  const metaFile = await app.vault.create('Meta-Образец.md',
+    '---\r\ntags: ["архитектура", "design"]\r\ncount: 9\r\n---\r\n# Метаданные\r\nSee [[target/note|Alias]] #поиск #архитектура\r\n');
+  await settle();
+  set('.oks-tag', '#архитектура'); await query('');
+  assert(element('.oks-results').children.length === 1, 'METADATA_TAG_ONLY');
+  assert(element('.oks-results pre').textContent.includes('#поиск'), 'METADATA_TAG_SOURCE');
+  set('.oks-tag', '');
+  set('.oks-link-target', 'target/note'); await query('');
+  assert(element('.oks-results').children.length === 1, 'METADATA_LINK_ONLY');
+  const linked = p.searchController.snapshot().response.hits[0];
+  assert(linked.sourceId === metaFile.path && linked.originalExcerpt.includes('[[target/note|Alias]]'),
+    'METADATA_LINK_ANCHOR');
+  set('.oks-link-target', 'Alias'); await query('');
+  assert(element('.oks-results').children.length === 0, 'METADATA_NO_ALIAS_MATCH');
+  set('.oks-link-target', '');
+  element('.oks-filter-enabled').checked = true;
+  element('.oks-filter-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+  set('.oks-filter-key','count'); set('.oks-filter-type','number'); set('.oks-filter-value','9');
+  await query('');
+  assert(element('.oks-results').children.length === 1
+    && element('.oks-results pre').textContent === 'count: 9', 'METADATA_PROPERTY_ONLY');
+  set('.oks-tag', '#поиск'); set('.oks-link-target', 'target/note');
+  await query(''); assert(element('.oks-results').children.length === 1, 'METADATA_AND');
+  set('.oks-filter-value', '7'); await query('');
+  assert(element('.oks-results').children.length === 0, 'METADATA_TYPED_AND_NEGATIVE');
+  element('.oks-filter-enabled').checked = false;
+  element('.oks-filter-enabled').dispatchEvent(new Event('change', { bubbles: true }));
+  set('.oks-tag', ''); set('.oks-link-target', '');
+  await app.vault.delete(metaFile); await settle();
   element('.oks-filter-enabled').checked = true;
   set('.oks-filter-key','count'); set('.oks-filter-type','number'); set('.oks-filter-value','7');
   await query('REQ-UI-42'); assert(element('.oks-results').children.length === 1, 'TYPED_NUMBER');
