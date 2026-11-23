@@ -8,7 +8,7 @@ Deliver accurate, inspectable, local retrieval over Obsidian vaults. The origina
 
 ## Execution profiles and MVP acceptance partition
 
-**Standalone is mandatory by default.** Installing only Obsidian and the plugin must suffice for local, offline Markdown lexical search: supported notes indexed locally, typed Properties filtering and link metadata, exact source navigation and provenance, source mutation/delete freshness, durable derived index, no separate interpreter/service/model provisioning or outbound content. UI and indexing implementation remains **planned**, not present in the current synthetic probe.
+**Standalone is mandatory by default.** Installing only Obsidian and the plugin must suffice for local, offline Markdown lexical search: supported notes indexed locally, typed Properties filtering and link metadata, exact source navigation and provenance, source mutation/delete freshness, durable derived index, no separate interpreter/service/model provisioning or outbound content. Plugin-native indexing (OKS-04A) and search UI (OKS-04B) are merged candidates; full MVP clean-install and security/resource acceptance remains assigned to OKS-05.
 
 **Bundled Advanced is optional:** plugin-bundled, plugin-managed inference/parsing assets and workers may add formats, OCR, real dense and hybrid retrieval **only after** Obsidian API/distribution, offline, license, binary size, cancellation and resource verification. No manual dependency installation. **External Backend is optional and explicitly configured:** a separately managed authenticated local service may provide advanced features; it is never a prerequisite for Standalone and no content is transmitted without clear opt-in. No cloud communication by default.
 
