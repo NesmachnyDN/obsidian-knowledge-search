@@ -6,7 +6,7 @@ OKS is a planned local-first hybrid search and retrieval plugin for Obsidian, de
 
 ## Project status
 
-Pre-alpha. Standalone Markdown lexical indexing, search UI, a release-shaped package candidate and canonical opt-in advanced ingestion have landed in `develop`; this does **not** imply final MVP acceptance or a production-ready AI API. The mandatory base is **Obsidian + OKS plugin only**, with autonomous offline text-occurrence/Properties search and without additional software, network or manual runtime setup. The revised AI-provider requirements are documented in ADR-0011; implementation and acceptance remain separately gated.
+Pre-alpha. Standalone Markdown lexical indexing, search UI, a release-shaped package candidate and canonical opt-in advanced ingestion have landed in `develop`; this does **not** imply final MVP acceptance or a production-ready AI API. The mandatory base is **Obsidian + OKS plugin only**, with autonomous offline text-occurrence/Properties search and without additional software, network or manual runtime setup. The revised AI-provider requirements are documented in ADR-0015; implementation and acceptance remain separately gated.
 
 ## Goals
 
@@ -25,7 +25,7 @@ Desktop Linux is the first supported target. Other desktop platforms and Obsidia
 - **Optional AI API:** embedding/dense and genuine hybrid, reranker and LLM providers independently configurable through local or cloud APIs. Cloud is disabled until explicit approved source-scoped egress. A local API may work without Internet when tested; cloud requires connectivity.
 - **Optional advanced extraction:** supported PDF/DOCX/OCR via separately tested opt-in processing; not required for Standalone Markdown.
 
-Exactly one active local dense index binds to the chosen embedding model. A model switch triggers a staged full reindex and atomic activation, not permanent storage of indexes for every candidate. Basic search remains available while the AI API is unavailable. Mandatory MVP Gate A and conditional AI/advanced-format acceptance are defined in [ADR-0011](docs/adr/0011-api-first-ai-optional-dense.md) and the [specification](docs/SPEC.md); local offline AI is not an MVP-wide release gate.
+Exactly one active local dense index binds to the chosen embedding model. A model switch triggers a staged full reindex and atomic activation, not permanent storage of indexes for every candidate. Basic search remains available while the AI API is unavailable. Mandatory MVP Gate A and conditional AI/advanced-format acceptance are defined in [ADR-0015](docs/adr/0015-api-first-ai-optional-dense.md) and the [specification](docs/SPEC.md); local offline AI is not an MVP-wide release gate.
 
 ## Project documentation
 

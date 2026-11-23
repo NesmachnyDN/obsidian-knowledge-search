@@ -1,6 +1,6 @@
 # AI API providers and model evaluation plan
 
-**Status:** Candidate inventory and measurement plan (2026-11-23); not a model-selection or provider-approval record. Governed by [ADR-0011](adr/0011-api-first-ai-optional-dense.md) and [SECURITY.md](../SECURITY.md). Catalogs, availability, quotas, latency and prices are mutable and must be verified against the actual account and API before procurement or production activation.
+**Status:** Candidate inventory and measurement plan (2026-11-23); not a model-selection or provider-approval record. Governed by [ADR-0015](adr/0015-api-first-ai-optional-dense.md) and [SECURITY.md](../SECURITY.md). Catalogs, availability, quotas, latency and prices are mutable and must be verified against the actual account and API before procurement or production activation.
 
 ## Candidate shortlist
 
@@ -11,7 +11,7 @@
 | Embedding | Giga-Embeddings-instruct-480M | Russian-language retrieval hypothesis, compact model | Verify actual API model ID/availability |
 | Embedding | Giga-Embeddings-instruct-3B | Russian-language retrieval quality hypothesis; compare incremental benefit and cost | Verify actual API model ID/availability |
 | Rerank | Qwen/Qwen3-Reranker-0.6B | Prioritized cross-encoder evaluation for multilingual technical passages | Preferred trial, not accepted winner |
-| Rerank | BAAI/bge-reranker-v2-m3 | Lower-cost alternative and comparative baseline | Test candidate |
+| Rerank | BAAI/bge-reranker-v2-m3 | Compare retrieval quality, latency and cost; cheaper operation is an unverified hypothesis | Test candidate |
 | Generation | Model/API TBD | Optional answer synthesis grounded in returned EvidenceHits | No selected model |
 
 Published model scores from different versions or test protocols are **not** directly comparable, and no Russian-corpus superiority is asserted until an OKS-controlled evaluation. The specific Giga model identities/availability must not be inferred from a marketing page when the live API catalog differs.

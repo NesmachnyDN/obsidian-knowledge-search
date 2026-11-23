@@ -4,7 +4,7 @@ OKS is intended to process vault contents locally. Design goals only until valid
 
 Report vulnerabilities privately to the repository maintainer via GitHub private vulnerability reporting if enabled. Do not include sensitive details in public issues. No guaranteed response SLA.
 
-## Optional local or cloud AI API egress (ADR-0011)
+## Optional local or cloud AI API egress (ADR-0015)
 
 The offline text-occurrence/Properties baseline never requires a provider, secret, outbound request, model download or listener. An AI API may be local or remote only by explicit user configuration. **Configured credentials are not consent to transmit content.** Cloud mode is disabled by default; before sending any query, document chunk, candidate passage, expansion context or embedding input, enforce per-Vault/per-source scope and classification policy, deny unknown or forbidden content, minimize transmitted text, and present the external-processing boundary clearly. Check endpoint allowlists, TLS validation, API token scope, provider jurisdiction/routing/retention contract and user authorization. Avoid unapproved third-party routing and sending private data to public CI or benchmark services.
 
