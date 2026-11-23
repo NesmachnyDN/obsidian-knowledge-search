@@ -15,7 +15,7 @@
 | Check | Result |
 |---|---|
 | `npm run typecheck` | PASS; TypeScript strict |
-| `npm test` | PASS; 177 Node tests, 0 failed or skipped, including B1–B9, mixed-case/Unicode and derived-only purge tests |
+| `npm test` | PASS; 180 Node tests, 0 failed or skipped, including B1–B9, mixed-case/Unicode and derived-only purge tests |
 | `npm run test:python` | PASS; 124 Python tests, 5 intentional skips, no failures (outside the Codex sandbox) |
 | `npm run build` | PASS; main bundle, worker and manifest |
 | `npm run licenses` | PASS; no new runtime dependencies |
@@ -24,7 +24,7 @@
 | Real `scripts/obsidian-host-smoke.sh` | PASS on Obsidian Desktop/CLI 1.15.1 in isolated Xvfb/electron HOME/XDG profile, including extended UI eval driver |
 | Exact-HEAD CI and independent reviewer | PENDING — publication and review are separate non-negotiable gates |
 
-**Actual host smoke evidence:** `OBSIDIAN_UI_SMOKE_PASS` validates mounted/visible ItemView, lexical query, typed-filter positive/negative, raw `<img>` text not executable DOM, emoji/Unicode/CRLF selection in actual Obsidian editor, stale-click suppression, stale digest rejection, modify/rename/delete, pause/resume/cancel/rebuild, confirmed disabled-only purge of derived index without source notes deletion, versioned API, dense mode refusal, disabled/re-enabled worker and metadata-only diagnostics. `OBSIDIAN_HOST_SMOKE_PASS` additionally validates original-line SHA, command-based navigation, persisted recovered generation, `plugin:reload` and termination of old Worker. Script exits 0; `OBSIDIAN_HOST_STORAGE_PASS` verifies private XDG index outside temporary Vault. This is not a mock/UI-only simulation.
+**Actual host smoke evidence:** `OBSIDIAN_UI_SMOKE_PASS` validates mounted/visible ItemView, lexical query, typed-filter positive/negative, raw `<img>` text not executable DOM, emoji/Unicode/CRLF selection in actual Obsidian editor, stale-click suppression, stale digest rejection, modify/rename/delete, pause/resume/cancel/rebuild, actual Settings dialog toggle/refresh, confirmation and disabled-only purge of derived index without source notes deletion, versioned API, dense mode refusal, disabled/re-enabled worker and metadata-only diagnostics. `OBSIDIAN_HOST_SMOKE_PASS` additionally validates original-line SHA, command-based navigation, persisted recovered generation, `plugin:reload` and termination of old Worker. Script exits 0; `OBSIDIAN_HOST_STORAGE_PASS` verifies private XDG index outside temporary Vault. This is not a mock/UI-only simulation.
 
 ## Performance and resource measurements
 
@@ -32,15 +32,15 @@ All numbers are measured on **synthetic** data. The unchanged retrieval benchmar
 
 | Metric | 04A baseline | Latest 04B benchmark |
 |---|---:|---:|
-| Initial index build, ms | 173.94 | 145.68 |
-| Incremental rebuild, ms | 48.03 | 63.34 |
-| Query p50 / p95, ms | 0.288 / 2.237 | 0.670 / 2.794 |
-| Process RSS, MiB | 85.90 | 84.58 |
-| Max event-loop delay, ms | 13.71 | 11.02 |
+| Initial index build, ms | 173.94 | 145.89 |
+| Incremental rebuild, ms | 48.03 | 60.08 |
+| Query p50 / p95, ms | 0.288 / 2.237 | 0.625 / 3.225 |
+| Process RSS, MiB | 85.90 | 84.38 |
+| Max event-loop delay, ms | 13.71 | 11.98 |
 | Index generation, bytes | 77,372 | 77,372 |
 | Query cases / returned-stale / invalid locators | 31 / 0 / 0 | 31 / 0 / 0 |
 
-The Obsidian host script reports separate on-screen UI search p50/p95, UI event-loop delay and launcher RSS where measurable. Host metrics are smoke/short-run observations, **not** production-scale or a process-tree total memory SLA. Current bundle sizes after purge UI: `main.js` approximately 103 KiB, `standalone-worker.js` 10,471 bytes and `manifest.json` 275 bytes. No external Python runtime needed for host search.
+Actual nine end-to-end visible Obsidian UI queries (including test polling): p50 **30.80 ms**, p95 **31.00 ms**, maximum sampled UI event-loop delay **0.30 ms**. The test poll cadence is ~30 ms. Obsidian total process-tree RSS was not separately measured; Node harness RSS above must not be misrepresented as host RSS. These are short-run smoke measurements, **not** a production resource SLA. Current bundle sizes after purge UI: `main.js` approximately 103 KiB, `standalone-worker.js` 10,471 bytes and `manifest.json` 275 bytes. No external Python runtime needed for host search.
 
 ## Limitations and review gates
 

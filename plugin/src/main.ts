@@ -7,7 +7,7 @@ import { BoundedVaultReader, privateIndexPath } from './standalone/source';
 import { GenerationStore } from './standalone/storage';
 import { WorkerMarkdownParser } from './standalone/worker';
 import { StandaloneError } from './standalone/contracts';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { SearchController, StandaloneApi } from './search/controller';
 import { purgeDerivedIndex } from './search/purge';
 import { defaultSettings, parseSettings, type SearchSettings } from './search/settings';
@@ -20,6 +20,10 @@ import type { SourceNavigator } from './search/navigation';
 const barrierKey = Symbol.for('oks.standalone.close-barriers');
 const host = globalThis as typeof globalThis & { [barrierKey]?: Map<string, Promise<void>> };
 const barriers = host[barrierKey] ??= new Map<string, Promise<void>>();
+// Also serialize a cold-disabled cache purge against a new instance's writer.
+const pathBarrierKey = Symbol.for('oks.standalone.path-barriers');
+const pathHost = globalThis as typeof globalThis & { [pathBarrierKey]?: Map<string, Promise<void>> };
+const pathBarriers = pathHost[pathBarrierKey] ??= new Map<string, Promise<void>>();
 
 class ResultModal extends Modal {
   constructor(app: App, private readonly response: Response) { super(app); }
@@ -74,7 +78,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
       status: value => { this.resultModal?.close(); new Notice(`Synthetic probe: ${value}`); },
       result: response => { this.resultModal?.close(); this.resultModal = new ResultModal(this.app, response); this.resultModal.open(); },
     });
-    this.addSettingTab(new SearchSettingsTab(this.app, this, () => this.settings, settings => this.updateSettings(settings), () => this.purgeIndex()));
+    this.addSettingTab(new SearchSettingsTab(this.app, this, () => this.settings, change => this.patchSettings(change), () => this.purgeIndex()));
     this.addCommand({ id: 'run-synthetic-evidence-probe', name: 'Run synthetic evidence probe', callback: () => { void this.runProbe(); } });
     this.addCommand({ id: 'cancel-synthetic-evidence-probe', name: 'Cancel synthetic evidence probe', callback: () => this.controller?.cancel() });
     const invalidate = (file: TAbstractFile, oldPath?: string): void => {
@@ -112,12 +116,20 @@ export default class SyntheticEvidencePlugin extends Plugin {
     await leaf.setViewState({ type: SEARCH_VIEW, active: true });
     if (!this.unloaded) await this.app.workspace.revealLeaf(leaf);
   }
+  /** Explicit complete replacement (tests/machine adapter); never used by individual settings controls. */
   updateSettings(next: SearchSettings): Promise<void> {
-    const settings = parseSettings(next);
+    const snapshot = parseSettings(next);
+    return this.queueSettings(() => snapshot);
+  }
+  /** Apply a field-level change at the dequeue boundary to prevent lost updates. */
+  patchSettings(change: (s: SearchSettings) => void): Promise<void> {
+    return this.queueSettings(current => { const next = structuredClone(current); change(next); return next; });
+  }
+  private queueSettings(change: (current: SearchSettings) => SearchSettings): Promise<void> {
     const task = this.settingsQueue.then(async () => {
-      // Never reopen the generation writer while a derived-only purge is in progress.
       if (this.purgeInFlight) await this.purgeInFlight.catch(() => {});
       if (this.unloaded) return;
+      const settings = parseSettings(change(this.settings));
       await this.saveData(settings);
       if (this.unloaded) return;
       const before = this.settings;
@@ -139,27 +151,32 @@ export default class SyntheticEvidencePlugin extends Plugin {
   /** A deliberate disabled-only operation, serialized against restart and reload. */
   async purgeIndex(): Promise<number> {
     if (this.purgeInFlight) throw new StandaloneError('BUSY');
-    if (this.unloaded || this.settings.enabled || this.standalone || this.initializing || !this.rootId)
+    if (this.unloaded || this.settings.enabled || this.standalone || this.initializing)
       throw new StandaloneError('LIFECYCLE_INVALID');
-    const rootId = this.rootId;
-    const job = this.purgeVerifiedDerivedIndex(rootId);
-    this.purgeInFlight = job;
-    // A new plugin instance must wait before opening the same generation store.
-    const barrier = job.then(() => undefined, () => undefined);
-    barriers.set(rootId, barrier);
-    void barrier.then(() => {
-      if (this.purgeInFlight === job) this.purgeInFlight = undefined;
-      if (barriers.get(rootId) === barrier) barriers.delete(rootId);
-    });
-    return job;
-  }
-  private async purgeVerifiedDerivedIndex(rootId: string): Promise<number> {
     const adapter = this.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter)) throw new StandaloneError('UNSUPPORTED_FILESYSTEM');
     const root = adapter.getBasePath();
+    const key = resolve(root);
+    if (pathBarriers.has(key)) throw new StandaloneError('BUSY');
+    const job = this.purgeVerifiedDerivedIndex(root, this.rootId);
+    this.purgeInFlight = job;
+    // Protect even a fresh plugin reloaded while persisted settings are disabled
+    // (no cached rootId yet). Acquire by trusted adapter root before first await.
+    const barrier = job.then(() => undefined, () => undefined);
+    pathBarriers.set(key, barrier);
+    void barrier.then(() => {
+      if (this.purgeInFlight === job) this.purgeInFlight = undefined;
+      if (pathBarriers.get(key) === barrier) pathBarriers.delete(key);
+    });
+    return job;
+  }
+  private async purgeVerifiedDerivedIndex(root: string, expectedRootId?: string): Promise<number> {
     const provider = await BoundedVaultReader.open(root,
       () => this.app.vault.getMarkdownFiles().map(file => file.path));
-    if (this.unloaded || this.standalone || this.initializing || provider.rootId !== rootId)
+    // Prior writer may still be closing after a disabled-state transition.
+    await barriers.get(provider.rootId);
+    if (this.unloaded || this.settings.enabled || this.standalone || this.initializing
+        || (expectedRootId !== undefined && expectedRootId !== provider.rootId))
       throw new StandaloneError('LIFECYCLE_INVALID');
     const dir = privateIndexPath(root, provider.rootId, this.manifest.id);
     return purgeDerivedIndex(dir, provider.rootId, dir);
@@ -168,7 +185,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     this.navigator?.invalidate();
     const result = this.searchController.control(action);
     if (!result.ok) { new Notice(`OKS: ${result.error}`); return; }
-    try { await this.updateSettings({ ...this.settings, paused: action === 'pause' || action === 'cancel' }); }
+    try { await this.patchSettings(settings => { settings.paused = action === 'pause' || action === 'cancel'; }); }
     catch { new Notice('OKS: settings could not be saved.'); }
   }
   private initializeStandalone(): Promise<void> {
@@ -184,10 +201,13 @@ export default class SyntheticEvidencePlugin extends Plugin {
     try {
       if (!(adapter instanceof FileSystemAdapter)) throw new StandaloneError('UNSUPPORTED_FILESYSTEM');
       const root = adapter.getBasePath();
+      await pathBarriers.get(resolve(root));
+      if (!valid()) return;
       const provider = await BoundedVaultReader.open(root, () => this.app.vault.getMarkdownFiles().map(file => file.path));
       if (!valid()) return;
       this.rootId = provider.rootId;
       await barriers.get(provider.rootId);
+      await pathBarriers.get(resolve(root));
       if (!valid()) return;
       const store = await GenerationStore.open(privateIndexPath(root, provider.rootId, this.manifest.id), provider.rootId);
       if (!valid()) return;

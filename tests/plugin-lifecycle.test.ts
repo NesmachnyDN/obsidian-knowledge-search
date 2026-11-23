@@ -161,3 +161,50 @@ test('derived purge cannot race the re-enabled writer; original source stays int
     assert.equal(await readFile(join(f.vault,'fixture.md'),'utf8'), '# Synthetic\nREQ-LIFE-1: local only.\n');
   } finally { await f.cleanup(); }
 });
+
+test('B1: queued field edits cannot accidentally re-enable indexing or erase pause', async () => {
+  const f = await fixture();
+  try {
+    await f.plugin.onload(); f.layout(); await f.internal.initializing; await f.plugin.standalone!.whenIdle();
+    const original = f.plugin.saveData.bind(f.plugin);
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    let writes = 0;
+    Object.assign(f.plugin, { saveData: async (value: unknown) => {
+      if (++writes === 1) await blocked;
+      await original(value);
+    } });
+    const disable = f.plugin.patchSettings(s => { s.enabled = false; });
+    const filter = f.plugin.patchSettings(s => { s.propertiesEnabled = true; });
+    const pause = f.plugin.patchSettings(s => { s.paused = true; });
+    await Promise.resolve(); release();
+    await Promise.all([disable, filter, pause]);
+    assert.equal(f.plugin.settings.enabled, false);
+    assert.equal(f.plugin.settings.propertiesEnabled, true);
+    assert.equal(f.plugin.settings.paused, true);
+    assert.equal(f.plugin.standalone, undefined);
+    assert.equal((f.plugin as unknown as { saved: { enabled: boolean; propertiesEnabled: boolean; paused: boolean } }).saved.enabled, false);
+  } finally { await f.cleanup(); }
+});
+
+test('B2: cold-disabled reload can purge only derived index without starting a worker', async () => {
+  const f = await fixture(); let replacement: InstanceType<typeof PluginClass> | undefined;
+  try {
+    await f.plugin.onload(); f.layout(); await f.internal.initializing; await f.plugin.standalone!.whenIdle();
+    await f.plugin.patchSettings(s => { s.enabled = false; });
+    f.plugin.onunload();
+    const app = f.plugin.app;
+    replacement = new PluginClass(app as never, { id: 'oks-synthetic-evidence' } as never);
+    const saved = (f.plugin as unknown as { saved: unknown }).saved;
+    Object.assign(replacement, { app, manifest: { id: 'oks-synthetic-evidence' }, saved });
+    await replacement.onload(); f.layout();
+    assert.equal(replacement.standalone, undefined);
+    assert.equal((replacement as unknown as { rootId?: string }).rootId, undefined);
+    const count = await replacement.purgeIndex();
+    assert.ok(count >= 1);
+    assert.equal(await readFile(join(f.vault,'fixture.md'),'utf8'), '# Synthetic\nREQ-LIFE-1: local only.\n');
+    await replacement.patchSettings(s => { s.enabled = true; });
+    await replacement.standalone!.whenIdle();
+    assert.equal(replacement.standalone!.status().status,'ready');
+  } finally { replacement?.onunload(); await f.cleanup(); }
+});

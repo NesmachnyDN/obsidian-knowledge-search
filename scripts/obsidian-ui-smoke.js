@@ -73,16 +73,43 @@
   click('.oks-export');
   const diagnostic = element('.oks-diagnostics').value;
   assert(!diagnostic.includes('REQ-') && !diagnostic.includes('sourceId') && !diagnostic.includes('properties') && !diagnostic.includes('.md'), 'DIAGNOSTICS');
-  // Disable/re-enable must terminate the old real Worker and create a new owner.
+  // Exercise actual Obsidian Settings UI, not only direct plugin methods.
   const parser = p.standalone.parser;
-  await p.updateSettings({ ...p.settings, enabled: false });
-  assert(parser.stopped && !p.standalone && !p.navigator, 'DISABLE_WORKER');
+  assert(app.setting?.open && app.setting?.openTabById, 'SETTINGS_DIALOG_API');
+  app.setting.open();
+  await new Promise(r => setTimeout(r, 450));
+  app.setting.openTabById(p.manifest.id);
+  await new Promise(r => setTimeout(r, 250));
+  // Obsidian may own the settings DOM in a different Document than CLI eval.
+  const settingDoc = app.setting.activeTab.containerEl.ownerDocument;
+  const settingRow = name => [...app.setting.activeTab.containerEl.querySelectorAll('.setting-item')]
+    .find(el => el.querySelector('.setting-item-name')?.textContent?.trim() === name);
+  await wait(() => settingRow('Enable Standalone indexing and search'), 'SETTINGS_VISIBLE');
+  const toggleSetting = name => {
+    const row = settingRow(name); assert(row, 'SETTINGS_ROW');
+    const toggle = row.querySelector('.checkbox-container'); assert(toggle, 'SETTINGS_TOGGLE');
+    toggle.click();
+  };
+  toggleSetting('Enable Standalone indexing and search');
+  await wait(() => !p.settings.enabled && !p.standalone && parser.stopped, 'SETTINGS_DISABLE');
   const disabled = await p.api.request({ apiVersion: 1, operation: 'search', request });
   assert(!disabled.ok && disabled.error === 'DISABLED', 'DISABLED_SEARCH');
-  const cleared = await p.purgeIndex();
-  assert(cleared >= 1, 'PURGE_DERIVED_ONLY');
+  await wait(() => settingRow('Clear derived Standalone index')?.querySelector('button')?.disabled === false,
+    'PURGE_BUTTON_REFRESH');
+  settingRow('Clear derived Standalone index').querySelector('button').click();
+  const modal = () => [...settingDoc.querySelectorAll('.modal-container, .modal')]
+    .find(el => el.textContent?.includes('Confirm derived index cleanup'));
+  await wait(() => modal(), 'PURGE_CONFIRM_MODAL');
+  const confirm = [...modal().querySelectorAll('button')].find(el => el.textContent?.includes('Delete derived files'));
+  assert(confirm, 'PURGE_CONFIRM_BUTTON'); confirm.click();
+  await wait(() => !modal(), 'PURGE_CONFIRM_CLOSED');
+  const remaining = await p.purgeIndex();
+  assert(remaining === 0, 'PURGE_VIA_REAL_SETTINGS');
   assert(app.vault.getAbstractFileByPath('first.md') !== null, 'PURGE_NOTES_PRESERVED');
-  await p.updateSettings({ ...p.settings, enabled: true, propertiesEnabled: false }); await settle();
+  toggleSetting('Enable Standalone indexing and search');
+  await wait(() => p.settings.enabled && p.standalone, 'SETTINGS_ENABLE');
+  await settle();
+  app.setting.close(); await p.openSearch();
   assert(p.standalone.parser !== parser && p.standalone.status().status === 'ready', 'REENABLE');
   // Leave a real result for the shell's supported CLI command navigation check.
   await query('REQ-OKS-SMOKE');
@@ -100,5 +127,5 @@
     }
   } finally { clearInterval(ticker); }
   const values = uiLatency.sort((a, b) => a - b);
-  return `OBSIDIAN_UI_SMOKE_PASS: mounted text-only lexical typed-filter unicode-crlf exact-navigation stale-click stale-hash rename delete pause resume cancel rebuild purge api disabled-worker diagnostics uiP50Ms=${values[4].toFixed(2)} uiP95Ms=${values[8].toFixed(2)} uiEventLoopDelayMaxMs=${maxDelay.toFixed(2)}`;
+  return `OBSIDIAN_UI_SMOKE_PASS: mounted text-only lexical typed-filter unicode-crlf exact-navigation stale-click stale-hash rename delete pause resume cancel rebuild real-settings-dialog purge api disabled-worker diagnostics uiP50Ms=${values[4].toFixed(2)} uiP95Ms=${values[8].toFixed(2)} uiEventLoopDelayMaxMs=${maxDelay.toFixed(2)}`;
 })()

@@ -1,15 +1,16 @@
 import { Modal, PluginSettingTab, Setting, Notice, type App, type Plugin } from 'obsidian';
-import { parseSettings, type SearchSettings } from './settings';
+import type { SearchSettings } from './settings';
 export class SearchSettingsTab extends PluginSettingTab {
   constructor(app: App, plugin: Plugin, private readonly current: () => SearchSettings,
-    private readonly saveSettings: (settings: SearchSettings) => Promise<void>,
+    private readonly patchSettings: (change: (s: SearchSettings) => void) => Promise<void>,
     private readonly purge: () => Promise<number>) { super(app, plugin); }
   display(): void {
     const root = this.containerEl; root.replaceChildren();
     const save = async (change: (s: SearchSettings) => void): Promise<void> => {
-      const next = structuredClone(this.current()); change(next);
-      try { await this.saveSettings(parseSettings(next)); }
-      catch { new Notice('OKS: settings could not be saved.'); this.display(); }
+      try { await this.patchSettings(change); }
+      catch { new Notice('OKS: settings could not be saved.'); }
+      // Reflect the committed state, including the derived-purge button guard.
+      this.display();
     };
     for (const [key, name, desc] of [
       ['enabled','Enable Standalone indexing and search','Offline Markdown lexical search. Disabling stops the worker and clears results.'],
