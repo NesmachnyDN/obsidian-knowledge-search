@@ -1,6 +1,6 @@
 # ADR-0008 — Host-private, plugin-managed transactional Standalone index
 
-**Status:** Proposed (pending independent OKS-04A full-diff review). **Decision owner:** OKS maintainers. **Supersedes:** no accepted prior Standalone-native storage decision; ADR-0003's Python SQLite experiment is retained unchanged.
+**Status:** Accepted for Linux Standalone OKS-04A upon independent exact-HEAD APPROVE and squash merge of PR #11 on 2026-11-23 (`a8ad950201fd7a5caebb8639b147d70f6f53a964`); release and cross-OS gates remain separate. **Decision owner:** OKS maintainers. **Supersedes:** no accepted prior Standalone-native storage decision; ADR-0003's Python SQLite experiment is retained unchanged.
 
 ## Decision and security boundary
 

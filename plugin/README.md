@@ -1,6 +1,6 @@
 # Obsidian Knowledge Search — Linux Standalone Markdown core (OKS-04A)
 
-**Status:** Candidate native core, pending independent exact-HEAD full-diff review, **not** a production-ready search UI, plugin release or full MVP. The existing OKS-01A Python-backed synthetic evidence probe is retained only as an explicitly configured, manually run legacy diagnostic. It is **not** required for Standalone.
+**Status:** OKS-04A core merged in PR #11; OKS-04B adds a candidate search view, settings, status, verified source navigation and versioned in-process API. Independent review and successful real-host 04B smoke are still required; this is not a production plugin release or full MVP. The existing OKS-01A Python-backed synthetic evidence probe is retained only as an explicitly configured, manually run legacy diagnostic. It is **not** required for Standalone.
 
 ## Runtime and installation
 
@@ -20,7 +20,7 @@ npm run licenses
 npm run build
 ```
 
-Copy `dist/main.js`, `dist/standalone-worker.js` and `dist/manifest.json` to a **disposable synthetic** Vault at `.obsidian/plugins/oks-synthetic-evidence/`; enable the community plugin only in that disposable Vault. The plugin name/ID remains the historical development ID in 04A. `plugin/manifest.json` declares desktop-only. UI, settings, source navigation and final public package name are **OKS-04B**.
+Copy `dist/main.js`, `dist/standalone-worker.js` and `dist/manifest.json` to a **disposable synthetic** Vault at `.obsidian/plugins/oks-synthetic-evidence/`; enable the community plugin only in that disposable Vault. The plugin name/ID remains the historical development ID in 04A. `plugin/manifest.json` declares desktop-only. The OKS-04B candidate uses the same package ID; final public naming/distribution is deferred.
 
 ## Native data, storage and privacy
 
@@ -32,27 +32,27 @@ Copy `dist/main.js`, `dist/standalone-worker.js` and `dist/manifest.json` to a *
 
 Resource limits: 512 Markdown sources, 65,536 bytes per source, 32,768 source blocks, 16 MiB maximum generation, 512 UTF-8 bytes/query, up to 50 hits, 32 typed predicates, one index rebuild at a time. Indexing parses Markdown in a bundled, bounded browser Web Worker (Blob URL, 5-second per-source deadline) rather than the Obsidian UI thread; the single-flight generation writer and source checks use cooperative asynchronous work. The browser worker is not a separate installed runtime, service or model. This does not imply a hard isolated Web Worker memory quota or compatibility with a malicious concurrently renaming filesystem. Larger Vaults fail with explicit diagnostic rather than silent partial success.
 
-## CLI development smoke (disposable Vault only)
+## Search view and controls
 
-With Obsidian 1.15.1+ running and its CLI enabled in the disposable testing profile, use developer evaluation for a native query until the 04B UI exists. **These developer commands are not a supported end-user search API**.
+Run **Open Standalone search** in the command palette. Enter a bounded lexical query, choose Top K (1–50), and press Search or Enter. Results render original excerpts and exact source paths as text only. **Verify and open** freshly authenticates source bytes/locator and selects the original physical line, including Unicode/emoji and CRLF. **Verify and open first search source** is also available as a command. Source changes clear displayed rows; stale clicks fail closed.
 
-```js
-const core = app.plugins.plugins["oks-synthetic-evidence"]?.standalone;
-core?.status();
-await core?.search({
-  protocolVersion: 2,
-  requestId: "synthetic-test",
-  query: "REQ-OKS-SMOKE",
-  requestedMode: "lexical",
-  limit: 10
-});
+The view shows actual lexical readiness, unavailable dense/hybrid, generation ID, source/record counters, busy state, errors and maintenance warnings. Pause/resume/cancel/rebuild are available in the view and command palette. Cancel during publication can be deferred; no committed work is falsely reported undone. Settings control indexing/search enablement, paused state, default Top K and opt-in typed Property controls. Settings migration/validation is strict. Advanced backend configuration is always inactive and never connects or downloads anything.
+
+**Export safe diagnostics** produces selectable JSON in the view with only allowlisted status metadata. Copy that text for diagnostics; do not export search results to public reports. Closing a view releases subscriptions/timers; disabling/unloading stops the worker. Derived host-private cache normally persists after disable/uninstall. The settings tab includes a confirmed, disabled-only cleanup of recognized derived index files, preserving all Vault notes; re-enabling builds a fresh index.
+
+## Versioned API and real-host smoke
+
+The [API v1 reference](../docs/standalone-api.md) documents exact envelope validation, native protocol-v2 response semantics and supported `obsidian eval code=...` commands. Use `plugin.api.request(...)`; the historical `standalone` engine field is an internal developer hook, not the stable interface.
+
+```sh
+bash scripts/obsidian-host-smoke.sh
 ```
 
-Use `core.rebuild()`, `core.cancel()`, `core.resume()` and `core.whenIdle()` in developer console to test lifecycle; consumer UI controls and status/error presentation are 04B. In the real synthetic Obsidian CLI smoke, native lexical retrieval returned one exact original line; an edit caused reindex and subsequent `plugin:reload` restored a ready generation. Tests use isolated synthetic fixtures and host-local temporary profiles only. No production Vaults were used.
+The script installs into a disposable synthetic Vault with separate HOME/XDG/Electron profile, opens the real ItemView through a CLI command, clicks controls, checks typed filters/text-only rendering and exact editor selection, tests source mutation/rename/delete, lifecycle and API refusal, and verifies reload persistence/worker termination. It never uses a production Vault. The independent host invocation through Remote Desktop Commander passed with Obsidian Desktop 1.15.1 in a disposable Vault (2026-11-23). The Codex implementation sandbox could not create Xvfb sockets; that isolated environment failure is not the actual host outcome. See [candidate evidence](../benchmarks/standalone/04b-validation.md).
 
 ## Limitations and legacy diagnostic
 
-- Markdown lexical-only. No PDF/DOCX/OCR, embeddings, real dense/hybrid, reranker, graph traversal or UI yet. Unsupported modes return `CAPABILITY_UNAVAILABLE`, not a lexical result mislabeled hybrid.
+- Markdown lexical-only. No PDF/DOCX/OCR, embeddings, real dense/hybrid, reranker, graph traversal or semantic retrieval. Unsupported modes return `CAPABILITY_UNAVAILABLE`, not a lexical result mislabeled hybrid.
 - Typed Properties support unambiguous YAML subset of strings, finite numbers, booleans, ISO dates, null and scalar lists. No arbitrary YAML objects/anchors, implicit coercion or external execution. wiki-link targets are retained as strings; graph traversal is deliberately absent.
 - First supported execution target is Linux desktop with host filesystem APIs and local fsync/rename. No cross-OS or full clean-install/release claim.
 - The manually invoked legacy `Run synthetic evidence probe` command still uses a maintainer-configured Python interpreter for OKS-01A regression only; it is disabled by default and is **outside Standalone**. For historical probe acceptance and its independent process safeguards, see [OKS-01A contract](../docs/prompts/OKS-01A.md) and [ADR-0002](../docs/adr/0002-first-vertical-and-experiment-gates.md). Do not enable it for normal native indexing.
