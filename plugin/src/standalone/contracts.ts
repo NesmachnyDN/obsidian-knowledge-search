@@ -28,10 +28,11 @@ export type IndexGeneration = {
   sourceVersionSet: { sourceId: string; sha256: string }[];
   lexicalIndexId: typeof SCHEMA; readiness: 'ready'; documents: SourceVersion[];
 };
+export type SearchMetadata = { tag?: string; linkTarget?: string };
 export type SearchRequest = {
   protocolVersion: typeof PROTOCOL; requestId: string; query: string;
-  requestedMode: 'lexical' | 'dense' | 'hybrid'; scope?: string[];
-  limit: number; predicates?: Predicate[];
+  requestedMode: 'lexical' | 'dense' | 'hybrid'; matchMode?: 'terms' | 'literal'; scope?: string[];
+  limit: number; predicates?: Predicate[]; metadata?: SearchMetadata;
 };
 export type EvidenceHit = {
   sourceId: string; sourceSha256: string; originalExcerpt: string;
@@ -84,13 +85,27 @@ export function validProperty(value: unknown, predicate = false): value is Typed
     || (value.valueType === 'number' && typeof v === 'number' && Number.isFinite(v))
     || (value.valueType === 'date' && typeof v === 'string' && validDate(v));
 }
+function validMetadata(value: unknown): value is SearchMetadata {
+  if (!isRecord(value) || !Object.keys(value).length
+    || Object.keys(value).some(key => !['tag', 'linkTarget'].includes(key))) return false;
+  if (value.tag !== undefined && (typeof value.tag !== 'string'
+    || Buffer.byteLength(value.tag) > 256 || !/^#?[\p{L}\p{N}_/-]+$/u.test(value.tag))) return false;
+  if (value.linkTarget !== undefined && (typeof value.linkTarget !== 'string'
+    || Buffer.byteLength(value.linkTarget) > 256 || value.linkTarget.trim() !== value.linkTarget
+    || !value.linkTarget || /[\0\r\n|\[\]]/.test(value.linkTarget))) return false;
+  return value.tag !== undefined || value.linkTarget !== undefined;
+}
 export function validateRequest(value: unknown): asserts value is SearchRequest {
   if (!isRecord(value) || value.protocolVersion !== PROTOCOL
       || typeof value.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(value.requestId)
-      || typeof value.query !== 'string' || !value.query.trim()
+      || typeof value.query !== 'string'
+      || (value.query === '' ? !(Array.isArray(value.predicates) && value.predicates.length)
+          && !validMetadata(value.metadata) : !value.query.trim())
       || Buffer.byteLength(value.query, 'utf8') > BOUNDS.queryBytes || value.query.includes('\0')
       || !Number.isInteger(value.limit) || (value.limit as number) < 1 || (value.limit as number) > BOUNDS.limit
       || !['lexical', 'dense', 'hybrid'].includes(String(value.requestedMode))
+      || (value.matchMode !== undefined && !['terms', 'literal'].includes(String(value.matchMode)))
+      || (value.metadata !== undefined && !validMetadata(value.metadata))
       || (value.scope !== undefined && (!Array.isArray(value.scope)
         || value.scope.length > BOUNDS.sources || !value.scope.every(validPath)))
       || (value.predicates !== undefined && (!Array.isArray(value.predicates)
@@ -98,7 +113,7 @@ export function validateRequest(value: unknown): asserts value is SearchRequest 
         || !value.predicates.every(p => validProperty(p, true))))) {
     throw new StandaloneError('INVALID_REQUEST');
   }
-  if (Object.keys(value).some(key => !['protocolVersion','requestId','query','requestedMode','scope','limit','predicates'].includes(key))) {
+  if (Object.keys(value).some(key => !['protocolVersion','requestId','query','requestedMode','matchMode','scope','limit','predicates','metadata'].includes(key))) {
     throw new StandaloneError('INVALID_REQUEST');
   }
 }

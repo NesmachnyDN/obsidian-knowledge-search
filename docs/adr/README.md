@@ -16,4 +16,5 @@ Use states Proposed, Accepted, Superseded or Rejected. Do not mark an experiment
 - [ADR-0011 — Local Docling extraction cache](0011-local-docling-extraction-cache.md) — Proposed private versioned ParsedDocument cache, no remote parsing.
 - [ADR-0012 — Cloud.ru BGE-M3 candidate](0012-optional-cloudru-bge-m3-provider.md) — Proposed conditional embedding API under ADR-0015; scoped explicit consent, no mandatory cloud.
 - [ADR-0013 — New-Vault Cloud.ru S3 sync](0013-cloudru-s3-vault-sync.md) — Proposed separate operator deployment, requires corporate security and multi-device synthetic validation.
+- [ADR-0014 — Experimental local BGE-M3 retrieval generation](0014-offline-advanced-retrieval-generation.md) — OKS-05D proposed local-only profile; independent review pending, not a substitute for ADR-0015 API providers.
 - [ADR-0015 — API-first optional AI retrieval](0015-api-first-ai-optional-dense.md) — Product-owner target direction of 2026-11-23: autonomous basic search, local/cloud provider APIs, one active dense index, separated conditional acceptance gates; repository review pending.
