@@ -11,15 +11,15 @@ done
 command -v xvfb-run >/dev/null || { echo "HOST_SMOKE_UNAVAILABLE: xvfb-run missing" >&2; exit 2; }
 tmp="$(mktemp -d /tmp/oks-native-host-XXXXXXXX)"
 trap 'rm -rf -- "$tmp"' EXIT
-export HOME="$tmp/home"
-export XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share" XDG_CACHE_HOME="$HOME/.cache"
+ulimit -c 0
+export XDG_CONFIG_HOME="$tmp/home/.config" XDG_DATA_HOME="$tmp/home/.local/share" XDG_CACHE_HOME="$tmp/home/.cache"
 mkdir -p "$XDG_CONFIG_HOME/obsidian" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$tmp/electron" "$tmp/vault/.obsidian/plugins/oks-synthetic-evidence"
 printf '%s\n' '# Synthetic Obsidian Host' 'REQ-OKS-SMOKE: local only.' 'See [[second]].' > "$tmp/vault/first.md"
 printf '%s\n' '---' 'status: active' '---' '# Second' 'Synthetic second note.' > "$tmp/vault/second.md"
 cp "$repo/dist/main.js" "$repo/dist/manifest.json" "$repo/dist/standalone-worker.js" "$tmp/vault/.obsidian/plugins/oks-synthetic-evidence/"
 printf '%s\n' '["oks-synthetic-evidence"]' > "$tmp/vault/.obsidian/community-plugins.json"
 printf '%s\n' '{"safeMode":false}' > "$tmp/vault/.obsidian/app.json"
-export tmp app cli
+export tmp app cli repo
 python3 - <<'PY'
 import json,os,time
 root=os.environ['tmp']
@@ -36,13 +36,13 @@ assert_contains() {
     return 1
   fi
 }
-timeout 57s xvfb-run -a -s '-screen 0 1280x800x24' bash -c '
+env HOME="$tmp/home" timeout 150s xvfb-run -a -e "$tmp/display.log" -s '-screen 0 1280x800x24' bash -c '
   set -euo pipefail
   "$app" --no-sandbox --disable-gpu --user-data-dir="$tmp/electron" > "$tmp/host.log" 2>&1 &
   p=$!
   trap '\''kill "$p" 2>/dev/null || :; wait "$p" 2>/dev/null || :'\'' EXIT
   sleep 13
-  version="$(timeout 8s "$cli" version)"
+  version="$(timeout 8s "$cli" version)" || { echo "HOST_SMOKE_FAILURE: CLI unavailable after isolated host startup" >&2; exit 1; }
   [[ "$version" == *"1.15"* ]] || { echo "HOST_SMOKE_FAILURE: wrong version $version" >&2; exit 1; }
   echo "BROWSER_CAPABILITIES:"
   timeout 8s "$cli" eval "code=JSON.stringify({worker:typeof Worker,blob:typeof Blob,url:typeof URL.createObjectURL,crypto:typeof crypto,nodeBuffer:typeof Buffer})"
@@ -70,6 +70,16 @@ timeout 57s xvfb-run -a -s '-screen 0 1280x800x24' bash -c '
      "$created" == *"\"hits\":1"* && "$created" == *"\"line\":2"* &&
      "$created" == *"\"sha\":\"$created_sha\""* ]] ||
     { echo "HOST_SMOKE_FAILURE: Obsidian create + raw source hash ($created)" >&2; exit 1; }
+  timeout 8s "$cli" command id=oks-synthetic-evidence:open-standalone-search >/dev/null
+  ui="$(timeout 45s "$cli" eval "code=$(cat "$repo/scripts/obsidian-ui-smoke.js")")"
+  [[ "$ui" == *"OBSIDIAN_UI_SMOKE_PASS:"* ]] ||
+    { echo "HOST_SMOKE_FAILURE: extended UI scenarios ($ui)" >&2; exit 1; }
+  printf "%s\n" "$ui"
+  timeout 8s "$cli" command id=oks-synthetic-evidence:open-first-search-source >/dev/null
+  sleep 1
+  navigation="$(timeout 8s "$cli" eval "code=JSON.stringify({path:app.workspace.getMostRecentLeaf()?.view?.file?.path,selected:app.workspace.getMostRecentLeaf()?.view?.editor?.getSelection()})")"
+  [[ "$navigation" == *"first.md"* && "$navigation" == *"REQ-OKS-SMOKE: local only."* ]] ||
+    { echo "HOST_SMOKE_FAILURE: source command selection" >&2; exit 1; }
   before_reload="$(timeout 8s "$cli" eval "code=(globalThis.__oksPreviousParser=app.plugins.plugins[\"oks-synthetic-evidence\"].standalone.parser,app.plugins.plugins[\"oks-synthetic-evidence\"].standalone.status().generationId)")"
   before_id="$(printf "%s" "$before_reload" | grep -oE "[0-9a-f]{64}" | head -1)"
   test -n "$before_id" || { echo "HOST_SMOKE_FAILURE: missing before-reload generation" >&2; exit 1; }
@@ -81,8 +91,15 @@ timeout 57s xvfb-run -a -s '-screen 0 1280x800x24' bash -c '
   after_reload="$(timeout 8s "$cli" eval "code=JSON.stringify({generationId:app.plugins.plugins[\"oks-synthetic-evidence\"].standalone.status().generationId,oldWorkerStopped:globalThis.__oksPreviousParser?.stopped})")"
   [[ "$after_reload" == *"$before_id"* && "$after_reload" == *"\"oldWorkerStopped\":true"* ]] ||
     { echo "HOST_SMOKE_FAILURE: durable generation or worker unload ($before_reload, $after_reload)" >&2; exit 1; }
-  printf "OBSIDIAN_HOST_SMOKE_PASS: version=%s native=ready sourceCount=3 originalLine=2 sha256=pass modify=pass create=pass reload=pass oldWorkerStopped=true\n" "$version"
-'
+  printf "OBSIDIAN_HOST_SMOKE_PASS: version=%s native=ready sourceCount=3 originalLine=2 sha256=pass modify=pass create=pass reload=pass oldWorkerStopped=true ui=pass commandNavigation=pass\n" "$version"
+' || {
+  if test -f "$tmp/display.log" && grep -qE 'Cannot establish any listening sockets|failed to bind listener' "$tmp/display.log"; then
+    echo 'HOST_SMOKE_UNAVAILABLE: isolated display cannot bind local sockets (sandbox restriction)' >&2
+  else
+    echo 'HOST_SMOKE_FAILURE: isolated Obsidian scenario failed or timed out; no host pass claimed' >&2
+  fi
+  exit 1
+}
 test "$(sha256sum "$tmp/vault/second.md" | cut -d' ' -f1)" = "$fixture_sha" ||
   { echo "HOST_SMOKE_FAILURE: read-only source mutated" >&2; exit 1; }
 test ! -e "$tmp/vault/.obsidian/plugins/oks-synthetic-evidence/index" ||

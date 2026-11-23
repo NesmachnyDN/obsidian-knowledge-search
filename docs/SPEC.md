@@ -56,3 +56,7 @@ CAP-01 through CAP-10 across documented profiles, including separately proven CA
 
 
 Basic typed Properties filtering and preservation of resolvable Obsidian wiki-link metadata belong to MVP; link traversal and cross-source graph expansion are optional post-MVP. Same-source evidence must retain its anchor and original locators; a missing or failed leg is not a successful hybrid result. Confidentiality, provenance, source freshness, no-truncation and safe resource admission are hard gates, not quality trade-offs.
+
+## Standalone UI candidate traceability
+
+OKS-04B implements the CAP-07/AC-07 candidate search panel, commands, typed settings, safe status/diagnostic export and [in-process API v1](standalone-api.md). Source-open validation supports CAP-06/AC-06 and event revocation CAP-01/AC-01; lifecycle uses the existing CAP-08/09 generation/worker controls. Dense/hybrid remain unavailable. These implementation references do not mark acceptance: independent review and real-host smoke remain required, with [current validation limits](../benchmarks/standalone/04b-validation.md) explicitly recorded.

@@ -7,6 +7,10 @@ await build({ entryPoints: files.map(file => `tests/${file}`), outdir: '.test-bu
   platform: 'node', format: 'cjs', target: 'node22' });
 await build({ entryPoints: ['plugin/src/supervisor.ts'], outfile: '.test-build/reload-supervisor.cjs',
   bundle: true, platform: 'node', format: 'cjs', target: 'node22' });
+// Host-adapter lifecycle tests inject Obsidian only at this external boundary.
+// This is explicitly a Node test adapter, not real desktop smoke evidence.
+await build({ entryPoints: ['plugin/src/main.ts'], outfile: '.test-build/plugin-main.cjs',
+  bundle: true, platform: 'node', format: 'cjs', target: 'node22', external: ['obsidian'] });
 await build({ entryPoints: ['plugin/src/standalone/worker-entry.ts'],
   outfile: '.test-build/standalone-worker.js', bundle: true,
   platform: 'browser', format: 'iife', target: 'es2022' });

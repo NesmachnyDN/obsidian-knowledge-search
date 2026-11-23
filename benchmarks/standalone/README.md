@@ -1,6 +1,6 @@
 # OKS-04A — Standalone native lexical synthetic corpus v1
 
-**Status:** Author-produced measurement of a candidate pending independent SDD full-diff review. This is a real TypeScript lexical-only (no model) experiment, **not** a claim of MVP, CAP-05, full Obsidian UI or optional advanced profile validation.
+**Status:** OKS-04A implementation merged in PR #11. The current rerun and OKS-04B candidate validation are author-produced evidence; see [04B validation and open gates](04b-validation.md). This is a real TypeScript lexical-only (no model) experiment, **not** a claim of MVP, CAP-05, full Obsidian UI or optional advanced profile validation.
 
 ## Reproduction
 
@@ -31,12 +31,12 @@ Machine-dependent values are in `results.json`; use that file, not hardcoded est
 | Invalid original locators | 0 |
 | Known stale evidence returned | 0 |
 | Stale-source suppression before Top-K | 1 tested and suppressed |
-| Query latency p50/p95 | ~0.29 / ~2.24 ms in Node benchmark harness |
-| Initial index build | ~174 ms including browser-worker test adapter startup |
-| Incremental update | ~48 ms |
+| Query latency p50/p95 | ~0.75 / ~2.76 ms in Node benchmark harness |
+| Initial index build | ~175 ms including browser-worker test adapter startup |
+| Incremental update | ~63 ms |
 | Serialized immutable generation | ~77 KiB |
-| Heap use | ~8.2 MiB for entire harness; process RSS ~90 MiB, **not** isolated engine |
-| Real Obsidian host smoke | tested separately; no app UI search panel |
+| Heap use | ~10.4 MB for entire harness; process RSS ~88.4 MB, **not** isolated engine |
+| Real Obsidian host smoke | historical 04A core smoke; extended 04B UI run blocked in sandbox |
 
 The benchmark writes numeric results including process RSS, event-loop delay, exact-id/invalid-locator counts, Python baseline and source-change checks into `results.json`. Timing and memory are implementation/environment-specific, not guaranteed device-wide quotas or user-facing SLA.
 
@@ -53,4 +53,4 @@ This is a **directional**, not algorithm-identical comparison: Python reference 
 
 This is a bounded lexical index prototype (512 sources, 64 KiB/source, 16 MiB generation). It does not validate large real Vault behavior, a hard memory sandbox for the tested browser Web Worker, all CommonMark/YAML, full UI lifecycle or privacy under a user's independent whole-home sync. Host smoke is a real Obsidian application interaction on a disposable synthetic Vault; Node mocks are not represented as host tests. The index can contain original excerpts and Properties, so it is **host-private outside Vault** by ADR-0008. Neither corpus nor results contain private production notes, indices or host paths. Python is needed only for historical reference/conformance tests, not for Standalone execution.
 
-**Release status:** OKS-04A stays open until an independent reviewer approves the exact final HEAD, required CI is green, and the PR is then merged into develop. No 04B UI or MVP acceptance is implied.
+**Release status:** OKS-04A is the merged dependency. OKS-04B has completed local checks and actual Obsidian 1.15.1 extended host smoke (including disabled-only derived-index purge); it remains a candidate pending independent exact-final-diff review and hosted exact-HEAD CI. ADR-0008 now records acceptance anchored to the independently reviewed and merged PR #11. No UI release or MVP acceptance is implied.
