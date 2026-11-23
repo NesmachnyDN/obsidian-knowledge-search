@@ -15,3 +15,4 @@ Use states Proposed, Accepted, Superseded or Rejected. Do not mark an experiment
 - [ADR-0010 — Portable BGE-M3 embedding cache and multi-device sync](0010-portable-bge-m3-embedding-cache.md) — Proposed post-MVP decision on local indexes, reusable immutable vectors and opt-in synchronized-folder transport; review pending.
 - [ADR-0011 — Local Docling extraction and ParsedDocument cache](0011-local-docling-extraction-cache.md) — Proposed local-only Docling/OCR and derived document cache, no cloud Docling; post-MVP acceptance.
 - [ADR-0012 — Optional Cloud.ru BGE-M3 provider](0012-optional-cloudru-bge-m3-provider.md) — Proposed opt-in text-embedding API, separate provider space and strict confidentiality/cost controls; offline MVP unchanged.
+- [ADR-0013 — Cloud.ru S3 synchronization for new Obsidian Vault](0013-cloudru-s3-vault-sync.md) — Proposed new-Vault S3 backend, legacy Yandex Cloud S3 migration source, separate vector bucket and multi-device/security proof.
