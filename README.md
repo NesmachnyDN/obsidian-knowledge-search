@@ -6,38 +6,36 @@ OKS is a planned local-first hybrid search and retrieval plugin for Obsidian, de
 
 ## Project status
 
-**Pre-release implementation, subject to independent SDD acceptance.** OKS-04A/04B and OKS-05A provide an operational package-only, model-free, offline Standalone lexical search, typed Properties, wiki-link metadata, source navigation and durable private index in Obsidian Desktop. OKS-05B/05C provide explicit local process supervision and verified Markdown/PDF/DOCX/RU+EN OCR ingestion. **OKS-05D is an unmerged candidate** for offline model-backed Advanced lexical/dense/hybrid retrieval with pinned BGE-M3; no feature of that candidate should be treated as a released capability until an independent full-diff SDD review, CI and merge. The default installation never requires Python, embeddings or network access.
+Pre-alpha. Standalone Markdown lexical indexing, search UI, a release-shaped package candidate and canonical opt-in advanced ingestion have landed in `develop`; this does **not** imply final MVP acceptance or a production-ready AI API. The mandatory base is **Obsidian + OKS plugin only**, with autonomous offline text-occurrence/Properties search and without additional software, network or manual runtime setup. The revised AI-provider requirements are documented in ADR-0015; implementation and acceptance remain separately gated.
 
 ## Goals
 
 - Search Markdown notes and linked PDF/Office documents together.
 - Preserve document hierarchy, normative clauses, tables and source locations.
-- Use multilingual embeddings, lexical retrieval and rank fusion; evaluate local reranking.
+- Preserve autonomous text-occurrence/Properties search; optionally use API-backed multilingual embeddings, genuine hybrid rank fusion, reranking and RAG.
 - Return inspectable, source-grounded evidence for users and AI agents.
 - Automatically maintain a rebuildable local index, without a second knowledge base.
-- Keep baseline Markdown lexical indexing and retrieval offline **without** dependency/model provisioning; advanced offline model capabilities require explicit, separately measured provisioning.
+- Keep Markdown text/Properties indexing and retrieval offline **without** any AI provisioning; optional AI search uses configured local APIs (offline only if verified) or cloud APIs (online and with explicit data-transfer consent).
 
 Desktop Linux is the first supported target. Other desktop platforms and Obsidian Community Plugins distribution are later work, subject to packaging and policy verification.
 
-## Execution profiles
+## Execution profiles (target architecture)
 
-- **Standalone (default, mandatory):** plugin-native Markdown lexical search, typed Properties and link metadata, source navigation, local index/freshness, offline with no Python/server/Ollama/Docker.
-- **Local Advanced (optional, 05D candidate):** operator-provisioned pinned Python CPU runtime, local BGE-M3 model/tokenizer and OCR/parser assets; manual TFile ingestion and indexing, lexical/dense/hybrid RRF, verified provenance and private generation storage. Never automatically starts or downloads models in default Standalone. See [advanced retrieval contract](contracts/advanced-retrieval-v1.md).
-- **Bundled Advanced (future option):** shipping a licensed model/runtime in an installer remains separately gated; 05D does **not** distribute Python or model weights.
-- **External Backend (optional):** explicitly configured authenticated local processing service, never required for Standalone; no source egress by default.
+- **Standalone (default, mandatory):** Obsidian-native offline text-occurrence search, typed Properties/tags/link metadata, fresh source navigation and durable local metadata/lexical index. No Python, API key, model, cloud or vector index required.
+- **Optional AI API:** embedding/dense and genuine hybrid, reranker and LLM providers independently configurable through local or cloud APIs. Cloud is disabled until explicit approved source-scoped egress. A local API may work without Internet when tested; cloud requires connectivity.
+- **Optional advanced extraction:** supported PDF/DOCX/OCR via separately tested opt-in processing; not required for Standalone Markdown.
 
-Dense and hybrid remain **unavailable in Standalone**. The unmerged 05D local-Advanced candidate implements them for explicitly indexed sources, with a model-bound manifest; successful ingestion alone never means model readiness. CAP-04/05 still require independent review and realistic quality/stability validation. See [ADR-0006](docs/adr/0006-standalone-execution-profiles.md) and the [roadmap](docs/ROADMAP.md).
+Exactly one active local dense index binds to the chosen embedding model. A model switch triggers a staged full reindex and atomic activation, not permanent storage of indexes for every candidate. Basic search remains available while the AI API is unavailable. Mandatory MVP Gate A and conditional AI/advanced-format acceptance are defined in [ADR-0015](docs/adr/0015-api-first-ai-optional-dense.md) and the [specification](docs/SPEC.md); local offline AI is not an MVP-wide release gate.
 
-### Local Advanced (05D candidate) quick start
+### Experimental local BGE-M3 profile (OKS-05D candidate)
 
-On a supported Linux Desktop with cgroup v2 and user systemd, install a *previously verified* local CPU Python runtime with Docling/OCR dependencies, BGE-M3 model snapshot and tokenizer. No automatic model download is performed. In the plugin's settings, enable **Advanced document ingestion** and supply the trusted absolute interpreter path, ingestion script (`engine/advanced_ingest.py`), pinned BGE-M3 snapshot and RU/EN Tesseract directory. Select an extraction profile, open the specific Vault file, then use **Ingest active Vault document** or **Build BGE-M3 index for active Vault document** (which will ingest if necessary). The **Rebuild** action resets an incompatible model index; repeat indexing for all intended documents. Use **Open Advanced lexical/dense/hybrid search** to select a mode, optional scope and typed Property predicates, then open a verified result. The cancel command stops the bounded model worker; disabling Advanced leaves Standalone functional.
-
-**Limitations:** initial 05D restricts model indexing to 32 sources / 256 chunks, starts a cold BGE-M3 model worker for each dense/hybrid query (roughly 10–20 seconds on measured CPU host), and never promises native PDF/DOCX page/cell selection through unsupported Obsidian APIs. Excerpts are original-source evidence; OCR/native location fidelity may be `partial`. Real production Vault ingestion requires separate authorization. See [ADR-0014](docs/adr/0014-offline-advanced-retrieval-generation.md) and [OKS-05D SDD contract](docs/prompts/OKS-05D.md).
+The unmerged OKS-05D candidate implements a **separately opted-in, local-only** CPU BGE-M3 retrieval profile, **not** a configurable embedding/reranker/LLM API-provider adapter, the default Standalone runtime, or a mandatory Gate A prerequisite. It reuses authenticated v3 Markdown/PDF/DOCX/RU+EN OCR extraction and offers manual indexing, lexical/dense/hybrid RRF and source-verified navigation in Obsidian. It requires separately provisioned and verified local Python, BGE-M3 weights/tokenizer and OCR data, a bounded user-systemd cgroup, and no network access or automatic downloads. Initial limits are 32 sources / 256 vectors; a cold model-backed query may take approximately 10–20 seconds on the measured CPU host. Native PDF/DOCX page/cell navigation is not guaranteed. Configure trusted Advanced paths in the plugin settings and use the active-source indexing and Advanced search commands only in an authorized Vault. See the [OKS-05D retrieval contract](contracts/advanced-retrieval-v1.md), [proposed ADR-0014](docs/adr/0014-offline-advanced-retrieval-generation.md), and [author handoff](docs/reviews/OKS-05D-AUTHOR-HANDOFF.md). API-first provider capabilities remain separately gated by ADR-0015.
 
 ## Project documentation
 
 - [Product specification](docs/SPEC.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [AI provider / model evaluation plan](docs/AI-PROVIDER-EVALUATION.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Architecture decisions](docs/adr/README.md)
 - [Benchmark protocol](benchmarks/README.md)
