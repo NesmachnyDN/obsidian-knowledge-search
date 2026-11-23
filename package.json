@@ -14,7 +14,7 @@
     "test:package": "npm run package:standalone && node --test tests/package-standalone.test.mjs"
   },
   "devDependencies": {
-    "@types/node": "22.19.0",
+    "@types/node": "26.6.6",
     "esbuild": "0.28.2",
     "obsidian": "1.14.4",
     "typescript": "5.9.3"
