@@ -72,11 +72,31 @@ export class AdvancedRetrievalStore {
     await store.load();
     return store;
   }
+  /** No CURRENT means no committed index. Authenticate abandoned first-publish
+   * artifacts before removing them; never promote an orphan into search visibility.
+   * An existing but corrupt CURRENT is never recovered through this path.
+   */
+  private async discardUnpublished(names:string[]):Promise<void>{
+    if(names.includes(CURRENT))invalid();
+    const generations=names.filter(x=>genPattern.test(x));
+    for(const name of generations){
+      const bytes=await strictFile(join(this.path,name),LIMIT_BYTES);
+      if(sha(bytes)!==name.slice(0,-5))invalid();
+      validateRetrievalGeneration(parseCanonical(bytes),this.root.id);
+    }
+    for(const name of names.filter(x=>stagePattern.test(x))){
+      const info=await lstat(join(this.path,name));
+      if(!info.isFile()||info.isSymbolicLink()||info.nlink!==1
+          ||info.uid!==process.getuid?.()||(info.mode&0o077)!==0)invalid();
+    }
+    for(const name of names)await unlink(join(this.path,name));
+    if(names.length)await syncDirectory(this.path);
+  }
   private async load():Promise<void>{
     const names=await readdir(this.path);
     if(names.length>12||names.some(x=>x!==CURRENT&&!genPattern.test(x)&&!stagePattern.test(x)))invalid();
     if(!names.includes(CURRENT)){
-      if(names.some(x=>genPattern.test(x)))invalid();
+      await this.discardUnpublished(names);
       return;
     }
     const ptr=parseCanonical(await strictFile(join(this.path,CURRENT),2048)) as Pointer;
@@ -109,6 +129,14 @@ export class AdvancedRetrievalStore {
     if(this.poisoned)invalid();
     verifyIdentity(model);
     const old=this.generation;
+    // First-publish abort/crash can leave an immutable generation with no
+    // CURRENT. Clear only fully authenticated unpublished derived artifacts.
+    if(!old){
+      const names=await readdir(this.path);
+      if(names.length>12||names.some(x=>x!==CURRENT&&!genPattern.test(x)&&!stagePattern.test(x))
+          ||names.includes(CURRENT))invalid();
+      await this.discardUnpublished(names);
+    }
     if(old&&!rebuild&&canonical(old.model)!==canonical(model))invalid();
     const entries=[...(rebuild?[]:old?.entries??[]).filter(x=>x.sourcePath!==entry.sourcePath),entry]
       .sort((a,b)=>cmp(a.sourcePath,b.sourcePath));

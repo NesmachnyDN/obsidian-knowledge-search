@@ -21,7 +21,7 @@ export class AdvancedSearchModal extends Modal {
       .addOption('lexical','Lexical').addOption('dense','Dense (BGE-M3)')
       .addOption('hybrid','Hybrid RRF').setValue(this.mode).onChange(v=>{this.mode=v as SearchMode;}));
     new Setting(this.contentEl).setName('Optional exact Vault paths')
-      .setDesc('Comma-separated, source-relative; blank searches all explicitly ingested sources.')
+      .setDesc('Comma-separated, source-relative; blank uses indexed sources for dense/hybrid and ingested sources for lexical. Explicit unindexed dense scope fails.')
       .addText(t=>t.onChange(v=>{this.sourceScope=v;}));
     new Setting(this.contentEl).setName('Typed Property key (optional)')
       .addText(t=>t.onChange(v=>{this.key=v.trim();}));

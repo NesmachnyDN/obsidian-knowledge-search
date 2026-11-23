@@ -58,6 +58,21 @@ test('05D actual CPU BGE-M3 through real Node→cgroup→Python→Node, v3 sourc
         const started=performance.now();
         await retrieval.index(cfg(),root,pluginId,path,()=>true);
         console.log('05D_REAL_INDEX',path,'ms',Math.round(performance.now()-started),retrieval.snapshot());
+        if(path==='ru.md'){
+          // en.md is already ingested, but has no vectors yet. This is the
+          // production incremental-indexing acceptance case from B4.
+          const scoped=await retrieval.search(cfg(),root,pluginId,
+            {...query('hybrid','REQ-DR-17'),scope:['ru.md']},()=>true);
+          assert.equal(scoped.status,'ok',scoped.error??undefined);
+          assert.equal(scoped.executedMode,'hybrid');
+          assert.ok(scoped.hits.length>0&&scoped.hits.every(h=>h.sourceId==='ru.md'));
+          const empty=await retrieval.search(cfg(),root,pluginId,
+            {...query('hybrid','REQ-DR-17'),scope:['absent.md']},()=>true);
+          assert.equal(empty.status,'ok',empty.error??undefined);
+          assert.equal(empty.executedMode,'hybrid');
+          assert.equal(empty.hits.length,0);
+          console.log('OKS05D_REAL_INCREMENTAL_SCOPE_PASS: unindexed source excluded; empty hybrid scope returns zero hits');
+        }
       }
       const requests=[query('lexical','REQ-DR-17'),query('dense','Документный архив на S3'),
         query('hybrid','REQ-DR-17'),query('hybrid','REQ-EN-44')];

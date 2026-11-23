@@ -113,25 +113,48 @@ export function rankAdvanced(input:RankedOptions):RetrievalResponse{
   const wantsDense=mode!=='lexical',wantsLex=mode!=='dense';
   const lexLeg=leg(wantsLex?'ready':'unavailable');
   const denseLeg=leg(wantsDense?'not-ready':'unavailable');
-  if(wantsDense&&(!generation||!queryVector))return fail(mode,'CAPABILITY_UNAVAILABLE',lexLeg,denseLeg);
+  if(wantsDense&&(!generation||!queryVector||!generation.entries.length))
+    return fail(mode,'CAPABILITY_UNAVAILABLE',lexLeg,denseLeg);
   if(queryVector)verifyVector(queryVector);
   const scope=request.scope?new Set(request.scope):null;
   const records:Candidate[]=[];
   const indexed=new Map(generation?.entries.map(e=>[e.sourcePath,e])??[]);
-  const seenSource=new Set<string>(),seenChunk=new Set<string>();
+  const seenSource=new Set<string>(),seenPath=new Set<string>(),seenChunk=new Set<string>();
+  const verified=new Map<string,IngestResponse>();
+  // Authenticate the complete indexed source set independently of user filters.
+  // An ingested source is not automatically model-indexed.
   for(const document of documents){
     const source=document.response.source;
     if(!source||!['ok','partial'].includes(document.response.status))continue;
-    if(seenSource.has(source.sourceId))return fail(mode,'INDEX_DUPLICATE',lexLeg,denseLeg);
+    if(seenSource.has(source.sourceId)||seenPath.has(source.vaultRelativePath))
+      return fail(mode,'INDEX_DUPLICATE',lexLeg,denseLeg);
     seenSource.add(source.sourceId);
+    seenPath.add(source.vaultRelativePath);
+    verified.set(source.vaultRelativePath,document.response);
+  }
+  if(wantsDense){
+    for(const entry of generation!.entries){
+      const response=verified.get(entry.sourcePath);
+      if(!response?.source||entry.sourceSha256!==response.source.sha256
+          ||entry.ingestGenerationId!==response.generationId
+          ||entry.profileId!==response.source.profileId
+          ||entry.chunkIds.length!==response.chunks.length
+          ||entry.chunkIds.some((id,i)=>id!==response.chunks[i]?.chunkId))
+        return fail(mode,'INDEX_INCOMPATIBLE',lexLeg,denseLeg);
+    }
+  }
+  for(const document of documents){
+    const source=document.response.source;
+    if(!source||!['ok','partial'].includes(document.response.status))continue;
     if(scope&&!scope.has(source.vaultRelativePath))continue;
     if(!matches(source.properties as Parameters<typeof matches>[0],request.predicates??[]))continue;
     const stored=indexed.get(source.vaultRelativePath);
-    if(wantsDense&&(!stored||stored.sourceSha256!==source.sha256
-        ||stored.ingestGenerationId!==document.response.generationId
-        ||stored.profileId!==source.profileId
-        ||stored.chunkIds.length!==document.response.chunks.length))
-      return fail(mode,'INDEX_INCOMPATIBLE',lexLeg,denseLeg);
+    if(wantsDense&&!stored){
+      // Without an explicit scope, Advanced searches only previously indexed
+      // sources. Explicitly asking for a known unindexed TFile must fail visibly.
+      if(scope)return fail(mode,'CAPABILITY_UNAVAILABLE',lexLeg,denseLeg);
+      continue;
+    }
     for(const [i,chunk] of document.response.chunks.entries()){
       if(chunk.sourceId!==source.sourceId||chunk.sourceSha256!==source.sha256
           ||seenChunk.has(chunk.chunkId))return fail(mode,'INDEX_INCOMPATIBLE',lexLeg,denseLeg);
@@ -147,12 +170,9 @@ export function rankAdvanced(input:RankedOptions):RetrievalResponse{
       if(sourceExcerpt(candidate))records.push(candidate);
     }
   }
-  if(wantsDense){
-    if(records.length===0||!generation||generation.entries.length!==documents.length
-        ||generation.entries.some(e=>!seenSource.has(e.sourcePath)))
-      return fail(mode,'INDEX_INCOMPATIBLE',lexLeg,denseLeg);
-    for(const record of records)if(!record.vector)return fail(mode,'INDEX_INCOMPATIBLE',lexLeg,denseLeg);
-  }
+  if(wantsDense)
+    for(const record of records)
+      if(!record.vector)return fail(mode,'INDEX_INCOMPATIBLE',lexLeg,denseLeg);
   if(records.length>256)return fail(mode,'INDEX_LIMIT',lexLeg,denseLeg);
   let lexical:{key:string;score:number}[]=[];
   if(wantsLex){

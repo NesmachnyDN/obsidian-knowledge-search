@@ -54,6 +54,73 @@ test('strict typed mismatch, scope denial and absent hits, without fabricated ex
   assert.equal(partial.status,'degraded');assert.equal(partial.staleSourceCount,1);
 });
 
+test('empty scope, unmatched typed Properties and negative queries are valid empty rankings',()=>{
+  const gen=build();
+  const emptyRequests=[
+    {scope:['not-indexed.md']},
+    {predicates:[{key:'active',valueType:'boolean' as const,value:false,operator:'eq' as const}]},
+  ];
+  for(const mode of ['lexical','dense','hybrid'] as const){
+    for(const filters of emptyRequests){
+      const found=rankAdvanced({documents:docs,generation:gen,
+        queryVector:mode==='lexical'?null:vector(0),
+        request:{...req(mode),...filters}});
+      assert.equal(found.status,'ok',mode);
+      assert.equal(found.executedMode,mode);
+      assert.equal(found.hits.length,0);
+      assert.equal(found.legs.lexical.status,mode==='dense'?'unavailable':'ready');
+      assert.equal(found.legs.dense.status,mode==='lexical'?'unavailable':'ready');
+    }
+    const negative=rankAdvanced({documents:docs,generation:gen,
+      queryVector:mode==='lexical'?null:vector(0),request:req(mode,'UNMATCHED-777')});
+    assert.equal(negative.status,'ok');
+    if(mode==='lexical')assert.equal(negative.hits.length,0);
+  }
+});
+
+test('model-indexed source scope is independent of additional ingested but unindexed sources',()=>{
+  const extra=structuredClone(source);
+  const extraPath='not-yet-indexed.md';
+  extra.source!.sourceId=extraPath;
+  extra.source!.vaultRelativePath=extraPath;
+  extra.source!.sha256='f'.repeat(64);
+  extra.generationId='e'.repeat(64);
+  for(const chunk of extra.chunks){
+    chunk.sourceId=extraPath;
+    chunk.sourceSha256=extra.source!.sha256;
+    chunk.chunkId='d'.repeat(64);
+  }
+  const inputs=[{response:source},{response:extra}],gen=build();
+  for(const mode of ['dense','hybrid'] as const){
+    const indexed=rankAdvanced({documents:inputs,generation:gen,queryVector:vector(0),
+      request:{...req(mode),scope:[source.source!.vaultRelativePath]}});
+    assert.equal(indexed.status,'ok');
+    assert.equal(indexed.executedMode,mode);
+    assert.ok(indexed.hits.length>0);
+    assert.ok(indexed.hits.every(h=>h.sourceId===source.source!.sourceId));
+    const defaultScope=rankAdvanced({documents:inputs,generation:gen,queryVector:vector(0),
+      request:req(mode)});
+    assert.equal(defaultScope.status,'ok');
+    assert.ok(defaultScope.hits.every(h=>h.sourceId===source.source!.sourceId));
+    const notIndexed=rankAdvanced({documents:inputs,generation:gen,queryVector:vector(0),
+      request:{...req(mode),scope:[extraPath]}});
+    assert.equal(notIndexed.status,'failed');
+    assert.equal(notIndexed.error,'CAPABILITY_UNAVAILABLE');
+    assert.equal(notIndexed.executedMode,'none');
+    assert.deepEqual(notIndexed.hits,[]);
+    const stale=structuredClone(source);stale.source!.sha256='b'.repeat(64);
+    const bad=rankAdvanced({documents:[{response:stale},{response:extra}],
+      generation:gen,queryVector:vector(0),
+      request:{...req(mode),scope:['not-indexed.md']}});
+    assert.equal(bad.status,'failed','out-of-scope indexed source drift must still revoke generation');
+    assert.equal(bad.error,'INDEX_INCOMPATIBLE');
+  }
+  const lexical=rankAdvanced({documents:inputs,generation:null,queryVector:null,
+    request:{...req('lexical'),scope:[source.source!.vaultRelativePath]}});
+  assert.equal(lexical.status,'ok');
+  assert.ok(lexical.hits.length>0);
+});
+
 test('missing BGE-M3 leg: dense and hybrid fail closed without lexical fallback',()=>{
   for(const mode of ['dense','hybrid'] as const){
     const response=rankAdvanced({documents:docs,generation:null,queryVector:null,request:req(mode)});

@@ -43,6 +43,65 @@ test('v4 retrieval store: bounded atomic publish, real cold open, rejected corru
   }
 });
 
+test('v4 first publication cancellation leaves only recoverable derived orphans, never ready evidence',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'oks05d-first-cancel-'));
+  const vault=join(root,'vault'),xdg=join(root,'xdg'),prior=process.env.XDG_DATA_HOME;
+  await mkdir(vault,{mode:0o700});await mkdir(xdg,{mode:0o700});process.env.XDG_DATA_HOME=xdg;
+  try{
+    const identityRoot=await trustedVaultRoot(vault),pluginId='oks-synthetic-evidence';
+    const store=await AdvancedRetrievalStore.open(identityRoot,pluginId);
+    let checks=0;
+    const cancelled=new AbortController();
+    await assert.rejects(store.publish(entry('a.md'),identity,async()=>{
+      if(++checks===2)cancelled.abort();
+    },cancelled.signal),(e:unknown)=>e instanceof ModelError&&e.code==='MODEL_CANCELLED');
+    assert.equal(checks,2);
+    assert.equal(store.snapshot(),null,'canceled first commit must never become searchable');
+    const orphanNames=await readdir(store.path);
+    assert.equal(orphanNames.some(n=>n==='CURRENT'),false);
+    assert.ok(orphanNames.some(n=>n.endsWith('.json')),'test must exercise crash-after-generation-rename');
+    // Opening after power loss must authenticate and discard *only* derived orphan
+    // bytes. It must not treat them as a published model index.
+    const recovered=await AdvancedRetrievalStore.open(identityRoot,pluginId);
+    assert.equal(recovered.snapshot(),null);
+    assert.deepEqual(await readdir(recovered.path),[]);
+    const after=await recovered.publish(entry('a.md'),identity,async()=>{},
+      new AbortController().signal);
+    assert.equal(after.entries.length,1);
+    assert.deepEqual((await AdvancedRetrievalStore.open(identityRoot,pluginId)).snapshot(),after);
+  }finally{
+    if(prior===undefined)delete process.env.XDG_DATA_HOME;else process.env.XDG_DATA_HOME=prior;
+    await rm(root,{recursive:true,force:true});
+  }
+});
+
+test('v4 no-CURRENT recovery rejects forged or foreign orphan generations and symlinked stages',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'oks05d-forged-orphan-'));
+  const vault=join(root,'vault'),xdg=join(root,'xdg'),prior=process.env.XDG_DATA_HOME;
+  await mkdir(vault,{mode:0o700});await mkdir(xdg,{mode:0o700});process.env.XDG_DATA_HOME=xdg;
+  try{
+    const trusted=await trustedVaultRoot(vault),pluginId='oks-synthetic-evidence';
+    const store=await AdvancedRetrievalStore.open(trusted,pluginId);
+    await store.publish(entry('a.md'),identity,async()=>{},new AbortController().signal);
+    const names=await readdir(store.path);
+    const generationName=names.find(n=>n.endsWith('.json'))!;
+    // Removing CURRENT never makes evidence ready: only authenticated derived
+    // generations can be discarded and a fresh model generation must be built.
+    await rm(join(store.path,'CURRENT'));
+    await writeFile(join(store.path,generationName),'forged',{mode:0o600});
+    await assert.rejects(AdvancedRetrievalStore.open(trusted,pluginId));
+    assert.ok((await readdir(store.path)).includes(generationName));
+    await rm(join(store.path,generationName));
+    const stage='.stage-01234567-89ab-4def-8abc-0123456789ab';
+    await symlink('/etc/hosts',join(store.path,stage));
+    await assert.rejects(AdvancedRetrievalStore.open(trusted,pluginId));
+    assert.equal((await readdir(store.path)).includes(stage),true);
+  }finally{
+    if(prior===undefined)delete process.env.XDG_DATA_HOME;else process.env.XDG_DATA_HOME=prior;
+    await rm(root,{recursive:true,force:true});
+  }
+});
+
 test('v4 staged-file crash is recoverable; symlinked CURRENT and native folder revocation are fail-closed',async()=>{
   const root=await mkdtemp(join(tmpdir(),'oks05d-crash-'));
   const vault=join(root,'vault'),xdg=join(root,'xdg'),prior=process.env.XDG_DATA_HOME;
