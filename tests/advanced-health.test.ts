@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, symlink, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, symlink, rm, readFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { AdvancedHealthBridge, parseHealthFrame, type AdvancedConfig } from '../plugin/src/advanced/health';
 import { defaultSettings, parseSettings } from '../plugin/src/search/settings';
@@ -100,4 +100,145 @@ test('SIGTERM-resistant process gets group KILL on stop; unexpected exit invalid
     assert.equal(bridge.snapshot().status,'failed');
     assert.equal(bridge.snapshot().error,'ADVANCED_EXIT');
   });
+});
+
+
+// Whole-group assertions distinguish living children from Linux zombies
+// awaiting an unrelated init reaper; no surviving runnable descendant is accepted.
+async function running(pid: number): Promise<boolean> {
+  try {
+    const raw = await readFile('/proc/' + pid + '/stat', 'utf8');
+    const state = raw.slice(raw.lastIndexOf(')') + 2).trim().split(/\s+/)[0];
+    return state !== 'Z' && state !== 'X';
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+async function until(assertion: () => Promise<boolean>, timeout = 1500): Promise<void> {
+  const limit = Date.now() + timeout;
+  while (!(await assertion())) {
+    if (Date.now() >= limit) assert.fail('deadline waiting for process lifecycle');
+    await wait(10);
+  }
+}
+async function syntheticWorker(
+  makeCode: (root: string) => string,
+  verify: (bridge: AdvancedHealthBridge, cfg: AdvancedConfig, root: string) => Promise<void>,
+): Promise<void> {
+  const root = await mkdtemp(resolve('.test-build/advanced-adversarial-'));
+  const entry = join(root, 'worker.py');
+  const bridge = new AdvancedHealthBridge();
+  await writeFile(entry, makeCode(root), { mode: 0o644 });
+  try { await verify(bridge, { ...good, entry }, root); }
+  finally { await bridge.stop(); await rm(root, { recursive: true, force: true }); }
+}
+
+test('B1: leader exits with inherited stdio and TERM-resistant descendant: readiness revoked and whole PGID reaped', async () => {
+  let descendant = 0;
+  await syntheticWorker(root => [
+    'import json,sys,subprocess,os,time',
+    'r=json.loads(sys.stdin.readline())',
+    "p=subprocess.Popen([sys.executable,'-I','-B','-c',",
+    "  'import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(30)'],",
+    '  stdin=subprocess.DEVNULL)',
+    'with open(' + JSON.stringify(join(root, 'descendant.pid')) + ",'w') as f:f.write(str(p.pid))",
+    'sys.stdout.write(json.dumps(dict(version=2,id=r["id"],ok=True),separators=(",",":"))+"\\n")',
+    'sys.stdout.flush()',
+    'time.sleep(.05)',
+    'os._exit(0)',
+  ].join('\n') + '\n', async (bridge, cfg, root) => {
+    const result = await bridge.start(cfg);
+    assert.ok(result.status === 'ready' || result.status === 'failed');
+    descendant = Number(await readFile(join(root, 'descendant.pid'), 'utf8'));
+    assert.ok(descendant > 0);
+    // The child still holds stdout/stderr, so leader 'close' is NOT enough.
+    await until(async () => bridge.snapshot().status === 'failed', 600);
+    assert.equal(bridge.snapshot().error, 'ADVANCED_EXIT');
+    // An explicit stop must remain effective after the leader is already gone.
+    await bridge.stop();
+    await until(async () => !(await running(descendant)));
+    assert.equal(bridge.snapshot().status, 'disabled');
+  });
+  assert.equal(await running(descendant), false);
+});
+
+test('B2: simultaneous rechecks serialize TERM/KILL and never overlap worker groups', async () => {
+  await syntheticWorker(root => [
+    'import json,sys,os,time,signal',
+    'signal.signal(signal.SIGTERM,signal.SIG_IGN)',
+    'with open(' + JSON.stringify(join(root, 'workers.log')) + ",'a') as f:f.write(str(os.getpid())+'\\n')",
+    'r=json.loads(sys.stdin.readline())',
+    'sys.stdout.write(json.dumps(dict(version=2,id=r["id"],ok=True),separators=(",",":"))+"\\n")',
+    'sys.stdout.flush()',
+    'time.sleep(30)',
+  ].join('\n') + '\n', async (bridge, cfg, root) => {
+    assert.equal((await bridge.start(cfg)).status, 'ready');
+    const first = bridge.pid!;
+    let observing = true;
+    let maxConcurrent = 0;
+    const observed = (async () => {
+      while (observing) {
+        const lines = (await readFile(join(root, 'workers.log'), 'utf8')).trim().split('\n');
+        const alive = await Promise.all(lines.map(s => running(Number(s))));
+        maxConcurrent = Math.max(maxConcurrent, alive.filter(Boolean).length);
+        await wait(5);
+      }
+    })();
+    try {
+      const recheck1 = bridge.start(cfg);
+      await wait(30); // First recheck is still terminating TERM-resistant leader.
+      const recheck2 = bridge.start(cfg);
+      const recheck3 = bridge.start(cfg);
+      await Promise.all([recheck1, recheck2, recheck3]);
+      assert.equal(bridge.snapshot().status, 'ready');
+      assert.equal(await running(first), false);
+      const current = bridge.pid!;
+      assert.ok(current && current !== first);
+      assert.equal(await running(current), true);
+      await bridge.stop();
+      const lines = (await readFile(join(root, 'workers.log'), 'utf8')).trim().split('\n');
+      for (const pid of lines.map(Number)) assert.equal(await running(pid), false, 'worker survived: ' + pid);
+      assert.ok(maxConcurrent <= 1, 'overlapping backend count: ' + maxConcurrent);
+    } finally { observing = false; await observed; }
+  });
+});
+
+test('B2: stop cancels pending starts, and later restart does not resurrect a disabled backend', async () => {
+  await syntheticWorker(root => [
+    'import json,sys,signal,time',
+    'signal.signal(signal.SIGTERM,signal.SIG_IGN)',
+    'r=json.loads(sys.stdin.readline())',
+    'sys.stdout.write(json.dumps(dict(version=2,id=r["id"],ok=True),separators=(",",":"))+"\\n")',
+    'sys.stdout.flush();time.sleep(30)',
+  ].join('\n') + '\n', async (bridge, cfg) => {
+    assert.equal((await bridge.start(cfg)).status,'ready');
+    const old = bridge.pid!;
+    const checks = [bridge.start(cfg), bridge.start(cfg)];
+    const stop = bridge.stop();
+    await Promise.all([...checks, stop]);
+    assert.equal(bridge.snapshot().status,'disabled');
+    assert.equal(bridge.pid,undefined);
+    assert.equal(await running(old),false);
+    const again = await bridge.start(cfg);
+    assert.equal(again.status,'ready');
+    const pid = bridge.pid!;
+    await bridge.stop(); assert.equal(await running(pid), false);
+  });
+});
+
+
+test('protocol bytes after a valid health response revoke readiness and terminate the group', async () => {
+  await scripted(setup +
+    "sys.stdout.write(json.dumps(dict(version=2,id=r['id'],ok=True),separators=(',',':'))+'\\n')\n" +
+    "sys.stdout.flush();time.sleep(.07)\n" +
+    "sys.stdout.write('unsolicited');sys.stdout.flush();time.sleep(30)\n",
+    async (bridge, cfg) => {
+      assert.equal((await bridge.start(cfg)).status,'ready');
+      const pid = bridge.pid!;
+      await until(async () => bridge.snapshot().status === 'failed');
+      assert.equal(bridge.snapshot().error,'ADVANCED_PROTOCOL_INVALID');
+      await bridge.stop();
+      assert.equal(await running(pid),false);
+    });
 });

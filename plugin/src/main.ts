@@ -209,19 +209,26 @@ export default class SyntheticEvidencePlugin extends Plugin {
     const previous = advancedBarriers.get(key);
     const barrier = previous ? Promise.all([previous, stopping]).then(() => undefined) : stopping;
     advancedBarriers.set(key, barrier);
-    void barrier.then(() => { if (advancedBarriers.get(key) === barrier) advancedBarriers.delete(key); });
+    void barrier.then(() => {
+      if (advancedBarriers.get(key) === barrier) advancedBarriers.delete(key);
+    }, () => { /* Keep a failed shutdown barrier; never admit a replacement. */ });
     return barrier;
+  }
+  private async advancedAdmissionAllowed(): Promise<boolean> {
+    const adapter = this.app.vault.adapter;
+    if (adapter instanceof FileSystemAdapter) {
+      try { await advancedBarriers.get(resolve(adapter.getBasePath())); }
+      catch { this.advancedHealth.blockOnPriorShutdown(); return false; }
+    }
+    return !this.unloaded && this.settings.advanced.enabled;
   }
   /** Advanced is an independent explicit opt-in; a healthy transport is not a dense-ready leg. */
   private initializeAdvanced(): Promise<void> {
     if (!this.layoutReady || this.unloaded || !this.settings.advanced.enabled) return Promise.resolve();
     if (this.advancedStartup) return this.advancedStartup;
     const config = { ...this.settings.advanced };
-    const adapter = this.app.vault.adapter;
-    const key = adapter instanceof FileSystemAdapter ? resolve(adapter.getBasePath()) : null;
     this.advancedStartup = (async () => {
-      if (key) await advancedBarriers.get(key);
-      if (!this.unloaded && this.settings.advanced.enabled &&
+      if (await this.advancedAdmissionAllowed() &&
           JSON.stringify(config) === JSON.stringify(this.settings.advanced))
         await this.advancedHealth.start(config);
     })().finally(() => { this.advancedStartup = undefined; });
@@ -230,7 +237,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
   async checkAdvancedHealth(): Promise<void> {
     if (this.unloaded || !this.settings.advanced.enabled) return;
     await this.advancedStartup;
-    if (!this.unloaded && this.settings.advanced.enabled) await this.advancedHealth.start(this.settings.advanced);
+    if (await this.advancedAdmissionAllowed()) await this.advancedHealth.start(this.settings.advanced);
   }
   private initializeStandalone(): Promise<void> {
     if (this.initializing) return this.initializing;
@@ -304,7 +311,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     this.searchController.dispose();
     this.app.workspace.detachLeavesOfType(SEARCH_VIEW);
     void this.stopStandalone();
-    void this.stopAdvanced();
+    void this.stopAdvanced().catch(() => { /* failed barrier remains closed to reload */ });
     this.controller = undefined;
   }
 }
