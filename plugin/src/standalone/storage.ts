@@ -141,6 +141,23 @@ export class GenerationStore {
     if (parsed.generationId !== pointer.generationId) throw new StandaloneError('INDEX_INCOMPATIBLE');
     return parsed;
   }
+  private async validFallback(current: Pointer): Promise<Pointer | null> {
+    for (const name of ['INFLIGHT_PREVIOUS', 'PREVIOUS'] as const) {
+      try {
+        const fallback = await this.readPointer(name);
+        if (fallback && !samePointer(fallback, current)) {
+          await this.generation(fallback);
+          return fallback;
+        }
+      } catch (error) {
+        if (error instanceof StandaloneError && error.code === 'VAULT_IDENTITY_CHANGED')
+          throw error;
+        // A corrupt older rollback is never treated as evidence; a later
+        // compatible fallback may still be available.
+      }
+    }
+    return null;
+  }
   async load(): Promise<LoadResult> {
     let currentError: string | null = null;
     // INFLIGHT_PREVIOUS is fsynced before CURRENT publication. It remains
@@ -155,7 +172,10 @@ export class GenerationStore {
         // Its original pointer must survive the next commit as the new PREVIOUS;
         // retaining a null currentPointer would garbage-collect its generation.
         this.currentPointer = pointer;
-        this.previousPointer = null;
+        // A repaired CURRENT can republish the SAME generation. Retain the
+        // older authenticated rollback rather than turning PREVIOUS into a
+        // self-reference and garbage-collecting the only recovery candidate.
+        this.previousPointer = await this.validFallback(pointer);
         return { generation, recovered: name !== 'CURRENT', error: name !== 'CURRENT' ? currentError : null };
       } catch (error) {
         if (error instanceof StandaloneError && error.code === 'VAULT_IDENTITY_CHANGED') throw error;
@@ -199,6 +219,9 @@ export class GenerationStore {
     // change before CURRENT publishes. A durable prepublication pointer bridges
     // the crash window between CURRENT rename and the later PREVIOUS update.
     if (this.currentPointer) {
+      // Never replace the last valid rollback with a predecessor whose
+      // generation bytes have become corrupt since the store was loaded.
+      await this.generation(this.currentPointer);
       const inFlight = await this.readPointer('INFLIGHT_PREVIOUS');
       if (inFlight && !samePointer(inFlight, this.currentPointer)) {
         // A previous publication may have committed CURRENT but failed to
@@ -225,12 +248,19 @@ export class GenerationStore {
     let renamed = false;
     let warning: CommitOutcome['maintenanceWarning'] = null;
     let publication: CommitOutcome['publication'] = 'rename-confirmed';
+    // Replacing a damaged CURRENT with its own already-authenticated source
+    // generation is pointer repair, NOT an additional logical publication.
+    const advancesGeneration = !samePointer(pointer, this.currentPointer);
+    const priorRollback = this.previousPointer;
+    const promote = (verified: IndexGeneration): void => {
+      this.previousPointer = advancesGeneration ? this.currentPointer : priorRollback;
+      this.currentPointer = pointer;
+      onPublished?.(verified);
+    };
     try {
       await atomicFile(this.dir, 'CURRENT', Buffer.from(JSON.stringify(pointer)), beginPublication, () => {
         renamed = true;
-        this.previousPointer = this.currentPointer;
-        this.currentPointer = pointer;
-        onPublished?.(actual);
+        promote(actual);
       });
     } catch (error) {
       if (!renamed) {
@@ -247,9 +277,7 @@ export class GenerationStore {
             if (!samePointer(rollback, this.currentPointer))
               throw new StandaloneError('INDEX_PUBLICATION_UNCERTAIN');
             if (rollback) await this.generation(rollback);
-            this.previousPointer = this.currentPointer;
-            this.currentPointer = pointer;
-            onPublished?.(verified);
+            promote(verified);
             publication = 'rename-authenticated-after-error';
             warning = 'INDEX_DURABILITY_UNCERTAIN';
           } else if (samePointer(observed, this.currentPointer)) {

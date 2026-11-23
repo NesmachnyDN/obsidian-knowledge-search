@@ -1350,3 +1350,65 @@ test('B8: next failed publication repairs an older pending rollback before repla
     await cleanup();
   }
 });
+
+test('B8: repairing a corrupted CURRENT from INFLIGHT at unchanged B must retain older A rollback', async () => {
+  const original = 'REQ-B8-A: oldest\n';
+  const committed = 'REQ-B8-B: published\n';
+  const { root, reader, store, engine, cleanup } = await setup({ 'a.md': original });
+  const renameActual = fsPromises.rename;
+  let reopened: StandaloneEngine | null = null;
+  try {
+    const a = engine.status().generationId!;
+    await writeFile(join(root, 'a.md'), committed);
+    engine.changed('a.md'); await engine.whenIdle();
+    const b = engine.status().generationId!;
+    assert.notEqual(a, b);
+    (fsPromises as { rename: typeof renameActual }).rename = async (src, dst) => {
+      if (String(dst) === join(store.dir, 'CURRENT'))
+        throw Object.assign(new Error('synthetic rejected C'), { code: 'EACCES' });
+      return renameActual(src, dst);
+    };
+    await writeFile(join(root, 'a.md'), 'REQ-B8-C: rejected\n');
+    engine.changed('a.md'); await engine.whenIdle();
+    (fsPromises as { rename: typeof renameActual }).rename = renameActual;
+    await writeFile(join(root, 'a.md'), committed); // B source remains authoritative after rejected C.
+    await engine.close();
+    await writeFile(join(store.dir, 'CURRENT'), '{broken-pointer');
+    reopened = newEngine(reader, await GenerationStore.open(store.dir, reader.rootId));
+    await reopened.start();
+    assert.equal(reopened.status().generationId, b);
+    await reopened.whenIdle(); // Repair identical B generation pointer; not a logical new publication.
+    assert.equal(reopened.status().status, 'ready');
+    assert.equal(JSON.parse(await readFile(join(store.dir, 'PREVIOUS'), 'utf8')).generationId, a);
+    await writeFile(join(store.dir, 'gen-' + b + '.json'), '{damaged-b');
+    const rollback = await (await GenerationStore.open(store.dir, reader.rootId)).load();
+    assert.equal(rollback.recovered, true);
+    assert.equal(rollback.generation?.generationId, a);
+  } finally {
+    (fsPromises as { rename: typeof renameActual }).rename = renameActual;
+    await reopened?.close(); await cleanup();
+  }
+});
+
+test('B8: corrupt predecessor generation before C must not erase the last valid PREVIOUS=A', async () => {
+  const { root, reader, store, engine, cleanup } = await setup({ 'a.md': 'REQ-OLD-A: original\n' });
+  try {
+    const a = engine.status().generationId!;
+    await writeFile(join(root, 'a.md'), 'REQ-NEW-B: version B\n');
+    engine.changed('a.md'); await engine.whenIdle();
+    const b = engine.status().generationId!;
+    assert.notEqual(a, b);
+    assert.equal(JSON.parse(await readFile(join(store.dir, 'PREVIOUS'), 'utf8')).generationId, a);
+    await writeFile(join(store.dir, 'gen-' + b + '.json'), '{damaged-generation');
+    await writeFile(join(root, 'a.md'), 'REQ-NEW-C: version C\n');
+    engine.changed('a.md'); await engine.whenIdle();
+    assert.equal(engine.status().status, 'degraded');
+    assert.equal(engine.status().generationId, b);
+    assert.equal(engine.status().error, 'INDEX_CORRUPT');
+    assert.equal(JSON.parse(await readFile(join(store.dir, 'PREVIOUS'), 'utf8')).generationId, a);
+    assert.equal(JSON.parse(await readFile(join(store.dir, 'CURRENT'), 'utf8')).generationId, b);
+    const reopened = await (await GenerationStore.open(store.dir, reader.rootId)).load();
+    assert.equal(reopened.recovered, true);
+    assert.equal(reopened.generation?.generationId, a);
+  } finally { await cleanup(); }
+});
