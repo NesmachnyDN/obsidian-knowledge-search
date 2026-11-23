@@ -1205,6 +1205,7 @@ test('B8: rejected CURRENT C preserves PREVIOUS=A, and B corruption recovers A',
     'a.md': 'REQ-B8-A: original A\n',
   });
   const realRename = fsPromises.rename;
+  let restarted: StandaloneEngine | null = null;
   let injected = false;
   try {
     const a = engine.status().generationId!;
@@ -1234,10 +1235,38 @@ test('B8: rejected CURRENT C preserves PREVIOUS=A, and B corruption recovers A',
     assert.equal(recovery.recovered, true);
     assert.equal(recovery.error, 'INDEX_CORRUPT');
     assert.equal(recovery.generation?.generationId, a);
+    // The fallback must be usable by a real restarted engine: a stale
+    // in-flight pointer to damaged B must not prevent repairing CURRENT=A.
+    await writeFile(join(root, 'a.md'), 'REQ-B8-A: original A\n');
+    await engine.close();
+    restarted = newEngine(reader, await GenerationStore.open(store.dir, reader.rootId));
+    await restarted.start(); await restarted.whenIdle();
+    assert.equal(restarted.status().status, 'ready');
+    assert.equal(restarted.status().generationId, a);
+    assert.equal(JSON.parse(await readFile(join(store.dir, 'CURRENT'), 'utf8')).generationId, a);
+    assert.equal((await restarted.search(search('REQ-B8-A'))).hits.length, 1);
   } finally {
     (fsPromises as { rename: typeof realRename }).rename = realRename;
-    await cleanup();
+    await restarted?.close(); await cleanup();
   }
+});
+
+test('B8: malformed stale INFLIGHT pointer cannot destroy authenticated PREVIOUS', async () => {
+  const { root, store, engine, cleanup } = await setup({ 'a.md': 'REQ-B8-OLD: original A\n' });
+  try {
+    await writeFile(join(root, 'a.md'), 'REQ-B8-MIDDLE: committed B\n');
+    engine.changed('a.md'); await engine.whenIdle();
+    const b = engine.status().generationId!;
+    const a = JSON.parse(await readFile(join(store.dir, 'PREVIOUS'), 'utf8')).generationId;
+    await writeFile(join(store.dir, 'INFLIGHT_PREVIOUS'), '{malformed-inflight');
+    await writeFile(join(root, 'a.md'), 'REQ-B8-NEW: committed C\n');
+    engine.changed('a.md'); await engine.whenIdle();
+    assert.equal(engine.status().status, 'ready');
+    assert.notEqual(engine.status().generationId, b);
+    assert.equal(JSON.parse(await readFile(join(store.dir, 'PREVIOUS'), 'utf8')).generationId, b);
+    assert.notEqual(b, a);
+    assert.equal((await engine.search(search('REQ-B8-NEW'))).hits.length, 1);
+  } finally { await cleanup(); }
 });
 
 test('B8: cancel before CURRENT rename keeps PREVIOUS=A despite durable in-flight B', async () => {

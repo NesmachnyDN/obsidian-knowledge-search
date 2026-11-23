@@ -222,12 +222,28 @@ export class GenerationStore {
       // Never replace the last valid rollback with a predecessor whose
       // generation bytes have become corrupt since the store was loaded.
       await this.generation(this.currentPointer);
-      const inFlight = await this.readPointer('INFLIGHT_PREVIOUS');
+      let inFlight: Pointer | null;
+      try { inFlight = await this.readPointer('INFLIGHT_PREVIOUS'); }
+      catch (error) {
+        if (!(error instanceof StandaloneError &&
+          (error.code === 'INDEX_CORRUPT' || error.code === 'INDEX_INCOMPATIBLE'))) throw error;
+        // A malformed derived in-flight pointer is not a usable rollback.
+        // Keep the authenticated CURRENT and do not overwrite PREVIOUS.
+        inFlight = null;
+      }
       if (inFlight && !samePointer(inFlight, this.currentPointer)) {
         // A previous publication may have committed CURRENT but failed to
-        // finalize PREVIOUS. Repair that valid rollback BEFORE replacing the
-        // in-flight slot; otherwise a failed later commit could erase it.
-        await this.generation(inFlight);
+        // finalize PREVIOUS. Only a still-authentic rollback may replace it.
+        // A corrupt candidate (e.g. B after recovery of valid A) must not
+        // permanently block republishing A or destroy the older PREVIOUS.
+        try { await this.generation(inFlight); }
+        catch (error) {
+          if (!(error instanceof StandaloneError &&
+            (error.code === 'INDEX_CORRUPT' || error.code === 'INDEX_INCOMPATIBLE'))) throw error;
+          inFlight = null;
+        }
+      }
+      if (inFlight && !samePointer(inFlight, this.currentPointer)) {
         let saved: Pointer | null;
         try { saved = await this.readPointer('PREVIOUS'); } catch { saved = null; }
         if (!samePointer(saved, inFlight))
