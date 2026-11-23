@@ -63,12 +63,12 @@ test('05D actual CPU BGE-M3 through real Node→cgroup→Python→Node, v3 sourc
           // production incremental-indexing acceptance case from B4.
           const scoped=await retrieval.search(cfg(),root,pluginId,
             {...query('hybrid','REQ-DR-17'),scope:['ru.md']},()=>true);
-          assert.equal(scoped.status,'ok',scoped.error??undefined);
+          assert.equal(scoped.status,'ok',scoped.error??'unexpected scoped retrieval failure');
           assert.equal(scoped.executedMode,'hybrid');
           assert.ok(scoped.hits.length>0&&scoped.hits.every(h=>h.sourceId==='ru.md'));
           const empty=await retrieval.search(cfg(),root,pluginId,
             {...query('hybrid','REQ-DR-17'),scope:['absent.md']},()=>true);
-          assert.equal(empty.status,'ok',empty.error??undefined);
+          assert.equal(empty.status,'ok',empty.error??'unexpected empty-scope retrieval failure');
           assert.equal(empty.executedMode,'hybrid');
           assert.equal(empty.hits.length,0);
           console.log('OKS05D_REAL_INCREMENTAL_SCOPE_PASS: unindexed source excluded; empty hybrid scope returns zero hits');
@@ -80,7 +80,7 @@ test('05D actual CPU BGE-M3 through real Node→cgroup→Python→Node, v3 sourc
       for(const q of requests){
         const t=performance.now();
         const r=await retrieval.search(cfg(),root,pluginId,q,()=>true);
-        assert.equal(r.status,'ok',r.error??undefined);
+        assert.equal(r.status,'ok',r.error??'unexpected retrieval failure');
         assert.equal(r.executedMode,q.requestedMode);
         assert.ok(r.hits.length>0);
         assert.ok(r.hits.every(h=>h.sourceLocators.length>0&&h.originalExcerpt&&h.sourceSha256));
@@ -114,7 +114,7 @@ test('05D actual CPU BGE-M3 through real Node→cgroup→Python→Node, v3 sourc
       const fixedGeneration=recovered.snapshot();
       assert.ok(fixedGeneration);
       for(const mode of ['lexical','dense','hybrid'] as const){
-        const scored=frozen.map((item,i)=>rankAdvanced({documents:universe,
+        const scored:RetrievalResponse[]=frozen.map((item,i)=>rankAdvanced({documents:universe,
           generation:fixedGeneration, queryVector:mode==='lexical'?null:batch.vectors[i]!,
           request:query(mode,item.query)}));
         assert.ok(scored.every(x=>x.status==='ok'&&x.executedMode===mode));
