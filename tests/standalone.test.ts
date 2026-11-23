@@ -127,6 +127,35 @@ test('lexical exact identifiers, Unicode RU/EN, scope, deterministic tie, filter
     assert.deepEqual(terms('REQ-BOR-21 POST /v2/items'), ['req-bor-21','req','bor','21','post','v2/items','v2','items']);
   } finally { await cleanup(); }
 });
+test('05E-A1: literal occurrences and ordered phrases preserve original Unicode evidence without token-only false positives', async () => {
+  const { root, engine, cleanup } = await setup();
+  try {
+    assert.equal((await engine.search(search('ранит'))).hits.length, 0);
+    const substring = await engine.search(search('ранит', { matchMode: 'literal' }));
+    assert.equal(substring.status, 'ok');
+    assert.equal(substring.hits.length, 1);
+    assert.equal(substring.hits[0]?.sourceId, 'boreal.md');
+    assert.equal(substring.hits[0]?.sourceSha256, hash(FIXTURE));
+    assert.equal(substring.hits[0]?.sourceLocators[0]?.lineStart, 11);
+    assert.equal(substring.hits[0]?.originalExcerpt, 'REQ-BOR-21: SSD хранит объекты 14 суток.');
+    assert.equal((await engine.search(search('ssd ХРАНИТ', { matchMode: 'literal' }))).hits.length, 1);
+    assert.equal((await engine.search(search('хранит SSD', { matchMode: 'literal' }))).hits.length, 0);
+    assert.equal((await engine.search(search('хранит SSD'))).hits.length, 1);
+    assert.equal((await engine.search(search('[[boreal-cache|', { matchMode: 'literal' }))).hits.length, 1);
+    assert.equal((await engine.search(search('ags: [', { matchMode: 'literal' }))).hits.length, 0,
+      'frontmatter must not leak into body substring search');
+    assert.equal((await engine.search(search('Проект 🚀', { matchMode: 'literal' }))).hits[0]?.sourceLocators[0]?.lineStart, 9);
+    assert.equal((await engine.search(search('ранит', { matchMode: 'literal',
+      predicates: [{ key:'enabled', valueType:'boolean', value:false, operator:'eq' }] }))).hits.length, 0);
+    await assert.rejects(engine.search(search('SSD', {
+      matchMode: 'regex' as unknown as SearchRequest['matchMode'],
+    })), error('INVALID_REQUEST'));
+    await writeFile(join(root, 'boreal.md'), FIXTURE.replace('хранит', 'удалено'));
+    assert.equal((await engine.search(search('ранит', { matchMode: 'literal' }))).hits.length, 0,
+      'stale evidence must be revoked even if file events were missed');
+  } finally { await cleanup(); }
+});
+
 test('B9: mixed-case and Unicode source order remains stable without false reconciliation', async () => {
   const { root, reader, store, engine, cleanup } = await setup({
     'Z.md': 'REQ-MIX-UPPER: original upper-case file\n',

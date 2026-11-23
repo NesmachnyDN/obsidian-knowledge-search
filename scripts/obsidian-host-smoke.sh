@@ -31,7 +31,7 @@ done
 printf '%s\n' '["oks-synthetic-evidence"]' > "$tmp/vault/.obsidian/community-plugins.json"
 printf '%s\n' '{"safeMode":false}' > "$tmp/vault/.obsidian/app.json"
 # Separate opt-in tests use *only* synthetic sources and existing local artifacts.
-if [[ "${OKS_ADVANCED_INGESTION_TEST:-0}" == 1 ]]; then
+if [[ "${OKS_ADVANCED_INGESTION_TEST:-0}" == 1 || "${OKS_ADVANCED_RETRIEVAL_TEST:-0}" == 1 ]]; then
   : "${OKS_05C_PYTHON:?set trusted offline test interpreter}"
   : "${OKS_05C_TOKENIZER_SNAPSHOT:?set pinned local tokenizer snapshot}"
   : "${OKS_05C_TESSDATA:?set preinstalled RU/EN OCR data}"
@@ -67,7 +67,7 @@ if [[ "${OKS_HOST_NO_ROUTE:-0}" == 1 ]]; then
   command -v unshare >/dev/null || { echo "HOST_SMOKE_UNAVAILABLE: unshare missing" >&2; exit 2; }
   host_isolation=(unshare -Urn --)
 fi
-env HOME="$tmp/home" timeout 180s "${host_isolation[@]}" xvfb-run -a -e "$tmp/display.log" -s '-screen 0 1280x800x24' bash -c '
+env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolation[@]}" xvfb-run -a -e "$tmp/display.log" -s '-screen 0 1280x800x24' bash -c '
   set -euo pipefail
   "$app" --no-sandbox --disable-gpu --user-data-dir="$tmp/electron" > "$tmp/host.log" 2>&1 &
   p=$!
@@ -122,6 +122,12 @@ env HOME="$tmp/home" timeout 180s "${host_isolation[@]}" xvfb-run -a -e "$tmp/di
     [[ "$ingest" == *"OBSIDIAN_ADVANCED_INGESTION_PASS:"* ]] ||
       { echo "HOST_SMOKE_FAILURE: real opt-in extraction ($ingest)" >&2; exit 1; }
     printf "%s\n" "$ingest"
+  fi
+  if [[ "${OKS_ADVANCED_RETRIEVAL_TEST:-0}" == 1 ]]; then
+    retrieval="$(timeout 250s "$cli" eval "code=$(cat "$repo/scripts/obsidian-retrieval-smoke.js")")"
+    [[ "$retrieval" == *"OBSIDIAN_ADVANCED_RETRIEVAL_PASS:"* ]] ||
+      { echo "HOST_SMOKE_FAILURE: Advanced model-backed UI integration ($retrieval)" >&2; exit 1; }
+    printf "%s\n" "$retrieval"
   fi
   before_reload="$(timeout 8s "$cli" eval "code=(globalThis.__oksPreviousParser=app.plugins.plugins[\"oks-synthetic-evidence\"].standalone.parser,app.plugins.plugins[\"oks-synthetic-evidence\"].standalone.status().generationId)")"
   before_id="$(printf "%s" "$before_reload" | grep -oE "[0-9a-f]{64}" | head -1)"
