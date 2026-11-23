@@ -1,4 +1,6 @@
 import { AdvancedHealthBridge } from './advanced/health';
+import { AdvancedIngestionManager } from './advanced/manager';
+import { IngestError, type IngestResponse } from './advanced/protocol';
 import { FileSystemAdapter, Modal, Notice, Plugin, TFile, type App, type TAbstractFile } from 'obsidian';
 import { ProbeController } from './controller';
 import { FIXTURE_PATH, type Response } from './protocol';
@@ -30,6 +32,10 @@ const pathBarriers = pathHost[pathBarrierKey] ??= new Map<string, Promise<void>>
 const advancedBarrierKey = Symbol.for('oks.advanced.close-barriers.v1');
 const advancedHost = globalThis as typeof globalThis & { [advancedBarrierKey]?: Map<string, Promise<void>> };
 const advancedBarriers = advancedHost[advancedBarrierKey] ??= new Map<string, Promise<void>>();
+// A new plugin instance cannot ingest while the predecessor's unit is stopping.
+const ingestionBarrierKey = Symbol.for('oks.ingestion.close-barriers.v1');
+const ingestionHost = globalThis as typeof globalThis & { [ingestionBarrierKey]?: Map<string, Promise<void>> };
+const ingestionBarriers = ingestionHost[ingestionBarrierKey] ??= new Map<string, Promise<void>>();
 
 class ResultModal extends Modal {
   constructor(app: App, private readonly response: Response) { super(app); }
@@ -52,11 +58,12 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private settingsQueue: Promise<void> = Promise.resolve();
   private purgeInFlight?: Promise<number>;
   readonly advancedHealth = new AdvancedHealthBridge();
+  readonly advancedIngestion = new AdvancedIngestionManager();
   private advancedStartup?: Promise<void>;
   readonly searchController = new SearchController(async hit => {
     if (!this.navigator) throw new StandaloneError('NAVIGATION_REJECTED');
     await this.navigator.open(hit);
-  }, () => this.advancedHealth.snapshot());
+  }, () => this.advancedHealth.snapshot(), () => this.advancedIngestion.snapshot());
   readonly api = new StandaloneApi(this.searchController);
   private loaded = false;
   private unloaded = false;
@@ -87,8 +94,12 @@ export default class SyntheticEvidencePlugin extends Plugin {
       result: response => { this.resultModal?.close(); this.resultModal = new ResultModal(this.app, response); this.resultModal.open(); },
     });
     this.addSettingTab(new SearchSettingsTab(this.app, this, () => this.settings, change => this.patchSettings(change), () => this.purgeIndex(),
-      () => this.advancedHealth.snapshot(), () => this.checkAdvancedHealth()));
-    this.addCommand({ id: 'run-synthetic-evidence-probe', name: 'Run synthetic evidence probe', callback: () => { void this.runProbe(); } });
+      () => this.advancedHealth.snapshot(), () => this.checkAdvancedHealth(),
+      () => this.advancedIngestion.snapshot(), () => this.ingestAdvancedActiveFile()));
+    this.addCommand({ id:'ingest-active-advanced-source', name:'Ingest active Vault document (Advanced opt-in)',
+      callback: () => { void this.ingestAdvancedActiveFile().catch(error =>
+        new Notice('OKS Advanced: '+(error instanceof IngestError?error.code:'ADVANCED_UNAVAILABLE'))); } });
+    this.addCommand({ id: 'run-synthetic-evidence-probe' , name: 'Run synthetic evidence probe', callback: () => { void this.runProbe(); } });
     this.addCommand({ id: 'cancel-synthetic-evidence-probe', name: 'Cancel synthetic evidence probe', callback: () => this.controller?.cancel() });
     const invalidate = (file: TAbstractFile, oldPath?: string): void => {
       const affectsFixture = (path: string): boolean => path === FIXTURE_PATH || FIXTURE_PATH.startsWith(path + '/');
@@ -105,7 +116,8 @@ export default class SyntheticEvidencePlugin extends Plugin {
       this.navigator?.invalidate();
       this.searchController.invalidate();
       this.standalone?.changed(file.path);
-      if (oldPath !== undefined) this.standalone?.changed(oldPath);
+      this.advancedIngestion.invalidate(file.path);
+      if (oldPath !== undefined) { this.standalone?.changed(oldPath); this.advancedIngestion.invalidate(oldPath); }
     };
     this.registerEvent(this.app.vault.on('create', file => nativeChange(file)));
     this.registerEvent(this.app.vault.on('modify', file => nativeChange(file)));
@@ -145,6 +157,8 @@ export default class SyntheticEvidencePlugin extends Plugin {
       this.settings = settings;
       this.standaloneError = null;
       this.searchController.configure(settings.enabled, settings.paused);
+      if (JSON.stringify(before.ingestion) !== JSON.stringify(settings.ingestion))
+        await this.stopIngestion();
       if (JSON.stringify(before.advanced) !== JSON.stringify(settings.advanced)) {
         await this.stopAdvanced();
         if (settings.advanced.enabled && this.layoutReady && !this.unloaded) await this.initializeAdvanced();
@@ -200,6 +214,54 @@ export default class SyntheticEvidencePlugin extends Plugin {
     if (!result.ok) { new Notice(`OKS: ${result.error}`); return; }
     try { await this.patchSettings(settings => { settings.paused = action === 'pause' || action === 'cancel'; }); }
     catch { new Notice('OKS: settings could not be saved.'); }
+  }
+  async ingestAdvancedActiveFile(): Promise<void> {
+    const file=this.app.workspace.getActiveFile();
+    if (!(file instanceof TFile)) throw new IngestError('SOURCE_REJECTED');
+    const response=await this.ingestAdvancedPath(file.path);
+    const blocks=response.source?.blocks.length??0;
+    new Notice('OKS Advanced: '+response.status+'; '+blocks+' blocks. Use verified results for source navigation.');
+  }
+  /** Public opt-in action: only existing Obsidian TFile, never arbitrary host path. */
+  async ingestAdvancedPath(path: string): Promise<IngestResponse> {
+    const adapter=this.app.vault.adapter;
+    const file=this.app.vault.getAbstractFileByPath(path);
+    if (this.unloaded || !this.layoutReady || !this.settings.ingestion.enabled
+        || !(adapter instanceof FileSystemAdapter) || !(file instanceof TFile)
+        || file.path!==path) throw new IngestError('SOURCE_REJECTED');
+    const root=resolve(adapter.getBasePath());
+    try { await ingestionBarriers.get(root); }
+    catch { throw new IngestError('ADVANCED_UNAVAILABLE'); }
+    const cfg={...this.settings.ingestion};
+    const allowed=():boolean=>!this.unloaded && this.layoutReady && this.settings.ingestion.enabled
+      && JSON.stringify(this.settings.ingestion)===JSON.stringify(cfg)
+      && this.app.vault.getAbstractFileByPath(path) === file && file.path===path;
+    if (!allowed()) throw new IngestError('ADVANCED_CANCELLED');
+    return this.advancedIngestion.ingest(cfg,root,this.manifest.id,path,allowed);
+  }
+  /** Re-reads source bytes before returning any Advanced evidence to a caller. */
+  async verifiedAdvancedResult(path: string): Promise<IngestResponse|null> {
+    const file=this.app.vault.getAbstractFileByPath(path);
+    if (!this.settings.ingestion.enabled || this.unloaded || !(file instanceof TFile)) return null;
+    const adapter=this.app.vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter)) return null;
+    await ingestionBarriers.get(resolve(adapter.getBasePath()));
+    await this.advancedIngestion.recover(resolve(adapter.getBasePath()),this.manifest.id);
+    const allowed=()=>!this.unloaded && this.settings.ingestion.enabled
+      && this.app.vault.getAbstractFileByPath(path) === file && file.path===path;
+    return this.advancedIngestion.verified(path,allowed);
+  }
+  private stopIngestion(): Promise<void> {
+    const stopping=this.advancedIngestion.stop();
+    const adapter=this.app.vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter)) return stopping;
+    const key=resolve(adapter.getBasePath());
+    const prior=ingestionBarriers.get(key);
+    const barrier=prior?Promise.all([prior,stopping]).then(()=>undefined):stopping;
+    ingestionBarriers.set(key,barrier);
+    void barrier.then(()=>{if(ingestionBarriers.get(key)===barrier)ingestionBarriers.delete(key);},
+      ()=>{/* Retain rejected barrier: do not admit a replacement process. */});
+    return barrier;
   }
   private stopAdvanced(): Promise<void> {
     const stopping = this.advancedHealth.stop();
@@ -312,6 +374,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     this.app.workspace.detachLeavesOfType(SEARCH_VIEW);
     void this.stopStandalone();
     void this.stopAdvanced().catch(() => { /* failed barrier remains closed to reload */ });
+    void this.stopIngestion().catch(() => { /* failed shutdown denies new ingestion */ });
     this.controller = undefined;
   }
 }

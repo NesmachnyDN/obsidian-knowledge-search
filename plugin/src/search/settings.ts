@@ -3,32 +3,56 @@ import { BOUNDS, isRecord, StandaloneError } from '../standalone/contracts';
 import type { ProbeConfig } from '../controller';
 import type { AdvancedConfig } from '../advanced/health';
 
-export type SearchSettings = {
-  version: 3; enabled: boolean; paused: boolean; topK: number; propertiesEnabled: boolean;
-  advanced: AdvancedConfig;
-  probe: ProbeConfig;
+export type IngestionConfig = {
+  enabled: boolean; interpreter: string; entry: string; tokenizerSnapshot: string;
+  tessdataPath: string; artifactsPath: string; pdfMode: 'text' | 'ocr' | 'structured' | 'structured-ocr';
 };
-export const defaultSettings = (): SearchSettings => ({ version: 3, enabled: true, paused: false,
-  topK: 10, propertiesEnabled: false,
+export type SearchSettings = {
+  version: 4; enabled: boolean; paused: boolean; topK: number; propertiesEnabled: boolean;
+  advanced: AdvancedConfig; ingestion: IngestionConfig; probe: ProbeConfig;
+};
+export const defaultSettings = (): SearchSettings => ({
+  version: 4, enabled: true, paused: false, topK: 10, propertiesEnabled: false,
   advanced: { enabled: false, profile: 'none', interpreter: '', entry: '' },
-  probe: { fixtureMode: false, interpreter: '', entry: '' } });
-const keys = (v: Record<string, unknown>, allowed: string[]): boolean => Object.keys(v).every(k => allowed.includes(k));
+  ingestion: { enabled: false, interpreter: '', entry: '', tokenizerSnapshot: '',
+    tessdataPath: '', artifactsPath: '', pdfMode: 'text' },
+  probe: { fixtureMode: false, interpreter: '', entry: '' },
+});
+const keys = (v: Record<string, unknown>, allowed: string[]): boolean =>
+  Object.keys(v).every(k => allowed.includes(k));
+function pathString(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 4096 && !value.includes('\0')
+    && !value.includes('\\') && !value.includes('\n') && !value.includes('\r');
+}
 function probe(v: unknown): v is ProbeConfig {
   return isRecord(v) && keys(v, ['fixtureMode', 'interpreter', 'entry'])
     && typeof v.fixtureMode === 'boolean'
-    && typeof v.interpreter === 'string' && v.interpreter.length <= 4096 && !v.interpreter.includes('\0')
-    && typeof v.entry === 'string' && v.entry.length <= 4096 && !v.entry.includes('\0');
+    && pathString(v.interpreter) && pathString(v.entry);
 }
 function advanced(v: unknown): v is AdvancedConfig {
   if (!isRecord(v) || !keys(v, ['enabled','profile','interpreter','entry'])
       || typeof v.enabled !== 'boolean' || !['none','local-stdio'].includes(String(v.profile))
-      || typeof v.interpreter !== 'string' || typeof v.entry !== 'string'
-      || v.interpreter.length > 4096 || v.entry.length > 4096
-      || v.interpreter.includes('\0') || v.entry.includes('\0')) return false;
+      || !pathString(v.interpreter) || !pathString(v.entry)) return false;
   if (v.enabled && (v.profile !== 'local-stdio' || !isAbsolute(v.interpreter) || !isAbsolute(v.entry))) return false;
   return true;
 }
-/** Old v1 probe and v2 Standalone settings are migrated with advanced disabled. */
+function ingestion(v: unknown): v is IngestionConfig {
+  if (!isRecord(v) || !keys(v, ['enabled','interpreter','entry','tokenizerSnapshot',
+    'tessdataPath','artifactsPath','pdfMode'])
+    || typeof v.enabled !== 'boolean'
+    || !['text','ocr','structured','structured-ocr'].includes(String(v.pdfMode))
+    || !['interpreter','entry','tokenizerSnapshot','tessdataPath','artifactsPath']
+      .every(k=>pathString(v[k]))) return false;
+  if (!v.enabled) return true;
+  if (!['interpreter','entry','tokenizerSnapshot'].every(k=>isAbsolute(v[k] as string))
+      || !String(v.entry).endsWith('/advanced_ingest.py')) return false;
+  if ((v.pdfMode === 'ocr' || v.pdfMode === 'structured-ocr') && !isAbsolute(v.tessdataPath as string))
+    return false;
+  if ((v.pdfMode === 'structured' || v.pdfMode === 'structured-ocr') && !isAbsolute(v.artifactsPath as string))
+    return false;
+  return true;
+}
+/** Safe v1/v2/v3 migration. Historical settings can NEVER implicitly enable ingestion. */
 export function parseSettings(v: unknown): SearchSettings {
   if (v === null || v === undefined) return defaultSettings();
   if (isRecord(v) && (v.version === undefined || v.version === 1)) {
@@ -36,8 +60,8 @@ export function parseSettings(v: unknown): SearchSettings {
     if (!probe(old)) throw new StandaloneError('SETTINGS_INVALID');
     return { ...defaultSettings(), probe: { ...old } };
   }
-  if (!isRecord(v) || ![2,3].includes(v.version as number)
-      || !keys(v, ['version','enabled','paused','topK','propertiesEnabled','advanced','probe'])
+  if (!isRecord(v) || ![2,3,4].includes(v.version as number)
+      || !keys(v, ['version','enabled','paused','topK','propertiesEnabled','advanced','ingestion','probe'])
       || typeof v.enabled !== 'boolean' || typeof v.paused !== 'boolean' || typeof v.propertiesEnabled !== 'boolean'
       || !Number.isInteger(v.topK) || Number(v.topK) < 1 || Number(v.topK) > BOUNDS.limit || !probe(v.probe))
     throw new StandaloneError('SETTINGS_INVALID');
@@ -51,6 +75,10 @@ export function parseSettings(v: unknown): SearchSettings {
     active = { enabled:v.advanced.enabled, profile:v.advanced.profile,
       interpreter:v.advanced.interpreter, entry:v.advanced.entry };
   }
-  return { version:3, enabled:v.enabled, paused:v.paused, topK:v.topK as number,
-    propertiesEnabled:v.propertiesEnabled, advanced:active, probe: { ...v.probe } };
+  const ingest = (v.version as number) < 4 ? defaultSettings().ingestion : v.ingestion;
+  if (!ingestion(ingest) || (v.version !== 4 && v.ingestion !== undefined))
+    throw new StandaloneError('SETTINGS_INVALID');
+  return { version:4, enabled:v.enabled, paused:v.paused, topK:v.topK as number,
+    propertiesEnabled:v.propertiesEnabled, advanced:active,
+    ingestion: { ...ingest }, probe: { ...v.probe } };
 }
