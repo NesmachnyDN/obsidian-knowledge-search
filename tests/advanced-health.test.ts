@@ -112,7 +112,10 @@ async function running(pid: number): Promise<boolean> {
     const state = raw.slice(raw.lastIndexOf(')') + 2).trim().split(/\s+/)[0];
     return state !== 'Z' && state !== 'X';
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    // Linux procfs may return ESRCH after opening stat if the process exits
+    // before the read. Both ESRCH and ENOENT prove this PID is absent.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ESRCH') return false;
     throw error;
   }
 }
