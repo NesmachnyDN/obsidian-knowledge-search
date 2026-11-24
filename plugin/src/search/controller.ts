@@ -71,7 +71,7 @@ export class SearchController {
   private active = false;
   private pending?: { request: SearchRequest; revision: number; resolve: (v: ApiResult<SearchResponse>) => void };
   private listeners = new Set<() => void>();
-  private previewListeners = new Set<() => void>();
+  private evidenceListeners = new Set<() => void>();
   private state: UiState = { phase: 'idle', message: 'Enter a query to search original Markdown.', response: null };
   constructor(private readonly navigate: (hit: EvidenceHit) => Promise<void>,
     private readonly advancedStatus?: () => AdvancedHealth,
@@ -98,12 +98,12 @@ export class SearchController {
     if (this.disposed) return () => {};
     this.listeners.add(listener); return () => this.listeners.delete(listener);
   }
-  // Preview-only transitions must not invalidate the independent dense machine.
-  subscribeEvidencePreviews(listener: () => void): () => void {
+  // Role-local evidence transitions must not invalidate the independent dense machine.
+  subscribeEvidence(listener: () => void): () => void {
     if (this.disposed) return () => {};
-    this.previewListeners.add(listener); return () => this.previewListeners.delete(listener);
+    this.evidenceListeners.add(listener); return () => this.evidenceListeners.delete(listener);
   }
-  private emitPreview(): void { for (const listener of this.previewListeners) listener(); }
+  private emitEvidence(): void { for (const listener of this.evidenceListeners) listener(); }
   private emit(): void { for (const listener of this.listeners) listener(); }
   invalidate(): void {
     this.revision++; this.revokeEvidence(); this.lastQuery = '';
@@ -168,10 +168,10 @@ export class SearchController {
     this.clearPreview(role);
     const key = role === 'reranking' ? 'rerank' : 'generation';
     this.state = {...this.state,[key]:{phase:'error',error:'CANCELLED',hits:[]}};
-    this.emitPreview();
+    this.emitEvidence();
   }
   private prepareEvidence(role: EvidenceRole): RerankPreview {
-    if (this.clearPreview(role)) this.emitPreview();
+    if (this.clearPreview(role)) this.emitEvidence();
     const port = this.port(role), pref = port?.config();
     if (!pref || pref.state === 'disabled') throw new ProviderFailure('DISABLED');
     if (pref.state !== 'configured') throw new ProviderFailure('CONFIG_INVALID');
@@ -188,7 +188,7 @@ export class SearchController {
     const preview = structuredClone({role,sequence:++this.sequence,revision:this.revision,expiresUnixMs:Date.now()+EVIDENCE_PREVIEW_TTL_MS,config,scopeId,query:this.lastQuery,hits:response.hits});
     this.prepared[role] = preview;
     this.previewTimers[role] = setTimeout(()=>this.expirePreview(role,preview),EVIDENCE_PREVIEW_TTL_MS);
-    this.emitPreview();
+    this.emitEvidence();
     return structuredClone(preview);
   }
   private revokeEvidence(role?: EvidenceRole): void {
@@ -203,7 +203,7 @@ export class SearchController {
     const key = role === 'reranking' ? 'rerank' : 'generation';
     if (hadPreview || this.state[key]) {
       this.state = {...this.state,[key]:{phase:'error',error:'CANCELLED',hits:[]}};
-      if (hadPreview) this.emitPreview(); else this.emit();
+      this.emitEvidence();
     }
   }
   cancelRerank(): void { this.cancelEvidence('reranking'); }
@@ -223,7 +223,7 @@ export class SearchController {
     this.clearPreview(role);
     const port = this.port(role);
     if (!approved || !port || this.aborts[role] || !['synthetic','public'].includes(classification)
-      || JSON.stringify(approved) !== JSON.stringify(preview)) { this.emitPreview(); throw new ProviderFailure('DISCLOSURE_DENIED'); }
+      || JSON.stringify(approved) !== JSON.stringify(preview)) { this.emitEvidence(); throw new ProviderFailure('DISCLOSURE_DENIED'); }
     const current = (): boolean => {
       const config = port.config();
       return !this.disposed && this.enabled && !this.paused && this.revision === approved.revision
@@ -232,11 +232,11 @@ export class SearchController {
         && this.engine?.status().generationId === this.state.response?.indexGenerationId
         && this.state.response?.indexGenerationId === approved.hits[0]?.indexGenerationId;
     };
-    if (!current()) { this.emitPreview(); throw new ProviderFailure('CANCELLED'); }
+    if (!current()) { this.emitEvidence(); throw new ProviderFailure('CANCELLED'); }
     const abort = new AbortController(); this.aborts[role] = abort;
     const key = role === 'reranking' ? 'rerank' : 'generation';
     const deadlineUnixMs = Date.now() + approved.config.limits.timeoutMs;
-    this.state = {...this.state,[key]:{phase:'running',error:null,hits:[]}}; this.emit();
+    this.state = {...this.state,[key]:{phase:'running',error:null,hits:[]}}; this.emitEvidence();
     try {
       const worker = role === 'reranking' ? this.reranker : this.generator;
       const hits = await worker.run({
@@ -250,12 +250,12 @@ export class SearchController {
       if (this.revision === approved.revision && !this.disposed) {
         if (current() && !abort.signal.aborted) this.state = {...this.state,[key]:{phase:'results',error:null,hits}};
         else this.state = {...this.state,[key]:{phase:'error',error:'CANCELLED',hits:[]}};
-        this.emit();
+        this.emitEvidence();
       }
     } catch (error) {
       if (this.revision === approved.revision && !this.disposed) {
         this.state = {...this.state,[key]:{phase:'error',error:error instanceof ProviderFailure?error.code:'NOT_READY',hits:[]}};
-        this.emit();
+        this.emitEvidence();
       }
     } finally { if (this.aborts[role] === abort) delete this.aborts[role]; }
   }
@@ -276,7 +276,7 @@ export class SearchController {
       this.emit(); return { apiVersion: 1, ok: true, value: { cancelled } };
     } catch { return failure('INTERNAL_FAILURE'); }
   }
-  dispose(): void { this.disposed = true; this.invalidate(); this.listeners.clear(); this.previewListeners.clear(); this.engine = undefined; }
+  dispose(): void { this.disposed = true; this.invalidate(); this.listeners.clear(); this.evidenceListeners.clear(); this.engine = undefined; }
 }
 /** Stable in-process API. No listener, IPC transport, or external runtime. */
 export class StandaloneApi {

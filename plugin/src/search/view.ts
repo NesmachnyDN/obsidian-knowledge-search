@@ -171,8 +171,8 @@ export class SearchView extends ItemView {
       });
     };
     const unsubscribe = this.controller.subscribe(render);
-    const unsubscribePreview = this.controller.subscribeEvidencePreviews(render);
-    this.unsubscribe = () => {unsubscribe();unsubscribePreview();};
+    const unsubscribeEvidence = this.controller.subscribeEvidence(render);
+    this.unsubscribe = () => {unsubscribe();unsubscribeEvidence();};
     this.timer = root.ownerDocument.defaultView!.setInterval(renderStatus, 500);
     render(); input.focus();
   }

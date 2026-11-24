@@ -252,8 +252,8 @@ test('pending evidence previews expire independently, reject late or altered con
     t.mock.timers.enable({apis:['Date','setTimeout'],now:1000});
     try {
       await c.search(uiRequest(input.query,2));
-      let lifecycleEvents=0,previewEvents=0;
-      c.subscribe(()=>{lifecycleEvents++;});c.subscribeEvidencePreviews(()=>{previewEvents++;});
+      let lifecycleEvents=0,evidenceEvents=0;
+      c.subscribe(()=>{lifecycleEvents++;});c.subscribeEvidence(()=>{evidenceEvents++;});
       const first=c.prepareRerank();
       assert.equal(first.expiresUnixMs,1000+EVIDENCE_PREVIEW_TTL_MS);
       t.mock.timers.tick(1000);
@@ -286,7 +286,7 @@ test('pending evidence previews expire independently, reject late or altered con
       assert.equal(c.snapshot().rerank?.error,'CANCELLED');
       const cancelled=c.prepareRerank(); c.cancelRerank();
       const invalidated=c.prepareGeneration();
-      assert.equal(lifecycleEvents,0);assert.ok(previewEvents>0);
+      assert.equal(lifecycleEvents,0);assert.ok(evidenceEvents>0);
       c.invalidate();assert.equal(lifecycleEvents,1);
       await assert.rejects(c.rerankConfirmed(cancelled,'synthetic',token),{message:'DISCLOSURE_DENIED'});
       await assert.rejects(c.generationConfirmed(invalidated,'synthetic',token),{message:'DISCLOSURE_DENIED'});
