@@ -7,6 +7,7 @@ import { LoopbackRerankTransport, servedAlias } from '../plugin/src/ai/loopback-
 import { EvidenceReranker, type RerankApproval } from '../plugin/src/ai/rerank-evidence';
 import { RerankRuntimeProfiles, type RerankAdmission, syntheticRuntimeProfile, parseRerankRuntimeProfile,
   rerankProfileDigest, assertRerankAdmission, FIXTURE_PROFILE_TTL_MS } from '../plugin/src/ai/rerank-profile';
+import { bindActiveDeadline, remainingOperationMs } from '../plugin/src/ai/active-deadline';
 import { ProviderFailure, type ProviderConfig } from '../plugin/src/ai/contracts';
 import { configDigest } from '../plugin/src/ai/disclosure';
 import { hash, type EvidenceHit } from '../plugin/src/standalone/contracts';
@@ -582,5 +583,125 @@ test('R2: controller binds exact profile, revokes one-shot consent and guards ev
   },(req,res)=>{calls++;requestBody(req,body=>{
     if(delayHttp){releaseHttp=()=>reply(res,good(body.model));enteredHttp();}
     else reply(res,good(body.model));
+  });});
+});
+
+
+test('B-R2-DEADLINE-01: one immutable effective budget, terminal expiry and rollback',t=>{
+  let wall=10000,mono=2000,boot=1000;
+  t.mock.method(Date,'now',()=>wall);t.mock.method(performance,'now',()=>mono);t.mock.method(os,'uptime',()=>boot);
+  try {
+    const raw={signal:new AbortController().signal,deadlineUnixMs:15000};
+    for(const [max,grant,expected] of [[3000,12000,12000],[1000,15000,11000],[10000,20000,15000]]) {
+      const bound=bindActiveDeadline(raw,max!,grant!);
+      assert.ok(Object.isFrozen(bound));assert.equal(bound.deadlineUnixMs,expected);
+      assert.equal(bindActiveDeadline(bound,max!,grant!),bound);
+      assert.equal(remainingOperationMs(bound),expected!-wall);
+    }
+    const expired=bindActiveDeadline(raw,3000,12000);
+    wall=12000;
+    assert.throws(()=>remainingOperationMs(expired),{message:'TIMEOUT'});
+    wall=10000;mono=2000;boot=1000;
+    assert.throws(()=>remainingOperationMs(expired),{message:'TIMEOUT'});
+    for (const advance of [()=>{mono+=2000;wall-=1000;},()=>{boot+=2;},()=>{mono-=1;}]) {
+      const b=bindActiveDeadline(raw,2000);const before=[wall,mono,boot] as const;
+      advance();assert.throws(()=>remainingOperationMs(b),{message:'TIMEOUT'});
+      [wall,mono,boot]=before;assert.throws(()=>remainingOperationMs(b),{message:'TIMEOUT'});
+    }
+    const rewind=bindActiveDeadline(raw,2000);
+    mono+=500;assert.equal(remainingOperationMs(rewind),1500);
+    mono-=100;assert.throws(()=>remainingOperationMs(rewind),{message:'TIMEOUT'});
+    mono+=100;assert.throws(()=>remainingOperationMs(rewind),{message:'TIMEOUT'});
+    const abort=new AbortController(),c=bindActiveDeadline({signal:abort.signal,deadlineUnixMs:15000},1000);
+    abort.abort();assert.throws(()=>remainingOperationMs(c),{message:'CANCELLED'});
+  } finally {t.mock.restoreAll();}
+});
+
+test('B-R2-DEADLINE-01: deadline crossed after final verified projection rejects worker return',async t=>{
+  await fixture(async cfg=>{
+    let wall=Date.now(),checks=0,reads=0;
+    const deadline=wall+1000;
+    t.mock.method(Date,'now',()=>wall);
+    try {
+      const a=approval(cfg);
+      a.candidates=a.candidates.slice(0,1);a.grant.sources=a.grant.sources.slice(0,1);
+      a.grant.expiresUnixMs=deadline;
+      await assert.rejects(runFixture(new EvidenceReranker(),a,token,{signal:new AbortController().signal,deadlineUnixMs:deadline},
+        async()=>{reads++;},()=>{
+          if(++checks===10)queueMicrotask(()=>{wall=deadline;});
+          return true;
+        }),{message:'TIMEOUT'});
+      assert.equal(reads,2);assert.equal(wall,deadline);
+    } finally {t.mock.restoreAll();}
+  },(req,res)=>requestBody(req,body=>reply(res,{model:body.model,results:[{index:0,relevance_score:1}]})));
+});
+
+for (const boundary of [4,6]) test('B-R2-DEADLINE-01: controller cannot publish expired rerank, boundary '+boundary,async t=>{
+  let calls=0,reads=0,afterReads=0;
+  await fixture(async cfg=>{
+    let wall=Date.now();
+    const deadline=wall+cfg.limits.timeoutMs;
+    t.mock.method(Date,'now',()=>wall);
+    const response:SearchResponse={protocolVersion:2,requestId:'ui',requestedMode:'lexical',
+      executedMode:'lexical',status:'ok',indexGenerationId:hash('generation'),hits:hits.slice(0,1),
+      capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0};
+    const port={config:()=>{
+      if(reads===2 && ++afterReads===boundary)queueMicrotask(()=>{wall=deadline;});
+      return cfg;
+    },scopeId:()=>scopeId,verify:async()=>{reads++;}};
+    const c=new SearchController(async()=>{},undefined,undefined,port,port);
+    c.attach({search:async()=>response,status:()=>({status:'ready',generationId:hash('generation'),
+      sources:1,records:1,busy:false,error:null,maintenanceWarning:null}),
+      cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+    try {
+      await c.search(uiRequest(input.query,1));installFixture(c,cfg);
+      const generation=c.prepareGeneration();
+      const preview=c.prepareRerank();
+      await c.rerankConfirmed(preview,'synthetic',token);
+      assert.equal(wall,deadline);assert.equal(calls,1);assert.equal(reads,2);
+      assert.deepEqual(c.snapshot().rerank,{phase:'error',error:'TIMEOUT',hits:[]});
+      assert.deepEqual(c.snapshot().response,response);
+      assert.equal(c.isEvidencePreviewCurrent('generation',generation.sequence),true);
+      wall=deadline-cfg.limits.timeoutMs;
+      await assert.rejects(c.rerankConfirmed(preview,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+      assert.equal(calls,1);
+    } finally {c.dispose();t.mock.restoreAll();}
+  },(req,res)=>{calls++;requestBody(req,body=>reply(res,{model:body.model,results:[{index:0,relevance_score:1}]}));});
+});
+
+test('B-R2-DEADLINE-01: expiry before queued verification and during verification is zero HTTP',async t=>{
+  let calls=0,reads=0;
+  await fixture(async cfg=>{
+    let wall=Date.now(),mono=1000,boot=1000;
+    t.mock.method(Date,'now',()=>wall);t.mock.method(performance,'now',()=>mono);t.mock.method(os,'uptime',()=>boot);
+    try {
+      const r=new EvidenceReranker(),a=approval(cfg);
+      a.grant.expiresUnixMs=wall+500;
+      const call=()=>({signal:new AbortController().signal,deadlineUnixMs:wall+2000});
+      const pending=runFixture(r,a,token,call(),async()=>{reads++;},()=>true);
+      mono+=500;wall-=100;
+      await assert.rejects(pending,{message:'TIMEOUT'});
+      assert.equal(reads,0);assert.equal(calls,0);
+      const b=approval(cfg);b.grant.expiresUnixMs=wall+500;
+      const during=runFixture(r,b,token,call(),async()=>{reads++;boot+=1;},()=>true);
+      await assert.rejects(during,{message:'TIMEOUT'});
+      assert.equal(reads,1);assert.equal(calls,0);
+    } finally {t.mock.restoreAll();}
+  },(req,res)=>{calls++;req.resume();reply(res,{});});
+});
+
+
+test('B-R2-DEADLINE-01: response after elapsed deadline cannot succeed even with delayed timer and wall rollback',async t=>{
+  let calls=0,reads=0,wall=Date.now(),mono=1000,boot=1000;
+  await fixture(async cfg=>{
+    t.mock.method(Date,'now',()=>wall);t.mock.method(performance,'now',()=>mono);t.mock.method(os,'uptime',()=>boot);
+    try {
+      const a=approval(cfg);a.grant.expiresUnixMs=wall+500;
+      await assert.rejects(runFixture(new EvidenceReranker(),a,token,context(),async()=>{reads++;},()=>true),{message:'TIMEOUT'});
+      assert.equal(reads,a.candidates.length);assert.equal(calls,1);
+    } finally {t.mock.restoreAll();}
+  },(req,res)=>{calls++;requestBody(req,body=>{
+    // The response callback runs before the real timer. Elapsed time, not timer delivery, is authoritative.
+    mono+=500;wall-=100;reply(res,good(body.model));
   });});
 });

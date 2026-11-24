@@ -1,4 +1,5 @@
 import { Agent, request, type ClientRequest } from 'node:http';
+import { remainingOperationMs, expireActiveDeadline } from './active-deadline';
 import { parsePreference } from './config';
 import { ProviderFailure, type CallContext, type ProviderConfig, type AuthorizedCandidates } from './contracts';
 
@@ -54,13 +55,13 @@ export class LoopbackJsonTransport {
     if (typeof token !== 'string' || !/^[A-Za-z0-9._~+\/=-]{1,512}$/.test(token)) return fail('UNAUTHENTICATED');
     if (this.busy) return fail('QUOTA_EXCEEDED');
     const body = checkedJsonBody(payload);
-    const timeout = Math.min(config.limits.timeoutMs, context.deadlineUnixMs - Date.now());
-    if (timeout <= 0) return fail('TIMEOUT');
+    const timeout = Math.min(config.limits.timeoutMs, remainingOperationMs(context));
     this.busy = true;
-    try { return await this.post(config.origin, path, body, token, context.signal, timeout); }
+    try { return await this.post(config.origin, path, body, token, context, timeout); }
     finally { this.busy = false; }
   }
-  private post(origin: string, path: LoopbackPath, body: Buffer, token: string, signal: AbortSignal, timeout: number): Promise<unknown> {
+  private post(origin: string, path: LoopbackPath, body: Buffer, token: string, context: CallContext, timeout: number): Promise<unknown> {
+    const signal = context.signal;
     const responseLimit = path === '/v1/embeddings' ? 1024 * 1024 : MAX_RESPONSE_BYTES;
     return new Promise((resolve, reject) => {
       // Explicit agent; never use environment proxy/global agent or follow redirects.
@@ -75,10 +76,11 @@ export class LoopbackJsonTransport {
         if (error) reject(error); else resolve(result);
       };
       const cancel = (): void => finish(new ProviderFailure('CANCELLED'));
-      const timer = setTimeout(() => finish(new ProviderFailure('TIMEOUT')), timeout);
+      const timer = setTimeout(() => { expireActiveDeadline(context); finish(new ProviderFailure('TIMEOUT')); }, timeout);
       signal.addEventListener('abort', cancel, { once: true });
       if (signal.aborted) { cancel(); return; }
       try {
+        remainingOperationMs(context);
         req = request(new URL(path, origin), {
           method: 'POST', agent, maxHeaderSize: 8192,
           headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json',
@@ -113,7 +115,7 @@ export class LoopbackJsonTransport {
         });
         req.on('error', () => finish(new ProviderFailure('NETWORK')));
         req.end(body);
-      } catch { finish(new ProviderFailure('NETWORK')); }
+      } catch (error) { finish(error instanceof ProviderFailure ? error : new ProviderFailure('NETWORK')); }
     });
   }
 }

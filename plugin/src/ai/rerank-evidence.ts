@@ -1,6 +1,7 @@
 import { type EvidenceHit } from '../standalone/contracts';
 import { ProviderFailure, type CallContext } from './contracts';
 import { LoopbackRerankTransport, pilotConfig } from './loopback-rerank';
+import { bindActiveDeadline, remainingOperationMs } from './active-deadline';
 import { assertRerankAdmission, type RerankAdmission } from './rerank-profile';
 import { VerifiedEvidenceOperation, type EvidenceApproval } from './verified-evidence';
 export type { ClassifiedHit } from './verified-evidence';
@@ -19,12 +20,14 @@ export class EvidenceReranker {
     if (approval.grant?.runtimeProfileBinding !== admission.bindingDigest
       || approval.query?.classification !== 'synthetic'
       || approval.candidates.some(c=>c?.classification !== 'synthetic')) throw new ProviderFailure('DISCLOSURE_DENIED');
+    context = bindActiveDeadline(context,config.limits.timeoutMs,approval.grant.expiresUnixMs);
     const stillCurrent = (): boolean => {
       try { assertRerankAdmission(admission,config,scopeId); return current(); } catch { return false; }
     };
     const {result,evidence} = await this.operation.run('reranking', approval, context, verify, stillCurrent,
       (config,input,call)=>this.transport.rerank(config,input,token,call,admission));
     if (!stillCurrent() || context.signal.aborted) throw new ProviderFailure('CANCELLED');
+    remainingOperationMs(context);
     return result.map((row,i)=>({evidence:evidence[row.id]!,rerankRank:i+1,rerankScore:row.score}));
   }
 }

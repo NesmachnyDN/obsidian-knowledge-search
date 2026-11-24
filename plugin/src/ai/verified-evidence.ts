@@ -2,6 +2,7 @@ import { type EvidenceHit } from '../standalone/contracts';
 import { ProviderFailure, type ProviderConfig, type CallContext } from './contracts';
 import { projectDisclosure, type Classification, type DisclosureGrant } from './disclosure';
 import { pilotConfig } from './loopback-json';
+import { bindActiveDeadline, remainingOperationMs, expireActiveDeadline } from './active-deadline';
 
 export type ClassifiedHit = { hit: EvidenceHit; classification: Classification };
 export type EvidenceApproval = {
@@ -19,8 +20,7 @@ export class VerifiedEvidenceOperation {
   private verifyBounded(hit: EvidenceHit, verify: (hit: EvidenceHit) => Promise<void>,
     context: CallContext, check: () => void): Promise<void> {
     if (context.signal.aborted) return Promise.reject(new ProviderFailure('CANCELLED'));
-    const remaining = context.deadlineUnixMs - Date.now();
-    if (remaining <= 0) return Promise.reject(new ProviderFailure('TIMEOUT'));
+    const remaining = remainingOperationMs(context);
     if (this.pendingVerification >= 2) return Promise.reject(new ProviderFailure('QUOTA_EXCEEDED'));
     this.pendingVerification++;
     return new Promise((resolve,reject) => {
@@ -31,7 +31,7 @@ export class VerifiedEvidenceOperation {
         if(error)reject(error);else resolve();
       };
       const cancel=()=>finish(new ProviderFailure('CANCELLED'));
-      const timer=setTimeout(()=>finish(new ProviderFailure('TIMEOUT')),remaining);
+      const timer=setTimeout(()=>{expireActiveDeadline(context);finish(new ProviderFailure('TIMEOUT'));},remaining);
       context.signal.addEventListener('abort',cancel,{once:true});
       // Both success and rejection are observed even after timeout/abort.
       Promise.resolve().then(()=>{
@@ -55,11 +55,12 @@ export class VerifiedEvidenceOperation {
       : approval.candidates.length < 1) || approval.candidates.length > config.limits.maxCandidates) throw new ProviderFailure('LIMIT_EXCEEDED');
     const snapshot = structuredClone(approval);
     if (!Number.isSafeInteger(context.deadlineUnixMs)) throw new ProviderFailure('CONFIG_INVALID');
-    context = {signal:context.signal,deadlineUnixMs:Math.min(context.deadlineUnixMs,Date.now()+config.limits.timeoutMs)};
+    context = role === 'embedding'
+      ? {signal:context.signal,deadlineUnixMs:Math.min(context.deadlineUnixMs,Date.now()+config.limits.timeoutMs)}
+      : bindActiveDeadline(context,config.limits.timeoutMs,snapshot.grant?.expiresUnixMs);
     const check = (): void => {
       if (context.signal.aborted || !current()) throw new ProviderFailure('CANCELLED');
-      if (!Number.isSafeInteger(context.deadlineUnixMs) || Date.now() >= context.deadlineUnixMs)
-        throw new ProviderFailure('TIMEOUT');
+      remainingOperationMs(context);
     };
     const verifyAll = async (): Promise<void> => {
       for (const { hit } of snapshot.candidates) {
@@ -76,7 +77,7 @@ export class VerifiedEvidenceOperation {
     try {
       check(); projection(); await verifyAll(); check();
       const result = await invoke(config, projection(), context);
-      check(); projection(); await verifyAll(); check(); projection();
+      check(); projection(); await verifyAll(); check(); projection(); remainingOperationMs(context);
       return {result, evidence:snapshot.candidates.map(c=>c.hit)};
     } finally { this.busy = false; }
   }

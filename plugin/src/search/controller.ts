@@ -2,6 +2,7 @@ import os from 'node:os';
 import { EvidenceGenerator, type GeneratedEvidenceClaim } from '../ai/generation-evidence';
 import { EvidenceReranker, type RerankedHit } from '../ai/rerank-evidence';
 import { pilotConfig } from '../ai/loopback-rerank';
+import { bindActiveDeadline, remainingOperationMs } from '../ai/active-deadline';
 import { RerankRuntimeProfiles, type RerankAdmission } from '../ai/rerank-profile';
 import { configDigest } from '../ai/disclosure';
 import { ProviderFailure, type ProviderConfig, type ProviderPreference, type ProviderFailureCode, type AiOperationStatus } from '../ai/contracts';
@@ -322,9 +323,11 @@ export class SearchController {
     };
     if (!current()) { this.emitEvidence(); throw new ProviderFailure('CANCELLED'); }
     const admission = role === 'reranking' ? this.currentRerankAdmission(approved.config,approved.scopeId) : undefined;
-    const abort = new AbortController(); this.aborts[role] = abort;
+    const abort = new AbortController();
     const key = role === 'reranking' ? 'rerank' : 'generation';
-    const deadlineUnixMs = Date.now() + approved.config.limits.timeoutMs;
+    const context = bindActiveDeadline({signal:abort.signal,deadlineUnixMs:Date.now()+approved.config.limits.timeoutMs},approved.config.limits.timeoutMs);
+    const {deadlineUnixMs} = context;
+    this.aborts[role] = abort;
     this.state = {...this.state,[key]:{phase:'running',error:null,hits:[]}}; this.emitEvidence();
     try {
       const worker = role === 'reranking' ? this.reranker : this.generator;
@@ -336,10 +339,12 @@ export class SearchController {
           scopeId:approved.scopeId,expiresUnixMs:deadlineUnixMs,queryDigest:hash(approved.query),
           queryClassification:classification,sources:approved.hits.map(hit=>({sourceId:hit.sourceId,
             sourceSha256:hit.sourceSha256,excerptDigest:hash(hit.originalExcerpt),classification}))},
-      },token,{signal:abort.signal,deadlineUnixMs},hit=>port.verify(hit),current,admission);
+      },token,context,hit=>port.verify(hit),current,admission);
       if (this.revision === approved.revision && !this.disposed) {
-        if (current() && !abort.signal.aborted) this.state = {...this.state,[key]:{phase:'results',error:null,hits}};
-        else this.state = {...this.state,[key]:{phase:'error',error:'CANCELLED',hits:[]}};
+        if (!current() || abort.signal.aborted) throw new ProviderFailure('CANCELLED');
+        remainingOperationMs(context);
+        if (this.revision !== approved.revision || this.disposed) return;
+        this.state = {...this.state,[key]:{phase:'results',error:null,hits}};
         this.emitEvidence();
       }
     } catch (error) {
