@@ -19,6 +19,7 @@ export type EngineState = {
 export type SelectedCorpus = {
   rootId: string; lexicalGenerationId: string; evidence: readonly EvidenceHit[];
   current(): boolean; verify(hit: EvidenceHit): Promise<void>;
+  metadataPaths(request: SearchRequest, lexicalGenerationId: string, selectedPaths: readonly string[]): readonly string[];
 };
 // Query-driven bounded audit; no recurring timer or hidden background scanner.
 // lstat-based hints detect normal misses immediately. Unchanged hints are never
@@ -274,9 +275,23 @@ export class StandaloneEngine {
         throw new StandaloneError('EVIDENCE_INCOMPLETE');
       verifySpan(hit,await this.provider.read(hit.sourceId)); check();
     };
+    const metadataPaths = (request: SearchRequest, lexicalGenerationId: string, selectedPaths: readonly string[]): readonly string[] => {
+      check();
+      validateRequest(request);
+      if (!request.metadata || lexicalGenerationId !== gen!.generationId
+        || !Array.isArray(selectedPaths) || selectedPaths.length !== selected.size
+        || new Set(selectedPaths).size !== selected.size || selectedPaths.some(path => !selected.has(path)))
+        throw new StandaloneError('INVALID_REQUEST');
+      // Use the authoritative parsed document, including frontmatter and fence
+      // semantics; the selected body evidence alone cannot establish eligibility.
+      const paths = docs.filter(doc => metadataAnchor(doc, request.metadata, []))
+        .map(doc => doc.sourceId);
+      check();
+      return paths;
+    };
     check();
     return {rootId:gen!.rootId,lexicalGenerationId:gen!.generationId,
-      evidence:structuredClone(evidence),current,verify};
+      evidence:structuredClone(evidence),current,verify,metadataPaths};
   }
   async search(input: unknown): Promise<SearchResponse> {
     validateRequest(input);

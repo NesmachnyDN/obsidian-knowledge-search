@@ -22,6 +22,8 @@ export type ApiRetrievalPort={
   allowed(hit:EvidenceHit):boolean;
   /** Existing lexical engine, not a provider-produced ranking. */
   lexical(request:SearchRequest):Promise<SearchResponse>;
+  /** Trusted D4 corpus lease; required only for a metadata-filtered text query. */
+  metadataPaths?(request:SearchRequest,lexicalGenerationId:string,selectedPaths:readonly string[]):readonly string[];
 };
 const fail=(code:ProviderFailureCode):never=>{throw new ProviderFailure(code);};
 const cmp=(a:string,b:string)=>a<b?-1:a>b?1:0;
@@ -85,7 +87,7 @@ export class ApiDenseSearch {
     try{
       try{validateRequest(input.request);}catch{return fail('CONFIG_INVALID');}
       if(!['dense','hybrid'].includes(mode)||!input.request.query.trim()
-        ||input.request.metadata!==undefined||mode==='dense'&&input.request.matchMode==='literal'
+        ||mode==='dense'&&input.request.matchMode==='literal'
         ||!Number.isSafeInteger(context.deadlineUnixMs)
         ||!Array.isArray(input.evidence)||input.evidence.length<1||input.evidence.length>MAX_API_VECTORS
         ||input.approval.purpose!=='query'||input.approval.query.text!==input.request.query)
@@ -114,8 +116,19 @@ export class ApiDenseSearch {
       if(generation.rootId!==value.approval.scopeId)return fail('DISCLOSURE_DENIED');
       const map=selected(generation,value.evidence);
       const scope=req.scope?new Set(req.scope):null;
+      let metadata:Set<string>|null=null;
+      if(req.metadata){
+        if(!port.metadataPaths)return fail('NOT_READY');
+        const selectedPaths=new Set([...map.values()].map(hit=>hit.sourceId));
+        const paths=port.metadataPaths(structuredClone(req),value.lexicalGenerationId,[...selectedPaths]);
+        check();
+        if(!Array.isArray(paths)||paths.length>selectedPaths.size
+          ||new Set(paths).size!==paths.length||paths.some(path=>!selectedPaths.has(path)))
+          return fail('NOT_READY');
+        metadata=new Set(paths);
+      }
       const eligible=new Map([...map].filter(([,h])=>(!scope||scope.has(h.sourceId))
-        &&matches(h.properties,req.predicates??[])));
+        &&(!metadata||metadata.has(h.sourceId))&&matches(h.properties,req.predicates??[])));
       const current=()=>port.current()&&this.store.isApiSnapshotCurrent(generation)
         &&value.evidence.every(hit=>port.allowed(hit));
       const {batch}=await this.embedder.run(value.approval,token,context,async()=>{},current);
