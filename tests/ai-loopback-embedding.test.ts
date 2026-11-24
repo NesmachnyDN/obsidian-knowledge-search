@@ -121,3 +121,25 @@ test('embedding grant binds purpose and space; document source freshness before 
     assert.equal(calls,3);
   },(req,res)=>{calls++;body(req,x=>{assert.deepEqual(x.input,calls===1?[query.query]:documents.passages.map(d=>d.text));reply(res,good(calls===1?1:2));});});
 });
+
+test('embedding wire bound accepts valid response above 64KiB and rejects oversized declared/streamed responses',async()=>{
+  let calls=0;
+  const largeSpace={...space,dimension:4096};
+  const unit=Array.from({length:4096},()=>1/64);
+  const large={model,data:[item(0,unit),item(1,unit)]};
+  assert.ok(Buffer.byteLength(JSON.stringify(large))>65536);
+  await fixture(async cfg=>{
+    const t=new LoopbackEmbeddingTransport();
+    const response=await t.embed(cfg,largeSpace,'document',documents,token,context());
+    assert.deepEqual(response.vectors,[unit,unit]);
+    await assert.rejects(t.embed(cfg,largeSpace,'document',documents,token,context()),{message:'INVALID_RESPONSE'});
+    await assert.rejects(t.embed(cfg,largeSpace,'document',documents,token,context()),{message:'LIMIT_EXCEEDED'});
+    assert.equal((await t.embed(cfg,space,'query',query,token,context())).vectors.length,1);
+  },(req,res)=>{
+    req.resume();calls++;
+    if(calls===1)reply(res,large);
+    else if(calls===2){res.writeHead(200,{'content-type':'application/json','content-length':1048577});res.end('x');}
+    else if(calls===3){res.writeHead(200,{'content-type':'application/json'});res.end('x'.repeat(1048577));}
+    else reply(res,good(1));
+  });
+});

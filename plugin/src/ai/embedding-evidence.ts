@@ -8,13 +8,23 @@ export type EmbeddingApproval=Omit<EvidenceApproval,'grant'>&{
   space:EmbeddingSpace;purpose:EmbeddingPurpose;
   grant:DisclosureGrant&{role:'embedding';spaceId:string;purpose:EmbeddingPurpose};
 };
+export type VerifiedEmbeddingResult={batch:EmbeddingBatch;evidence:readonly EvidenceHit[]};
+/** In-process provenance capability. Neither wire JSON nor caller-assembled
+ * evidence/vector pairs may be promoted to a dense document generation. */
+const issued=new WeakMap<VerifiedEmbeddingResult,{scopeId:string;value:VerifiedEmbeddingResult}>();
+export function readVerifiedDocumentBatch(result:VerifiedEmbeddingResult,scopeId:string):VerifiedEmbeddingResult {
+  const binding=issued.get(result);
+  if(!binding||binding.scopeId!==scopeId||binding.value.batch.purpose!=='document'
+    ||JSON.stringify(result)!==JSON.stringify(binding.value))throw new ProviderFailure('DISCLOSURE_DENIED');
+  return structuredClone(binding.value);
+}
 /** Trusted host-issued exact purpose/space grant. This adapter is not wired
  * into production UI or persisted indexing until the subsequent migration. */
 export class EvidenceEmbedder {
   private readonly operation=new VerifiedEvidenceOperation();
   private readonly transport=new LoopbackEmbeddingTransport();
   async run(value:EmbeddingApproval,token:string,context:CallContext,
-    verify:(hit:EvidenceHit)=>Promise<void>,current:()=>boolean):Promise<{batch:EmbeddingBatch;evidence:readonly EvidenceHit[]}> {
+    verify:(hit:EvidenceHit)=>Promise<void>,current:()=>boolean):Promise<VerifiedEmbeddingResult> {
     const snapshot=structuredClone(value);
     const space=validateEmbeddingSpace(snapshot.config,snapshot.space);
     const id=embeddingSpaceId(snapshot.config,space);
@@ -26,6 +36,8 @@ export class EvidenceEmbedder {
     const {result,evidence}=await this.operation.run('embedding',snapshot,context,verify,current,
       (config,input,call)=>this.transport.embed(config,space,snapshot.purpose,input,token,call),
       snapshot.purpose==='query');
-    return {batch:result,evidence};
+    const verified={batch:result,evidence};
+    issued.set(verified,{scopeId:snapshot.scopeId,value:structuredClone(verified)});
+    return verified;
   }
 }
