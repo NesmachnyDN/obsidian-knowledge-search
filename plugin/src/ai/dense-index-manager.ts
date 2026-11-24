@@ -7,7 +7,7 @@ import { canonical } from '../advanced/protocol';
 import { ProviderFailure, type ProviderFailureCode, type ProviderConfig, type EmbeddingSpace, type CallContext } from './contracts';
 import { configDigest } from './disclosure';
 import { pilotConfig } from './loopback-json';
-import { MAX_EMBEDDING_BATCH } from './loopback-embedding';
+import { preflightDocumentEmbedding } from './loopback-embedding';
 import { embeddingSpaceId, validateEmbeddingSpace } from './embedding-space';
 import { EvidenceEmbedder, type EmbeddingApproval, type VerifiedEmbeddingResult } from './embedding-evidence';
 import { MAX_API_VECTORS, buildApiDenseGeneration } from './dense-generation';
@@ -38,16 +38,22 @@ function errorCode(error:unknown):ProviderFailureCode{
   return 'NOT_READY';
 }
 function batches(evidence:readonly EvidenceHit[],config:ProviderConfig):EvidenceHit[][]{
-  const fixed=Buffer.byteLength(INDEX_PURPOSE_TEXT),max=Math.min(MAX_EMBEDDING_BATCH,config.limits.maxCandidates);
   const result:EvidenceHit[][]=[];
-  let batch:EvidenceHit[]=[],bytes=fixed;
+  let batch:EvidenceHit[]=[];
+  const preflight=(hits:readonly EvidenceHit[])=>preflightDocumentEmbedding(config,{
+    query:INDEX_PURPOSE_TEXT,passages:hits.map((hit,id)=>({id,text:hit.originalExcerpt})),
+  });
   for(const hit of evidence){
-    const size=Buffer.byteLength(hit.originalExcerpt);
-    if(!size||size+fixed>config.limits.maxInputBytes)fail('LIMIT_EXCEEDED');
-    if(batch.length===max||bytes+size>config.limits.maxInputBytes){
-      result.push(batch);batch=[];bytes=fixed;
+    // Atomic evidence must fit on its own; reject the entire plan before egress.
+    preflight([hit]);
+    if(batch.length){
+      try{preflight([...batch,hit]);}
+      catch(error){
+        if(!(error instanceof ProviderFailure)||error.code!=='LIMIT_EXCEEDED')throw error;
+        result.push(batch);batch=[];
+      }
     }
-    batch.push(hit);bytes+=size;
+    batch.push(hit);
   }
   if(batch.length)result.push(batch);
   return result;

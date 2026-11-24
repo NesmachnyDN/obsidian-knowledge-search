@@ -35,6 +35,12 @@ export function checkedCandidates(config: ProviderConfig, input: AuthorizedCandi
       return row.text;
     });
 }
+/** Exact wire encoding and size admission, also used by offline batch preflight. */
+export function checkedJsonBody(payload: unknown): Buffer {
+  const body = Buffer.from(JSON.stringify(payload), 'utf8');
+  if (body.length > MAX_WIRE_BYTES) return fail('LIMIT_EXCEEDED');
+  return body;
+}
 /** Internal transport: endpoint, credentials, wire and deadline bounds.
  * Role adapters must validate payloads and caller disclosure separately. */
 export class LoopbackJsonTransport {
@@ -47,8 +53,7 @@ export class LoopbackJsonTransport {
     if (!Number.isSafeInteger(context.deadlineUnixMs)) return fail('CONFIG_INVALID');
     if (typeof token !== 'string' || !/^[A-Za-z0-9._~+\/=-]{1,512}$/.test(token)) return fail('UNAUTHENTICATED');
     if (this.busy) return fail('QUOTA_EXCEEDED');
-    const body = Buffer.from(JSON.stringify(payload), 'utf8');
-    if (body.length > MAX_WIRE_BYTES) return fail('LIMIT_EXCEEDED');
+    const body = checkedJsonBody(payload);
     const timeout = Math.min(config.limits.timeoutMs, context.deadlineUnixMs - Date.now());
     if (timeout <= 0) return fail('TIMEOUT');
     this.busy = true;

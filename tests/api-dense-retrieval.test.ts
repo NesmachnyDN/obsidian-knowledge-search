@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
-import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises';
 import {writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -38,6 +38,7 @@ type Fixture={
   makeApproval:(purpose:'query'|'document',query:string,evidence:readonly EvidenceHit[],
     config?:ProviderConfig,space?:EmbeddingSpace)=>EmbeddingApproval;
   onRequest:(hook:()=>void)=>void;
+  wireRequests:()=>readonly {bytes:number;texts:string[]}[];
 
 };
 async function fixture(run:(f:Fixture)=>Promise<void>){
@@ -45,12 +46,14 @@ async function fixture(run:(f:Fixture)=>Promise<void>){
   const prior=process.env.XDG_DATA_HOME;
   await mkdir(vault,{mode:0o700});await mkdir(xdg,{mode:0o700});process.env.XDG_DATA_HOME=xdg;
   let calls=0,lexicalCalls=0,denied=false,rateLimited=false,requestHook=()=>{};
+  const wireRequests:{bytes:number;texts:string[]}[]=[];
   const server=createServer((req,res)=>{
     let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
       calls++;requestHook();
       assert.equal(req.url,'/v1/embeddings');assert.equal(req.headers.authorization,'Bearer '+token);
       const payload=JSON.parse(body) as {model:string;input:string[];encoding_format:string};
       assert.deepEqual(Object.keys(payload).sort(),['encoding_format','input','model']);
+      wireRequests.push({bytes:Buffer.byteLength(body),texts:payload.input});
       if(rateLimited){res.writeHead(429);res.end();return;}
       const data=payload.input.map((_,i)=>({object:'embedding',index:i,
         embedding:payload.input.length===1?[0,1,0]:i===0?[1,0,0]:[0,1,0]}));
@@ -98,7 +101,7 @@ async function fixture(run:(f:Fixture)=>Promise<void>){
       lexicalGenerationId,evidence:structuredClone(hits),approval:approval('query',query,[])}),
       port,service,store,sibling,calls:()=>calls,lexicalCalls:()=>lexicalCalls,
       deny:()=>{denied=true;},rateLimit:()=>{rateLimited=true;},vault,engine:lexicalEngine,config,
-      makeApproval:approval,onRequest:hook=>{requestHook=hook;}});
+      makeApproval:approval,onRequest:hook=>{requestHook=hook;},wireRequests:()=>wireRequests});
   }finally{
     await engine?.close();
     server.closeAllConnections();
@@ -340,5 +343,46 @@ test('D4 concurrent rebuild denied and missed byte change during provider call s
     }});
     assert.equal((await concurrent)?.error,'QUOTA_EXCEEDED');assert.equal(r.status,'failed');
     await assert.rejects(f.store.snapshotApi(embeddingSpaceId(f.config,space),f.input('alpha','dense').lexicalGenerationId));
+  });
+});
+
+test('D4 oversized later serialized batch rejects entire plan with zero HTTP and unchanged CURRENT',async()=>{
+  await fixture(async f=>{
+    const pointer=join(f.store.path,'CURRENT'),prior=await readFile(pointer);
+    const large='x'+'\u0001'.repeat(25000);
+    await writeFile(join(f.vault,'b.md'),large+'\n');
+    f.engine.changed('b.md');await f.engine.whenIdle();
+    const lease=await f.engine.captureDenseCorpus(['a.md','b.md'],256,context().signal);
+    assert.deepEqual(lease.evidence.map(h=>h.originalExcerpt),['common alpha storage',large]);
+    const config={...f.config,limits:{...f.config.limits,maxInputBytes:65536,maxCandidates:1}};
+    const before=f.calls();let grants=0;const port=indexPort(f);
+    const result=await new ApiDenseIndexManager(f.engine,f.store).rebuild(
+      {paths:['a.md','b.md'],config,space},token,context(),{...port,current:()=>true,
+        authorize:i=>{grants++;return port.authorize(i);}});
+    assert.equal(result.error,'LIMIT_EXCEEDED');assert.equal(f.calls(),before);
+    assert.equal(grants,0);assert.deepEqual(await readFile(pointer),prior);
+  });
+});
+test('D4 exact wire boundary accepted and split without truncating original evidence',async()=>{
+  await fixture(async f=>{
+    const wire=(texts:string[])=>Buffer.byteLength(JSON.stringify({
+      model:'fixture@v1',input:texts,encoding_format:'float'}));
+    const limit=128*1024,room=limit-wire(['x']);
+    const boundary='x'+'\u0001'.repeat(Math.floor(room/6))+'y'.repeat(room%6);
+    const second='common beta archive';
+    assert.equal(wire([boundary]),limit);assert.ok(wire([boundary,second])>limit);
+    await writeFile(join(f.vault,'a.md'),boundary+'\n');
+    f.engine.changed('a.md');await f.engine.whenIdle();
+    const lease=await f.engine.captureDenseCorpus(['a.md','b.md'],256,context().signal);
+    assert.deepEqual(lease.evidence.map(h=>h.originalExcerpt),[boundary,second]);
+    const config={...f.config,limits:{...f.config.limits,maxInputBytes:65536}};
+    const before=f.calls();
+    const result=await new ApiDenseIndexManager(f.engine,f.store).rebuild(
+      {paths:['a.md','b.md'],config,space},token,context(),{...indexPort(f),current:()=>true});
+    assert.equal(result.status,'ok',result.error ?? undefined);assert.equal(result.count,2);
+    assert.deepEqual(f.wireRequests().slice(before),[
+      {bytes:limit,texts:[boundary]},{bytes:wire([second]),texts:[second]}]);
+    const published=await f.store.snapshotApi(embeddingSpaceId(config,space),f.engine.status().generationId!);
+    assert.equal(published?.generationId,result.generationId);assert.equal(published?.entries.length,2);
   });
 });
