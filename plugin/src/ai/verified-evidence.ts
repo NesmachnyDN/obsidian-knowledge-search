@@ -17,7 +17,7 @@ export class VerifiedEvidenceOperation {
   // outstanding reads, including abandoned ones, across operations.
   private pendingVerification = 0;
   private verifyBounded(hit: EvidenceHit, verify: (hit: EvidenceHit) => Promise<void>,
-    context: CallContext): Promise<void> {
+    context: CallContext, check: () => void): Promise<void> {
     if (context.signal.aborted) return Promise.reject(new ProviderFailure('CANCELLED'));
     const remaining = context.deadlineUnixMs - Date.now();
     if (remaining <= 0) return Promise.reject(new ProviderFailure('TIMEOUT'));
@@ -35,7 +35,9 @@ export class VerifiedEvidenceOperation {
       context.signal.addEventListener('abort',cancel,{once:true});
       // Both success and rejection are observed even after timeout/abort.
       Promise.resolve().then(()=>{
-        if(context.signal.aborted)throw new ProviderFailure('CANCELLED');
+        try { check(); } catch (error) {
+          finish(error instanceof ProviderFailure ? error : new ProviderFailure('CANCELLED'));return;
+        }
         return verify(hit);
       }).then(()=>{this.pendingVerification--;finish();},()=>{
         this.pendingVerification--;finish(new ProviderFailure('SOURCE_STALE'));
@@ -62,7 +64,7 @@ export class VerifiedEvidenceOperation {
     const verifyAll = async (): Promise<void> => {
       for (const { hit } of snapshot.candidates) {
         check();
-        await this.verifyBounded(structuredClone(hit),verify,context);
+        await this.verifyBounded(structuredClone(hit),verify,context,check);
         check();
       }
     };

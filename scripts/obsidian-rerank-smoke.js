@@ -5,6 +5,7 @@
   const wait=async(fn,code)=>{const deadline=Date.now()+7000;while(!fn()){
     assert(Date.now()<deadline,code);await new Promise(r=>setTimeout(r,30));}};
   const old=p.settings;
+  const count=()=>Number(require('node:fs').readFileSync(require('node:path').join(app.vault.adapter.getBasePath(),'..','rerank-ready.rerank-count'),'utf8'));
   const operation=()=>p.searchController.evidenceOperationStatus('reranking');
   const root=()=>app.workspace.getLeavesOfType('oks-standalone-search')[0]?.view.contentEl;
   const el=selector=>{const item=root()?.querySelector(selector);assert(item,'ELEMENT');return item;};
@@ -36,6 +37,12 @@
       origin:'http://127.0.0.1:18765',identity:{model:'synthetic-reranker',revision:'fixture-v1'},
       limits:{timeoutMs:3000,maxInputBytes:4096,maxCandidates:2,maxOutputTokens:32,maxConcurrent:1}}}});
     await query();
+    // Configuration alone is not permission to verify or call a model.
+    const initial=count();
+    click('.oks-rerank-prepare');assert(el('.oks-rerank-message').textContent.includes('NOT_READY'),'ALIAS_ONLY_DENIED');
+    assert(count()===initial,'ALIAS_ONLY_ZERO_HTTP');
+    const host=p.searchController;
+    host.rerankProfiles.installSyntheticFixture(p.settings.ai.reranking,host.rerankPort.scopeId(),'isolated-obsidian-fixture');
     const lexical=p.searchController.snapshot().response.hits;
     assert(lexical.length===2,'LEXICAL_CANDIDATES');
     // Accelerate only the pending-preview timer in this disposable host, not HTTP deadlines.
@@ -73,10 +80,19 @@
     staleButton.click();
     assert(operation().error==='CANCELLED','DETACHED_CONFIRM_DENIED');
     assert(JSON.stringify(p.searchController.snapshot().response.hits)===JSON.stringify(lexical),'POLL_EXPIRY_LEXICAL_UNCHANGED');
+    // Replacing the identical profile invalidates the exact armed preview without restoring it.
+    click('.oks-rerank-prepare');set('.oks-rerank-classification','synthetic','change');set('.oks-rerank-token','fixture-success');
+    const armedCheck=el('.oks-rerank-confirm-check');armedCheck.checked=true;armedCheck.dispatchEvent(new Event('change',{bubbles:true}));
+    const armedButton=el('.oks-rerank-confirm'),armedToken=el('.oks-rerank-token');
+    host.rerankProfiles.installSyntheticFixture(p.settings.ai.reranking,host.rerankPort.scopeId(),'isolated-obsidian-fixture');
+    await Promise.resolve();
+    assert(armedToken.value===''&&!root().querySelector('.oks-rerank-token'),'PROFILE_CHANGE_CLEARS_TOKEN');
+    armedButton.click();assert(count()===initial,'RETIRED_PREVIEW_ZERO_HTTP');
     confirm('fixture-success');
     await wait(()=>p.searchController.snapshot().rerank?.phase==='results','RESULTS');
     const result=p.searchController.snapshot();
     assert(operation().phase==='complete'&&operation().error===null,'SETTINGS_COMPLETE');
+    assert(count()===initial+1&&el('.oks-rerank-message').textContent.includes('synthetic fixture'),'FIXTURE_ONLY_RESULT');
     assert(JSON.stringify(result.response.hits)===JSON.stringify(lexical),'LEXICAL_UNCHANGED');
     assert(JSON.stringify(result.rerank.hits.map(x=>x.evidence))===JSON.stringify([lexical[1],lexical[0]]),'EVIDENCE_REORDER');
     assert(root().querySelectorAll('.oks-rerank-results li').length===2,'RENDERED');
@@ -91,6 +107,12 @@
     await wait(()=>!p.searchController.snapshot().response,'MUTATION_INVALIDATES');
     await new Promise(r=>setTimeout(r,1400));assert(!p.searchController.snapshot().rerank,'STALE_SUPPRESSED');
     assert(!JSON.stringify(p.settings).includes('fixture-success'),'TOKEN_NOT_PERSISTED');
+    const originalConfig=p.settings.ai.reranking;
+    const beforeRestore=count();
+    await p.updateSettings({...p.settings,ai:{...p.settings.ai,reranking:{...originalConfig,identity:{...originalConfig.identity,revision:'changed'}}}});
+    await p.updateSettings({...p.settings,ai:{...p.settings.ai,reranking:originalConfig}});
+    await query();click('.oks-rerank-prepare');
+    assert(operation().error==='NOT_READY'&&count()===beforeRestore,'CONFIG_RESTORE_NOT_ADMITTED');
     return 'OBSIDIAN_RERANK_FIXTURE_PASS: explicit consent local HTTP original evidence reorder auth cancel stale suppression lexical independence; mock only';
   } finally {
     await app.vault.delete(a);await app.vault.delete(b);await p.updateSettings(old);

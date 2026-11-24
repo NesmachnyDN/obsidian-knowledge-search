@@ -695,6 +695,13 @@ for (const role of ['reranking','generation'] as const) {
         limits:{timeoutMs:2000,maxInputBytes:4096,maxCandidates:8,maxOutputTokens:32,maxConcurrent:1}} as const;
       await f.plugin.patchSettings(s=>{s.ai.embedding=cfg;s.ai.reranking=cfg;s.ai.generation=cfg;});
       await f.plugin.standalone!.whenIdle();
+      // Provision only this in-process synthetic server through the trusted host seam.
+      const profileHost=c as unknown as {
+        rerankProfiles:{installSyntheticFixture(config:typeof cfg,scopeId:string,fixtureId:string):unknown};
+        rerankPort:{scopeId():string};
+      };
+      profileHost.rerankProfiles.installSyntheticFixture(cfg,profileHost.rerankPort.scopeId(),'role-lifecycle-fixture');
+
       const lexical=await c.search({protocolVersion:2,requestId:'role-lexical',query:'REQ-LIFE-1',requestedMode:'lexical',limit:5});
       assert.ok(lexical.ok&&lexical.value.hits.length>0);
       const space:EmbeddingSpace={...identity,dimension:3,normalization:'unit-l2',

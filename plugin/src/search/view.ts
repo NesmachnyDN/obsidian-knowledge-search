@@ -141,10 +141,11 @@ export class SearchView extends ItemView {
       if (this.disposed) return;
       renderStatus(); const state = this.controller.snapshot(); message.textContent = state.message; results.replaceChildren();
       rerankPanel.rows.replaceChildren();generationPanel.rows.replaceChildren();
-      rerankPanel.message.textContent=state.rerank?'Local rerank: '+(state.rerank.error??state.rerank.phase):'Local rerank: not run';
+      rerankPanel.message.textContent=state.rerank?'Local rerank: '+(state.rerank.error??
+        ('synthetic fixture '+state.rerank.phase+' (not actual model execution)')):'Local rerank: not run';
       state.rerank?.hits.forEach(hit=>{
         const row=textElement(doc,'li','');row.appendChild(textElement(doc,'pre',hit.evidence.originalExcerpt));
-        row.appendChild(textElement(doc,'span','Rerank score: '+hit.rerankScore));
+        row.appendChild(textElement(doc,'span','Synthetic fixture score: '+hit.rerankScore));
         const index=state.response?.hits.findIndex(candidate=>JSON.stringify(candidate)===JSON.stringify(hit.evidence))??-1;
         const open=textElement(doc,'button',hit.evidence.sourceId+' — verify and open','oks-rerank-open');
         open.onclick=()=>{if(!this.disposed)void this.controller.open(index,hit.evidence);};row.appendChild(open);rerankPanel.rows.appendChild(row);

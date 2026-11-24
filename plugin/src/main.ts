@@ -222,6 +222,9 @@ export default class SyntheticEvidencePlugin extends Plugin {
         if (!this.unloaded) this.settings = settings;
         return;
       }
+      // Do not restore a revoked fixture admission even if settings save fails.
+      if (JSON.stringify(this.settings.ai.reranking) !== JSON.stringify(settings.ai.reranking))
+        this.searchController.revokeRerankProfile();
       this.denseSettingsChanging = true;
       try {
         this.denseMachine.invalidate();

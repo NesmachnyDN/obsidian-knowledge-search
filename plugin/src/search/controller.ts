@@ -2,6 +2,7 @@ import os from 'node:os';
 import { EvidenceGenerator, type GeneratedEvidenceClaim } from '../ai/generation-evidence';
 import { EvidenceReranker, type RerankedHit } from '../ai/rerank-evidence';
 import { pilotConfig } from '../ai/loopback-rerank';
+import { RerankRuntimeProfiles, type RerankAdmission } from '../ai/rerank-profile';
 import { configDigest } from '../ai/disclosure';
 import { ProviderFailure, type ProviderConfig, type ProviderPreference, type ProviderFailureCode, type AiOperationStatus } from '../ai/contracts';
 import { hash, isDigest } from '../standalone/contracts';
@@ -48,7 +49,7 @@ export function propertyInput(key: string, valueType: string, operator: string, 
 type Engine = Pick<StandaloneEngine, 'search' | 'status' | 'cancel' | 'resume' | 'rebuild'>;
 type EvidenceRole = 'reranking' | 'generation';
 export const EVIDENCE_PREVIEW_TTL_MS = 300_000;
-export type RerankPreview = { role: EvidenceRole; sequence: number; revision: number; expiresUnixMs: number; config: ProviderConfig; scopeId: string; query: string; hits: EvidenceHit[] };
+export type RerankPreview = { role: EvidenceRole; sequence: number; revision: number; expiresUnixMs: number; config: ProviderConfig; scopeId: string; query: string; hits: EvidenceHit[]; runtimeProfileBinding?: string; runtimeProfileDigest?: string };
 // Internal elapsed-time deadlines are never taken from the returned preview.
 type PendingEvidencePreview = { preview: RerankPreview; monotonicStartedMs: number; bootStartedSeconds: number };
 export type RerankState = { phase: 'running' | 'results' | 'error'; error: ProviderFailureCode | null; hits: readonly RerankedHit[] };
@@ -71,6 +72,7 @@ export class SearchController {
   private aborts: Partial<Record<EvidenceRole,AbortController>> = {};
   private readonly generator = new EvidenceGenerator();
   private readonly reranker = new EvidenceReranker();
+  private readonly rerankProfiles = new RerankRuntimeProfiles(()=>this.invalidateRerankProfile());
   private active = false;
   private pending?: { request: SearchRequest; revision: number; resolve: (v: ApiResult<SearchResponse>) => void };
   private listeners = new Set<() => void>();
@@ -85,15 +87,17 @@ export class SearchController {
   configure(enabled: boolean, paused: boolean, error: string | null = null): void {
     this.enabled = enabled; this.paused = paused; this.error = safeCode(error); this.invalidate();
   }
-  detach(): void { this.engine = undefined; this.invalidate(); }
+  detach(): void { this.engine = undefined; this.rerankProfiles.revoke(); this.invalidate(); }
   status(): SearchStatus { return statusSnapshot(this.engine?.status(), !this.disposed && this.enabled, this.paused,
     this.error, this.advancedStatus?.(), this.ingestionStatus?.()); }
   snapshot(): UiState {
+    this.rerankProfiles.checkLifetime();
     this.currentPreview('reranking'); this.currentPreview('generation');
     return structuredClone(this.state);
   }
   /** No query, passages, source IDs, grants or tokens cross this metadata boundary. */
   evidenceOperationStatus(role: EvidenceRole): AiOperationStatus {
+    if (role === 'reranking') this.rerankProfiles.checkLifetime();
     const pending = this.currentPreview(role);
     const state = role === 'reranking' ? this.state.rerank : this.state.generation;
     if (state?.phase === 'running') return {phase:'busy',error:null};
@@ -173,9 +177,45 @@ export class SearchController {
   private port(role: EvidenceRole): RerankPort | undefined {
     return role === 'reranking' ? this.rerankPort : this.generationPort;
   }
-  prepareRerank(): RerankPreview { return this.prepareEvidence('reranking'); }
+  prepareRerank(): RerankPreview {
+    try { return this.prepareEvidence('reranking'); }
+    catch (error) {
+      if (!this.disposed && !this.aborts.reranking && error instanceof ProviderFailure
+        && error.code === 'NOT_READY' && this.rerankPort?.config().state === 'configured') {
+        this.state = {...this.state,rerank:{phase:'error',
+          error:error.code,hits:[]}};
+        this.emitEvidence();
+      }
+      throw error;
+    }
+  }
   prepareGeneration(): RerankPreview { return this.prepareEvidence('generation'); }
-  private currentPreview(role: EvidenceRole): PendingEvidencePreview | undefined {
+  /** Settings changes revoke admission itself, not just pending consent. */
+  revokeRerankProfile(): void { this.rerankProfiles.revoke(); }
+  private invalidateRerankProfile(): void {
+    const affected = !!this.prepared.reranking || !!this.aborts.reranking || !!this.state.rerank;
+    this.revokeEvidence('reranking');
+    if (affected) {
+      this.state = {...this.state,rerank:{phase:'error',error:'CANCELLED',hits:[]}};
+      this.notifyExpiry();
+    }
+  }
+  private currentRerankAdmission(config: ProviderConfig, scopeId: string): RerankAdmission {
+    return this.rerankProfiles.current(config,scopeId);
+  }
+  private profileCurrent(preview: RerankPreview, checkConfig = true): boolean {
+    if (preview.role !== 'reranking') return true;
+    try {
+      const port=this.rerankPort, config=checkConfig ? port?.config() : preview.config,
+        scopeId=checkConfig ? port?.scopeId() : preview.scopeId;
+      if (config?.state !== 'configured' || scopeId !== preview.scopeId) {
+        this.rerankProfiles.revoke();return false;
+      }
+      const admission=this.currentRerankAdmission(config,scopeId);
+      return admission.bindingDigest === preview.runtimeProfileBinding && admission.profileDigest === preview.runtimeProfileDigest;
+    } catch { return false; }
+  }
+  private currentPreview(role: EvidenceRole, checkConfig = true): PendingEvidencePreview | undefined {
     const pending = this.prepared[role];
     if (!pending) return undefined;
     // performance.now covers elapsed execution (including delayed callbacks).
@@ -187,7 +227,8 @@ export class SearchController {
         && monotonic - pending.monotonicStartedMs < EVIDENCE_PREVIEW_TTL_MS
         && Number.isFinite(boot) && boot >= pending.bootStartedSeconds
         && boot < pending.bootStartedSeconds+EVIDENCE_PREVIEW_TTL_MS/1000
-        && Number.isFinite(wall) && wall < pending.preview.expiresUnixMs) return pending;
+        && Number.isFinite(wall) && wall < pending.preview.expiresUnixMs
+        && this.profileCurrent(pending.preview,checkConfig)) return pending;
     } catch { /* An unavailable clock cannot authorize disclosure. */ }
     this.expirePreview(role,pending);
     return undefined;
@@ -212,6 +253,7 @@ export class SearchController {
   private prepareEvidence(role: EvidenceRole): RerankPreview {
     if (this.clearPreview(role)) this.emitEvidence();
     const port = this.port(role), pref = port?.config();
+    if (role === 'reranking' && pref?.state !== 'configured') this.rerankProfiles.revoke();
     if (!pref || pref.state === 'disabled') throw new ProviderFailure('DISABLED');
     if (pref.state !== 'configured') throw new ProviderFailure('CONFIG_INVALID');
     const config = pilotConfig(pref);
@@ -224,12 +266,14 @@ export class SearchController {
     if (response.hits.length > config.limits.maxCandidates
       || Buffer.byteLength(this.lastQuery) + response.hits.reduce((n, hit) => n + Buffer.byteLength(hit.originalExcerpt), 0)
         > config.limits.maxInputBytes) throw new ProviderFailure('LIMIT_EXCEEDED');
+    const admission = role === 'reranking' ? this.currentRerankAdmission(config,scopeId) : undefined;
     const monotonicStartedMs = performance.now();
     const bootStartedSeconds = os.uptime();
     const expiresUnixMs = Date.now()+EVIDENCE_PREVIEW_TTL_MS;
     if (![monotonicStartedMs,bootStartedSeconds,expiresUnixMs].every(Number.isFinite))
       throw new ProviderFailure('NOT_READY');
-    const preview = structuredClone({role,sequence:++this.sequence,revision:this.revision,expiresUnixMs,config,scopeId,query:this.lastQuery,hits:response.hits});
+    const preview = structuredClone({role,sequence:++this.sequence,revision:this.revision,expiresUnixMs,config,scopeId,query:this.lastQuery,hits:response.hits,
+      ...(admission ? {runtimeProfileBinding:admission.bindingDigest,runtimeProfileDigest:admission.profileDigest} : {})});
     const pending = {preview,monotonicStartedMs,bootStartedSeconds};
     this.prepared[role] = pending;
     this.previewTimers[role] = setTimeout(()=>this.expirePreview(role,pending),EVIDENCE_PREVIEW_TTL_MS);
@@ -260,21 +304,24 @@ export class SearchController {
     return this.confirmEvidence('generation',preview,classification,token);
   }
   private async confirmEvidence(role: EvidenceRole, preview: RerankPreview, classification: 'synthetic' | 'public', token: string): Promise<void> {
-    const approved = this.currentPreview(role)?.preview;
+    const approved = this.currentPreview(role,false)?.preview;
     if (!approved) throw new ProviderFailure('DISCLOSURE_DENIED');
     this.clearPreview(role);
     const port = this.port(role);
     if (!port || this.aborts[role] || !['synthetic','public'].includes(classification)
+      || role === 'reranking' && classification !== 'synthetic'
       || JSON.stringify(approved) !== JSON.stringify(preview)) { this.emitEvidence(); throw new ProviderFailure('DISCLOSURE_DENIED'); }
     const current = (): boolean => {
       const config = port.config();
       return !this.disposed && this.enabled && !this.paused && this.revision === approved.revision
+        && this.profileCurrent(approved)
         && port.scopeId() === approved.scopeId && config.state === 'configured'
         && configDigest(role,config) === configDigest(role,approved.config)
         && this.engine?.status().generationId === this.state.response?.indexGenerationId
         && this.state.response?.indexGenerationId === approved.hits[0]?.indexGenerationId;
     };
     if (!current()) { this.emitEvidence(); throw new ProviderFailure('CANCELLED'); }
+    const admission = role === 'reranking' ? this.currentRerankAdmission(approved.config,approved.scopeId) : undefined;
     const abort = new AbortController(); this.aborts[role] = abort;
     const key = role === 'reranking' ? 'rerank' : 'generation';
     const deadlineUnixMs = Date.now() + approved.config.limits.timeoutMs;
@@ -285,10 +332,11 @@ export class SearchController {
         config:approved.config,scopeId:approved.scopeId,query:{text:approved.query,classification},
         candidates:approved.hits.map(hit=>({hit,classification})),
         grant:{version:1,role,configDigest:configDigest(role,approved.config),
+          ...(admission ? {runtimeProfileBinding:admission.bindingDigest} : {}),
           scopeId:approved.scopeId,expiresUnixMs:deadlineUnixMs,queryDigest:hash(approved.query),
           queryClassification:classification,sources:approved.hits.map(hit=>({sourceId:hit.sourceId,
             sourceSha256:hit.sourceSha256,excerptDigest:hash(hit.originalExcerpt),classification}))},
-      },token,{signal:abort.signal,deadlineUnixMs},hit=>port.verify(hit),current);
+      },token,{signal:abort.signal,deadlineUnixMs},hit=>port.verify(hit),current,admission);
       if (this.revision === approved.revision && !this.disposed) {
         if (current() && !abort.signal.aborted) this.state = {...this.state,[key]:{phase:'results',error:null,hits}};
         else this.state = {...this.state,[key]:{phase:'error',error:'CANCELLED',hits:[]}};
@@ -318,7 +366,7 @@ export class SearchController {
       this.emit(); return { apiVersion: 1, ok: true, value: { cancelled } };
     } catch { return failure('INTERNAL_FAILURE'); }
   }
-  dispose(): void { this.disposed = true; this.invalidate(); this.listeners.clear(); this.evidenceListeners.clear(); this.engine = undefined; }
+  dispose(): void { this.disposed = true; this.rerankProfiles.revoke(); this.invalidate(); this.listeners.clear(); this.evidenceListeners.clear(); this.engine = undefined; }
 }
 /** Stable in-process API. No listener, IPC transport, or external runtime. */
 export class StandaloneApi {
