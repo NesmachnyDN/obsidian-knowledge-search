@@ -231,5 +231,12 @@ export class AdvancedRetrievalManager {
     catch{this.status={...this.status,status:'failed',error:'MODEL_UNAVAILABLE'};
       throw new ModelError('MODEL_UNAVAILABLE');}
   }
-  async dispose():Promise<void>{this.disposed=true;return this.stop();}
+  /** Ownership transfer, unlike ordinary cancel, must discard the drained
+   * instance-local snapshot so the next admission reopens authoritative CURRENT.
+   * The host publishes a storage barrier before admitting another owner. */
+  async releaseStorage():Promise<void>{
+    await this.stop();
+    this.store=undefined;this.root=undefined;
+  }
+  async dispose():Promise<void>{this.disposed=true;return this.releaseStorage();}
 }

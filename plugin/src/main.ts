@@ -389,7 +389,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
   }
   async cancelAdvancedWork():Promise<void>{await this.advancedRetrieval.stop();}
   private stopIngestion(): Promise<void> {
-    return this.trackStorageDrain(this.advancedRetrieval.stop().then(()=>this.advancedIngestion.stop()));
+    return this.trackStorageDrain(this.advancedRetrieval.releaseStorage().then(()=>this.advancedIngestion.stop()));
   }
   private trackStorageDrain(stopping: Promise<void>): Promise<void> {
     const adapter=this.app.vault.adapter;
