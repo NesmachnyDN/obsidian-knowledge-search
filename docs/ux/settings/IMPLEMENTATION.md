@@ -93,10 +93,33 @@ ranking improvement (reranking) and evidence-based answers (generation). Use
 origin, model identifier and revision, and explicitly **Save connection**.
 The configured preference is **not a readiness probe, permission grant or
 provider activation**. Endpoint syntax rejects credentials, paths, queries,
-noncanonical local aliases, and unknown model identity. API keys cannot be
-entered in this settings interface. Cloud remains unavailable for disclosure
+noncanonical local aliases, and unknown model identity. Provider credentials are never stored in settings. The explicit local connection
+check accepts a masked one-check bearer token in the editor. Cloud remains unavailable for disclosure
 unless the existing per-operation, per-source authorization process permits
 it. Local loopback is not an assumption of a trusted model.
+
+### Connection check (OKS-06UX-CHECK-L)
+
+For a supported local HTTP embedding or generation draft, enter the exact
+origin, model and revision, and use **Check** without saving. For embeddings
+also enter the expected vector dimension (1–4096), needed by the existing
+unit-L2 pilot embedding-space validation. This dimension is a transient
+test input, not a new saved model profile. A masked bearer token is used
+once and cleared. The same runtime adapter sends only a fixed synthetic
+input, validates the declared identity and output, and reports elapsed time
+or a typed error. No notes, file names, secrets in diagnostics, indexing,
+grant, persistent readiness state or settings save. Changes, editor close,
+redraw, tab hide and plugin unload cancel or invalidate the result.
+No network request is initiated by opening or saving settings. Shared
+role/endpoint admission prevents a Check and a normal provider request from
+executing concurrently against the same local role endpoint.
+
+Actual reranking remains unavailable for connection testing until its
+real runtime profile is independently accepted (#57). Cloud checks require
+reviewed provider adapters (#58). S3 checks belong to optional portable
+embedding transport (06C, #59), not the external Vault synchronization
+client. See [the complete contract](../../prompts/OKS-06UX-CHECK.md).
+The connection result does not establish Gate B acceptance or index compatibility.
 
 Each card has its own Save/Cancel/Disable actions, drafts and error state;
 changing one does not configure the others. Technical limits are visible in
