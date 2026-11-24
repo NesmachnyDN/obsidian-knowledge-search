@@ -143,6 +143,10 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
     [[ "$rerank" == *"OBSIDIAN_RERANK_FIXTURE_PASS:"* ]] || {
       echo "HOST_SMOKE_FAILURE: isolated rerank UI fixture ($rerank)" >&2; exit 1; }
     printf "%s\n" "$rerank"
+    generation="$(timeout 40s "$cli" eval "code=$(cat "$repo/scripts/obsidian-generation-smoke.js")")"
+    [[ "$generation" == *"OBSIDIAN_GENERATION_FIXTURE_PASS:"* ]] || {
+      echo "HOST_SMOKE_FAILURE: isolated generation UI fixture ($generation)" >&2; exit 1; }
+    printf "%s\n" "$generation"
   fi
   if [[ "${OKS_ADVANCED_HEALTH_TEST:-0}" == 1 ]]; then
     advanced="$(timeout 25s "$cli" eval "code=$(cat "$repo/scripts/obsidian-advanced-smoke.js")")"
