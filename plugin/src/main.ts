@@ -64,6 +64,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private denseSettingsChanging = false;
   private readonly denseUi = new DenseUiController({
     host: () => this.denseSettingsChanging ? undefined : this.denseHost,
+    sharedFence: () => this.searchController?.sharedAuthorityTransition() ?? false,
     revokeNavigation: () => this.navigator?.invalidate(),
     navigate: async hit => {
       if (!this.navigator) throw new StandaloneError('NAVIGATION_REJECTED');
@@ -86,7 +87,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
   readonly advancedIngestion = new AdvancedIngestionManager();
   readonly advancedRetrieval = new AdvancedRetrievalManager(this.advancedIngestion);
   private advancedStartup?: Promise<void>;
-  readonly searchController = new SearchController(async hit => {
+  readonly searchController: SearchController = new SearchController(async hit => {
     if (!this.navigator) throw new StandaloneError('NAVIGATION_REJECTED');
     await this.navigator.open(hit);
   }, () => this.advancedHealth.snapshot(), () => this.advancedIngestion.snapshot(), {
@@ -97,7 +98,10 @@ export default class SyntheticEvidencePlugin extends Plugin {
     config: () => this.settings.ai.generation,
     scopeId: () => this.sourceReader?.rootId,
     verify: hit => this.verifyAiEvidence(hit),
-  }, () => {this.denseMachine.invalidate();this.denseUi.invalidate();});
+  }, () => this.revokeDenseAuthority());
+  private revokeDenseAuthority(): void {
+    this.denseUi.authority.revoke(()=>{this.denseMachine.invalidate();this.denseUi.invalidate();});
+  }
   private async verifyAiEvidence(hit: EvidenceHit): Promise<void> {
     const reader = this.sourceReader, file = this.app.vault.getAbstractFileByPath(hit.sourceId);
     if (!reader || !(file instanceof TFile) || file.path !== hit.sourceId) throw new StandaloneError('SOURCE_REJECTED');
@@ -226,13 +230,11 @@ export default class SyntheticEvidencePlugin extends Plugin {
         this.searchController.revokeRerankProfile();
       this.denseSettingsChanging = true;
       try {
-        this.denseMachine.invalidate();
-        this.denseUi.invalidate();
+        this.revokeDenseAuthority();
         this.denseHost?.invalidate();
         await this.saveData(settings);
         if (this.unloaded) return;
-        this.denseMachine.invalidate();
-        this.denseUi.invalidate();
+        this.revokeDenseAuthority();
         this.denseHost?.invalidate();
         const before = this.settings;
         if (before.ingestion.enabled !== settings.ingestion.enabled) {
@@ -542,8 +544,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     });
   }
   private stopDenseHost(): Promise<void> {
-    this.denseMachine.invalidate();
-    this.denseUi.invalidate();
+    this.revokeDenseAuthority();
     const host = this.denseHost;
     if (!host) return Promise.resolve();
     // Publish the drain before losing ownership. close() revokes synchronously;

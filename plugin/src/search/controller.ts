@@ -81,6 +81,8 @@ export class SearchController {
   private evidenceListeners = new Set<() => void>();
   private pendingExpiryNotification?: object;
   private notifying = false;
+  private revokingSharedAuthority = false;
+  private deliveringLifecycle = false;
   private evidencePending?: number;
   private lifecyclePending?: {revision:number; final:boolean; listeners:(() => void)[]};
   private notificationVersion = 0;
@@ -92,7 +94,12 @@ export class SearchController {
     private readonly ingestionStatus?: () => IngestionStatus,
     private readonly rerankPort?: RerankPort, private readonly generationPort?: RerankPort,
     private readonly revokeSharedAuthority?: () => void) {}
-  attach(engine: Engine): void { if (!this.disposed) { this.engine = engine; this.error = null; this.emit(); } }
+  attach(engine: Engine): void {
+    if (this.disposed) return;
+    const replaced = this.engine !== undefined && this.engine !== engine;
+    this.engine = engine; this.error = null;
+    if (replaced) this.invalidate(); else this.emit();
+  }
   configure(enabled: boolean, paused: boolean, error: string | null = null): void {
     if (this.disposed) return;
     this.enabled = enabled; this.paused = paused; this.error = safeCode(error); this.invalidate();
@@ -130,12 +137,12 @@ export class SearchController {
     }
     if (!channel.has(listener)) {
       // Count successful additions, including remove/re-add, across both channels.
-      if (this.notifying && this.waveAdditions >= 32) {
+      if ((this.notifying || this.revokingSharedAuthority) && this.waveAdditions >= 32) {
         console.warn('SEARCH_OBSERVER_REJECTED', 'registration-budget');
         return () => {};
       }
       channel.add(listener);
-      if (this.notifying) {
+      if (this.notifying || this.revokingSharedAuthority) {
         this.waveAdditions++;
         this.notificationVersion++;
         if (channel === this.listeners) this.queueLifecycle();
@@ -158,10 +165,10 @@ export class SearchController {
     this.notificationVersion++;
     this.drainNotifications();
   }
-  private drainNotifications(): void {
-    if (this.notifying) return;
+  private drainNotifications(continueWave = false): void {
+    if (this.notifying || this.revokingSharedAuthority) return;
     this.notifying = true;
-    this.waveAdditions = 0;
+    if (!continueWave) this.waveAdditions = 0;
     const mutations = new Map<() => void, number>();
     try {
       while (this.lifecyclePending || this.evidencePending !== undefined) {
@@ -181,10 +188,13 @@ export class SearchController {
             if (count >= 16) this.quarantine(listener, 'mutation-budget');
           }
         };
-        for (const listener of lifecycle?.listeners ?? []) {
-          if (this.revision !== lifecycle!.revision || this.disposed !== lifecycle!.final) break;
-          if (this.listeners.has(listener)) deliver(listener);
-        }
+        this.deliveringLifecycle = !!lifecycle;
+        try {
+          for (const listener of lifecycle?.listeners ?? []) {
+            if (this.revision !== lifecycle!.revision || this.disposed !== lifecycle!.final) break;
+            if (this.listeners.has(listener)) deliver(listener);
+          }
+        } finally { this.deliveringLifecycle = false; }
         for (const listener of evidence) {
           if (this.disposed || this.revision !== revision) break;
           if (this.evidenceListeners.has(listener)) deliver(listener);
@@ -205,7 +215,7 @@ export class SearchController {
   // a single microtask when expiry is discovered outside evidence delivery.
   private notifyExpiry(): void {
     if (this.disposed) return;
-    if (this.notifying) { this.emitEvidence(); return; }
+    if (this.notifying || this.revokingSharedAuthority) { this.emitEvidence(); return; }
     if (this.pendingExpiryNotification) return;
     const notification = {};
     this.pendingExpiryNotification = notification;
@@ -219,11 +229,21 @@ export class SearchController {
   private emit(final = false): void {
     if (this.disposed && !final) return;
     this.pendingExpiryNotification = undefined;
-    // Host-owned revocation is authority, not an observer. It cannot be deferred or quarantined.
-    this.revokeSharedAuthority?.();
+    // Reserve publication before the synchronous host hook. A nested transition
+    // may replace it but cannot drain or dispatch while authority is being revoked.
+    if (!this.notifying && !this.revokingSharedAuthority) this.waveAdditions = 0;
     this.queueLifecycle();
     this.notificationVersion++;
-    this.drainNotifications();
+    if (this.revokingSharedAuthority) return;
+    this.revokingSharedAuthority = true;
+    try { this.revokeSharedAuthority?.(); }
+    finally { this.revokingSharedAuthority = false; }
+    this.drainNotifications(true);
+  }
+  /** Host admission stays closed through shared revocation and lifecycle delivery,
+   * never through independent evidence-only notifications. */
+  sharedAuthorityTransition(): boolean {
+    return this.disposed || this.revokingSharedAuthority || this.deliveringLifecycle || !!this.lifecyclePending;
   }
   invalidate(): void { if (!this.disposed) this.invalidateState(); }
   private resetSharedState(state: UiState): void {
@@ -257,7 +277,7 @@ export class SearchController {
     return result;
   }
   private async pump(): Promise<void> {
-    if (this.notifying || this.active || !this.pending) return;
+    if (this.notifying || this.revokingSharedAuthority || this.active || !this.pending) return;
     const job = this.pending; this.pending = undefined;
     if (this.disposed || job.revision !== this.revision || !this.engine) {
       job.resolve(failure('SUPERSEDED')); return;
@@ -491,7 +511,11 @@ export class SearchController {
     if (this.disposed || !this.enabled || !hit || !Number.isInteger(index)
       || expected && JSON.stringify(expected) !== JSON.stringify(hit)) return failure('NAVIGATION_REJECTED');
     const revision = this.revision;
-    try { await this.navigate(structuredClone(hit)); return { apiVersion: 1, ok: true, value: null }; }
+    try {
+      await this.navigate(structuredClone(hit));
+      return this.disposed || this.revision !== revision
+        ? failure('SUPERSEDED') : { apiVersion: 1, ok: true, value: null };
+    }
     catch {
       if (!this.disposed && this.revision === revision) this.message('NAVIGATION_REJECTED');
       return failure('NAVIGATION_REJECTED');
@@ -499,6 +523,7 @@ export class SearchController {
   }
   control(action: 'pause' | 'cancel' | 'resume' | 'rebuild'): ApiResult<{ cancelled: boolean | null }> {
     if (this.disposed || !this.enabled || !this.engine) return failure('DISABLED');
+    if (this.revokingSharedAuthority) return failure('SUPERSEDED');
     const engine = this.engine, revision = this.revision + 1;
     this.invalidate();
     // The initial shared invalidation is synchronous. Do not execute a stale

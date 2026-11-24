@@ -26,34 +26,44 @@ export class DenseMachine {
   private reading=false;
   private draining=false;
   private disposed=false;
-  private readonly listeners=new Set<()=>void>();
+  private readonly listeners: ReturnType<DenseUiController['authority']['channel']>;
   private readonly unsubscribe:()=>void;
   constructor(private readonly ui:DenseUiController,private readonly port:Port,private readonly now=Date.now){
-    this.unsubscribe=ui.subscribe(()=>{
+    this.listeners=ui.authority.channel();
+    this.unsubscribe=ui.bindMachine(()=>{
       const s=this.slot;
-      if(s?.owner&&!ui.owns(s.owner))this.clear();
+      if(ui.isDisposed()&&s)this.clear();
+      else if(s?.owner&&!ui.owns(s.owner))this.clear();
       else if(s&&!s.owner&&ui.occupied())this.clear();
       else this.emit();
     });
   }
   subscribe(listener:()=>void):()=>void {
     if(this.disposed)return ()=>{};
-    this.listeners.add(listener);return ()=>this.listeners.delete(listener);
+    return this.ui.authority.subscribe(this.listeners,listener);
   }
-  private emit():void{for(const listener of this.listeners)listener();}
-  private clear():void {
-    const s=this.slot;this.slot=undefined;
-    if(this.timer!==undefined)clearTimeout(this.timer);
-    this.timer=undefined;s?.abort.abort();
-    if(s?.owner)this.ui.cancel(s.owner);
-    this.emit();
+  private emit():void{this.ui.authority.publish(this.listeners);}
+  private clear():number {
+    const s=this.slot;if(!s)return this.ui.authority.epoch();
+    return this.ui.authority.revoke(()=>{
+      this.slot=undefined;
+      if(this.timer!==undefined)clearTimeout(this.timer);
+      this.timer=undefined;s.abort.abort();
+      if(s.owner)this.ui.cancel(s.owner);
+      this.emit();
+      return this.ui.authority.epoch();
+    });
   }
   invalidate():void {if(this.slot)this.clear();}
-  dispose():void {this.disposed=true;this.unsubscribe();this.clear();this.listeners.clear();}
+  dispose():void {
+    if(this.disposed)return;
+    this.disposed=true;this.unsubscribe();
+    this.ui.authority.revoke(()=>{this.clear();this.ui.authority.retire(this.listeners);});
+  }
   private current(s:Slot):boolean {
     try{
       const p=this.port.preference();
-      return !this.disposed&&this.slot===s&&!s.abort.signal.aborted&&this.now()<s.fence.expiresUnixMs
+      return !this.disposed&&!this.ui.isDisposed()&&!this.ui.authority.revoking()&&this.slot===s&&!s.abort.signal.aborted&&this.now()<s.fence.expiresUnixMs
         &&this.port.host()===s.host&&p.state==='configured'
         &&configDigest('embedding',pilotConfig(p))===s.fence.digest
         &&(!s.owner||this.ui.owns(s.owner));
@@ -64,7 +74,7 @@ export class DenseMachine {
   /** Only called from a dedicated human ItemView action. */
   async review(owner:symbol):Promise<void> {
     const s=this.slot;
-    if(!s||s.owner||this.ui.occupied())return;
+    if(this.ui.authority.admissionClosed()||!s||s.owner||this.ui.occupied())return;
     if(!this.current(s)){this.clear();return;}
     // Reserve ownership synchronously, before prepare can publish any state.
     s.owner=owner;
@@ -105,22 +115,28 @@ export class DenseMachine {
   async request(input:unknown):Promise<Reply> {
     try{
       const cmd=parseMachine(input,this.port.preference);
-      if(this.disposed)return fail('NOT_READY');
+      if(this.disposed||this.ui.isDisposed())return fail('NOT_READY');
       if(cmd.operation==='submit'){
-        if(this.slot&&!this.current(this.slot))this.clear();
+        if(this.ui.authority.admissionClosed())return fail('NOT_READY');
+        if(this.slot&&!this.current(this.slot)){
+          const retired=this.clear();
+          if(this.ui.authority.epoch()!==retired)return fail('INVALID_OPERATION');
+        }
+        if(this.disposed||this.ui.isDisposed()||this.ui.authority.admissionClosed())return fail('NOT_READY');
         if(this.slot||this.reading||this.draining||this.ui.occupied())return fail('BUSY');
         const host=this.port.host();if(!host)return fail('NOT_READY');
         const id=randomUUID(),expiresUnixMs=this.now()+300000;
         const s:Slot={id,input:cmd.input,fence:{digest:cmd.digest,expiresUnixMs},host,abort:new AbortController()};
         this.slot=s;this.timer=setTimeout(()=>{if(this.slot===s)this.clear();},300000);
         this.timer.unref?.();this.emit();
-        return ok({operationId:id,expiresUnixMs});
+        return this.current(s)?ok({operationId:id,expiresUnixMs}):fail('INVALID_OPERATION');
       }
       const s=this.slot;
       if(!s||cmd.operationId!==s.id)return fail('INVALID_OPERATION');
       if(!this.current(s)){this.clear();return fail('INVALID_OPERATION');}
       if(cmd.operation==='status')return ok(this.status(s));
       if(cmd.operation==='cancel'){this.clear();return ok(null);}
+      if(this.ui.authority.admissionClosed())return fail('NOT_READY');
       if(this.reading||this.draining)return fail('BUSY');
       if(!s.owner)return fail('NOT_READY');
       const state=this.ui.snapshot(s.owner);
@@ -134,7 +150,8 @@ export class DenseMachine {
           if(this.slot===s)this.clear();
           return fail('SOURCE_STALE');
         }
-        this.clear();return ok(result);
+        const retired=this.clear();
+        return !this.disposed&&!this.ui.isDisposed()&&this.ui.authority.epoch()===retired?ok(result):fail('SOURCE_STALE');
       }catch{
         if(this.slot===s)this.clear();
         return fail('SOURCE_STALE');

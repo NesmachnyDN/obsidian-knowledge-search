@@ -123,6 +123,27 @@
     const cancelId=await stage();await review();
     assert((await read('cancel',cancelId)).ok&&!root().querySelector('.oks-dense-token')
       &&!(await read('result',cancelId)).ok&&count()===beforeMachine+1,'MACHINE_CANCEL');
+    // LIFE-07/08: actual packaged authority hook, pending machine consent and
+    // real ItemView token cleanup. Assertions run outside observer delivery.
+    const authorityId=await stage();await review();set('.oks-dense-token','fixture-unconfirmed');
+    const authorityBefore=count(),delivered=[];let nestedSubmit,manualPrepare,thrown=0;
+    const bad=p.denseMachine.subscribe(()=>{thrown++;throw Error('synthetic observer');});
+    const reentry=p.denseMachine.subscribe(()=>{
+      nestedSubmit??=machine('submit',{request,space});
+      manualPrepare??=p.denseUi.prepare(Symbol('nested-fixture'),{kind:'search',paths:request.scope,space,request});
+    });
+    const lifecycle=p.searchController.subscribe(()=>delivered.push({
+      pending:p.denseMachine.pending(),phase:p.denseUi.operationStatus().phase}));
+    try{
+      const lexical=await p.searchController.search({protocolVersion:2,requestId:'authority-fixture',
+        query:'REQ-OKS-DENSE',requestedMode:'lexical',limit:1});
+      assert(lexical.ok&&lexical.value.status==='ok','AUTHORITY_LEXICAL');
+      const nested=await nestedSubmit;await manualPrepare;
+      assert(nested&&!nested.ok&&nested.error==='NOT_READY'&&thrown===1,'AUTHORITY_REENTRY_EXCEPTION');
+      assert(delivered.length>0&&delivered.every(s=>!s.pending&&s.phase==='idle'),'AUTHORITY_FINAL');
+      assert(!(await read('status',authorityId)).ok&&!root().querySelector('.oks-dense-token')
+        &&count()===authorityBefore,'AUTHORITY_TOKEN_NO_EGRESS');
+    }finally{bad();reentry();lifecycle();}
     const errorId=await stage();await review();approve('fixture-rate');
     await wait(()=>message().includes('RATE_LIMITED'),'MACHINE_RATE');
     const denied=await read('result',errorId);
@@ -149,7 +170,7 @@
     await wait(()=>p.searchController.snapshot().phase==='results','LEXICAL_INDEPENDENCE');
     assert(p.searchController.snapshot().response.executedMode==='lexical','LEXICAL_MODE');
     assert(!JSON.stringify(p.settings).includes('fixture-success'),'TOKEN_NOT_PERSISTED');
-    return 'OBSIDIAN_DENSE_FIXTURE_PASS: actual UI explicit one-shot consent exact corpus/space no pre-consent HTTP rebuild dense hybrid metadata navigation errors cancellation freshness lexical independence; D8 CLI machine staged consent, ownership, one-shot fresh result, cancellation, typed error, non-hit stale rejection; synthetic only';
+    return 'OBSIDIAN_DENSE_FIXTURE_PASS: actual UI explicit one-shot consent exact corpus/space no pre-consent HTTP rebuild dense hybrid metadata navigation errors cancellation freshness lexical independence; D8 CLI machine staged consent, ownership, one-shot fresh result, cancellation, typed error, non-hit stale rejection, atomic shared authority reentry/exception and token cleanup; synthetic only';
   }finally{
     await app.vault.delete(a);await app.vault.delete(b);await p.updateSettings(old);
     await sleep(250);await p.standalone.whenIdle();await p.openSearch();
