@@ -35,7 +35,7 @@ test('settings strictly migrate v1 probe fields; unknown versions/keys/types fai
   assert.deepEqual(parseSettings(null), defaultSettings());
   for (const version of [undefined, 1]) {
     const migrated = parseSettings({ version, fixtureMode: true, interpreter: '/synthetic/python', entry: '/synthetic/probe.py' });
-    assert.equal(migrated.version, 4); assert.equal(migrated.probe.fixtureMode, true);
+    assert.equal(migrated.version, 5); assert.equal(migrated.probe.fixtureMode, true);
     assert.equal(migrated.advanced.enabled, false);
   }
   for (const v of [{}, { version: 9 }, { ...defaultSettings(), enabled: 'true' },

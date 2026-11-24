@@ -2,7 +2,7 @@ code=(async()=>{
   const fail=(ok,code)=>{if(!ok)throw Error('OKS05C_HOST_'+code);};
   const p=app.plugins.plugins["oks-synthetic-evidence"];
   fail(!!p && !!p.standalone && p.standalone.status().status==='ready','STANDALONE_NOT_READY');
-  fail(p.settings.version===4 && !p.settings.ingestion.enabled,'NOT_DEFAULT_OFF');
+  fail(p.settings.version===5 && !p.settings.ingestion.enabled,'NOT_DEFAULT_OFF');
   fail(p.advancedIngestion.snapshot().status==='disabled','ADVANCED_STARTED_BY_DEFAULT');
   const python=process.env.OKS_05C_PYTHON;
   const snapshot=process.env.OKS_05C_TOKENIZER_SNAPSHOT;
