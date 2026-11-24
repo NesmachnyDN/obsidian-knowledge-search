@@ -1102,3 +1102,46 @@ test('B-R2-TERM-04 removal, late addition, deferred expiry and stale grant clean
     assert.deepEqual(internal.previewTimers,{});assert.deepEqual(internal.prepared,{});
   }finally{c.dispose();}
 });
+
+for (const role of ['reranking','generation'] as const) for (const end of ['invalidate','dispose'] as const) {
+  test(`B-R2-LIFE-05: ${role} nested replacement owns exactly one timer before ${end}`,async t=>{
+    const {c,reads}=await observerController();
+    const live=new Set<ReturnType<typeof setTimeout>>();
+    const set=globalThis.setTimeout,clear=globalThis.clearTimeout;
+    t.mock.method(globalThis,'setTimeout',(fn:()=>void,ms:number)=>{
+      const h=set(fn,ms);live.add(h);return h;
+    });
+    t.mock.method(globalThis,'clearTimeout',(h:ReturnType<typeof setTimeout>)=>{live.delete(h);clear(h);});
+    const prepare=()=>role==='reranking'?c.prepareRerank():c.prepareGeneration();
+    let nested:number|undefined,once=false;
+    try {
+      prepare();
+      c.subscribeEvidence(()=>{if(!once){once=true;nested=prepare().sequence;}});
+      const outer=prepare();
+      assert.notEqual(nested,undefined);
+      assert.equal(c.isEvidencePreviewCurrent(role,outer.sequence),false);
+      assert.equal(c.isEvidencePreviewCurrent(role,nested!),true);
+      assert.equal(live.size,1);
+      c[end]();
+      assert.equal(live.size,0);
+      assert.equal(c.isEvidencePreviewCurrent(role,nested!),false);
+      assert.equal(reads(),0);
+    }finally{c.dispose();for(const h of live)clear(h);t.mock.restoreAll();}
+  });
+}
+for(const role of ['reranking','generation'] as const) test(`B-R2-LIFE-05: ${role} replacement superseded by dispose during delivery`,async t=>{
+  const {c,reads}=await observerController();
+  const live=new Set<ReturnType<typeof setTimeout>>();
+  const set=globalThis.setTimeout,clear=globalThis.clearTimeout;
+  t.mock.method(globalThis,'setTimeout',(fn:()=>void,ms:number)=>{const h=set(fn,ms);live.add(h);return h;});
+  t.mock.method(globalThis,'clearTimeout',(h:ReturnType<typeof setTimeout>)=>{live.delete(h);clear(h);});
+  const prepare=()=>role==='reranking'?c.prepareRerank():c.prepareGeneration();
+  try {
+    prepare();c.subscribeEvidence(()=>c.dispose());
+    const returned=prepare();
+    assert.equal(c.isEvidencePreviewCurrent(role,returned.sequence),false);
+    assert.equal(live.size,0);assert.equal(reads(),0);
+    assert.equal(c.snapshot().phase,'idle');
+    assert.throws(prepare,{message:'NOT_READY'});
+  }finally{c.dispose();for(const h of live)clear(h);t.mock.restoreAll();}
+});

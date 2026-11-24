@@ -110,6 +110,7 @@ export class SearchView extends ItemView {
         clear();
         try {
           const preview=role==='rerank'?this.controller.prepareRerank():this.controller.prepareGeneration();
+          if(this.disposed||!this.controller.isEvidencePreviewCurrent(evidenceRole,preview.sequence))return;
           sequence=preview.sequence;
           renderRerankConfirmation(confirmation,preview,(classification,token)=>{
             if(this.disposed)return;

@@ -202,3 +202,48 @@ test('public responses cannot mutate engine generation records or UI snapshots',
   const api = new StandaloneApi(c);
   assert.equal((await api.request({ apiVersion: 1, operation: { toString: () => 'status' } })).ok,false);
 });
+
+test('B-R2-LIFE-06: disposal during message delivery leaves final lifecycle snapshot authoritative',async()=>{
+  const c=new SearchController(async()=>{});c.attach(engine());await c.search(uiRequest('x',1));
+  let once=false;const seen:string[]=[];
+  c.subscribe(()=>{if(!once){once=true;c.dispose();}});
+  c.subscribe(()=>seen.push(c.snapshot().phase));
+  c.message('NAVIGATION_REJECTED');
+  assert.deepEqual(seen,['idle']);assert.equal(c.snapshot().phase,'idle');
+  c.message('INTERNAL_FAILURE');c.configure(true,true);c.cancelGeneration();c.cancelRerank();
+  assert.equal(c.snapshot().phase,'idle');assert.equal(c.status().paused,false);
+});
+for(const action of ['invalidate','dispose'] as const) test(`B-R2-LIFE-06: ${action} from searching observer prevents engine dispatch`,async()=>{
+  let calls=0;const c=new SearchController(async()=>{});
+  c.attach(engine(async()=>{calls++;return response();}));
+  c.subscribe(()=>{if(c.snapshot().phase==='searching')c[action]();});
+  assert.deepEqual(await c.search(uiRequest('x',1)),{apiVersion:1,ok:false,error:'SUPERSEDED'});
+  assert.equal(calls,0);assert.equal(c.snapshot().phase,'idle');c.dispose();
+});
+test('B-R2-LIFE-06: nested search owns queue and only latest request reaches engine',async()=>{
+  const calls:string[]=[];const c=new SearchController(async()=>{});
+  c.attach({...engine(),search:async req=>{calls.push((req as ReturnType<typeof uiRequest>).query);return response();}});
+  let nested:ReturnType<SearchController['search']>|undefined;
+  c.subscribe(()=>{if(!nested&&c.snapshot().phase==='searching')nested=c.search(uiRequest('newer',1));});
+  assert.deepEqual(await c.search(uiRequest('older',1)),{apiVersion:1,ok:false,error:'SUPERSEDED'});
+  assert.equal((await nested!).ok,true);assert.deepEqual(calls,['newer']);c.dispose();
+});
+test('B-R2-LIFE-06: result publication superseded by lifecycle callback cannot return stale API success',async()=>{
+  const c=new SearchController(async()=>{});c.attach(engine());
+  c.subscribe(()=>{if(c.snapshot().phase==='results')c.invalidate();});
+  assert.deepEqual(await c.search(uiRequest('x',1)),{apiVersion:1,ok:false,error:'SUPERSEDED'});
+  assert.equal(c.snapshot().phase,'idle');c.dispose();
+});
+for(const action of ['invalidate','dispose','detach'] as const) test(`B-R2-LIFE-06: ${action} during control invalidation prevents stale engine action`,()=>{
+  const c=new SearchController(async()=>{});let calls=0;
+  c.attach({...engine(),cancel:()=>{calls++;return true;}});
+  let once=false;c.subscribe(()=>{if(!once){once=true;c[action]();}});
+  assert.deepEqual(c.control('pause'),{apiVersion:1,ok:false,error:'SUPERSEDED'});
+  assert.equal(calls,0);assert.equal(c.status().paused,false);c.dispose();
+});
+test('B-R2-LIFE-06: old navigation failure cannot erase newer search result',async()=>{
+  let reject!:()=>void;const c=new SearchController(()=>new Promise((_r,j)=>{reject=()=>j(Error('synthetic'));}));
+  c.attach(engine());await c.search(uiRequest('old',1));const opening=c.open(0);
+  await c.search(uiRequest('new',1));reject();assert.equal((await opening).ok,false);
+  assert.equal(c.snapshot().phase,'results');c.dispose();
+});

@@ -94,9 +94,10 @@ export class SearchController {
     private readonly revokeSharedAuthority?: () => void) {}
   attach(engine: Engine): void { if (!this.disposed) { this.engine = engine; this.error = null; this.emit(); } }
   configure(enabled: boolean, paused: boolean, error: string | null = null): void {
+    if (this.disposed) return;
     this.enabled = enabled; this.paused = paused; this.error = safeCode(error); this.invalidate();
   }
-  detach(): void { this.engine = undefined; this.rerankProfiles.revoke(); this.invalidate(); }
+  detach(): void { if (this.disposed) return; this.engine = undefined; this.rerankProfiles.revoke(); this.invalidate(); }
   status(): SearchStatus { return statusSnapshot(this.engine?.status(), !this.disposed && this.enabled, this.paused,
     this.error, this.advancedStatus?.(), this.ingestionStatus?.()); }
   snapshot(): UiState {
@@ -195,6 +196,9 @@ export class SearchController {
       this.evidencePending = undefined;
       if (this.disposed) { this.listeners.clear(); this.evidenceListeners.clear(); }
     }
+    // A search submitted by an observer is already queued; start only after
+    // the wave has settled, so a later listener can supersede it first.
+    void this.pump();
   }
   // Polling/rendering may discover expiry while a listener is already executing.
   // Commit cancellation now; join the active notification wave or defer to
@@ -222,39 +226,49 @@ export class SearchController {
     this.drainNotifications();
   }
   invalidate(): void { if (!this.disposed) this.invalidateState(); }
-  private invalidateState(final = false): void {
+  private resetSharedState(state: UiState): void {
     this.revision++; this.revokeEvidence(); this.lastQuery = '';
     this.pending?.resolve(failure('SUPERSEDED')); this.pending = undefined;
-    this.state = { phase: 'idle', message: 'Results cleared; search to verify current sources.', response: null }; this.emit(final);
+    this.state = state;
+  }
+  private invalidateState(final = false): void {
+    this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null});
+    this.emit(final);
   }
   message(error: string): void {
     if (this.disposed) return;
-    this.invalidate(); this.state = { phase: 'error', message: safeCode(error)!, response: null }; this.emit();
+    // Publish only the committed transition; no continuation after observers.
+    this.resetSharedState({phase:'error',message:safeCode(error)!,response:null});
+    this.emit();
   }
   async search(input: unknown): Promise<ApiResult<SearchResponse>> {
     let request: SearchRequest;
     try { request = parseSearch(input); } catch { return failure('INVALID_REQUEST'); }
     if (this.disposed || !this.enabled) return failure('DISABLED');
     if (!this.engine) return failure(this.error ?? 'INDEX_UNAVAILABLE');
-    const revision = ++this.revision;
-    this.revokeEvidence(); this.lastQuery = '';
-    this.pending?.resolve(failure('SUPERSEDED'));
-    this.state = { phase: 'searching', message: 'Verifying original sources…', response: null }; this.emit();
-    return new Promise(resolve => {
-      this.pending = { request, revision, resolve };
-      void this.pump();
+    this.resetSharedState({phase:'searching',message:'Verifying original sources…',response:null});
+    const revision = this.revision;
+    // Reserve the queued job before notifying; a newer revision can resolve
+    // it synchronously, including disposal inside a lifecycle callback.
+    const result = new Promise<ApiResult<SearchResponse>>(resolve => {
+      this.pending = {request,revision,resolve};
     });
+    this.emit();
+    return result;
   }
   private async pump(): Promise<void> {
-    if (this.active || !this.pending) return;
-    const job = this.pending; this.pending = undefined; this.active = true;
+    if (this.notifying || this.active || !this.pending) return;
+    const job = this.pending; this.pending = undefined;
+    if (this.disposed || job.revision !== this.revision || !this.engine) {
+      job.resolve(failure('SUPERSEDED')); return;
+    }
+    this.active = true;
     let result: ApiResult<SearchResponse>;
     try {
       // Public callers must never receive references into immutable engine generations.
-      const response = structuredClone(await this.engine!.search(job.request));
+      const response = structuredClone(await this.engine.search(job.request));
       result = { apiVersion: 1, ok: true, value: response };
     } catch (error) { result = failure(error instanceof StandaloneError ? error.code : 'INTERNAL_FAILURE'); }
-    this.active = false;
     if (job.revision !== this.revision || this.disposed) result = failure('SUPERSEDED');
     else {
       this.lastQuery = result.ok && result.value.status === 'ok' && result.value.executedMode === 'lexical' ? job.request.query : '';
@@ -263,23 +277,15 @@ export class SearchController {
           message: result.value.error ? safeCode(result.value.error)! : result.value.hits.length ? 'Verified at search time; checked again on open.' : 'No matching evidence.' };
       this.emit();
     }
-    job.resolve(result); void this.pump();
+    // Keep the active slot until publication finishes. A callback may have
+    // superseded this result while receiving it.
+    if (job.revision !== this.revision || this.disposed) result = failure('SUPERSEDED');
+    this.active = false; job.resolve(result); void this.pump();
   }
   private port(role: EvidenceRole): RerankPort | undefined {
     return role === 'reranking' ? this.rerankPort : this.generationPort;
   }
-  prepareRerank(): RerankPreview {
-    try { return this.prepareEvidence('reranking'); }
-    catch (error) {
-      if (!this.disposed && !this.activeEvidence.reranking && error instanceof ProviderFailure
-        && error.code === 'NOT_READY' && this.rerankPort?.config().state === 'configured') {
-        this.state = {...this.state,rerank:{phase:'error',
-          error:error.code,hits:[]}};
-        this.emitEvidence();
-      }
-      throw error;
-    }
-  }
+  prepareRerank(): RerankPreview { return this.prepareEvidence('reranking'); }
   prepareGeneration(): RerankPreview { return this.prepareEvidence('generation'); }
   /** Settings changes revoke admission itself, not just pending consent. */
   revokeRerankProfile(): void { this.rerankProfiles.revoke(); }
@@ -314,7 +320,8 @@ export class SearchController {
         && Number.isFinite(boot) && boot >= pending.bootStartedSeconds
         && boot < pending.bootStartedSeconds+EVIDENCE_PREVIEW_TTL_MS/1000
         && Number.isFinite(wall) && wall < pending.preview.expiresUnixMs
-        && this.profileCurrent(pending.preview,checkConfig)) return pending;
+        && this.profileCurrent(pending.preview,checkConfig)
+        && this.prepared[role] === pending && !this.disposed) return pending;
     } catch { /* An unavailable clock cannot authorize disclosure. */ }
     this.expirePreview(role,pending);
     return undefined;
@@ -337,34 +344,50 @@ export class SearchController {
     this.notifyExpiry();
   }
   private prepareEvidence(role: EvidenceRole): RerankPreview {
-    if (this.clearPreview(role)) this.emitEvidence();
-    const port = this.port(role), pref = port?.config();
-    if (role === 'reranking' && pref?.state !== 'configured') this.rerankProfiles.revoke();
-    if (!pref || pref.state === 'disabled') throw new ProviderFailure('DISABLED');
-    if (pref.state !== 'configured') throw new ProviderFailure('CONFIG_INVALID');
-    const config = pilotConfig(pref);
-    const scopeId = port?.scopeId(), response = this.state.response;
-    if (this.disposed || !this.enabled || this.paused || this.activeEvidence[role] || !isDigest(scopeId)
-      || !this.lastQuery.trim() || !response || response.status !== 'ok'
-      || response.executedMode !== 'lexical' || !response.hits.length
-      || this.engine?.status().generationId !== response.indexGenerationId)
-      throw new ProviderFailure('NOT_READY');
-    if (response.hits.length > config.limits.maxCandidates
-      || Buffer.byteLength(this.lastQuery) + response.hits.reduce((n, hit) => n + Buffer.byteLength(hit.originalExcerpt), 0)
-        > config.limits.maxInputBytes) throw new ProviderFailure('LIMIT_EXCEEDED');
-    const admission = role === 'reranking' ? this.currentRerankAdmission(config,scopeId) : undefined;
-    const monotonicStartedMs = performance.now();
-    const bootStartedSeconds = os.uptime();
-    const expiresUnixMs = Date.now()+EVIDENCE_PREVIEW_TTL_MS;
-    if (![monotonicStartedMs,bootStartedSeconds,expiresUnixMs].every(Number.isFinite))
-      throw new ProviderFailure('NOT_READY');
-    const preview = structuredClone({role,sequence:++this.sequence,revision:this.revision,expiresUnixMs,config,scopeId,query:this.lastQuery,hits:response.hits,
-      ...(admission ? {runtimeProfileBinding:admission.bindingDigest,runtimeProfileDigest:admission.profileDigest} : {})});
-    const pending = {preview,monotonicStartedMs,bootStartedSeconds};
-    this.prepared[role] = pending;
-    this.previewTimers[role] = setTimeout(()=>this.expirePreview(role,pending),EVIDENCE_PREVIEW_TTL_MS);
-    this.emitEvidence();
-    return structuredClone(preview);
+    if (this.disposed) throw new ProviderFailure('NOT_READY');
+    // Replacing consent is a single commit. In particular no observer can
+    // prepare another preview between clearing the old timer and owning the new one.
+    const removed = this.clearPreview(role);
+    let changed = removed;
+    try {
+      const port = this.port(role), pref = port?.config();
+      if (role === 'reranking' && pref?.state !== 'configured') this.rerankProfiles.revoke();
+      if (!pref || pref.state === 'disabled') throw new ProviderFailure('DISABLED');
+      if (pref.state !== 'configured') throw new ProviderFailure('CONFIG_INVALID');
+      const config = pilotConfig(pref);
+      const scopeId = port?.scopeId(), response = this.state.response;
+      if (this.disposed || !this.enabled || this.paused || this.activeEvidence[role] || !isDigest(scopeId)
+        || !this.lastQuery.trim() || !response || response.status !== 'ok'
+        || response.executedMode !== 'lexical' || !response.hits.length
+        || this.engine?.status().generationId !== response.indexGenerationId)
+        throw new ProviderFailure('NOT_READY');
+      if (response.hits.length > config.limits.maxCandidates
+        || Buffer.byteLength(this.lastQuery) + response.hits.reduce((n, hit) => n + Buffer.byteLength(hit.originalExcerpt), 0)
+          > config.limits.maxInputBytes) throw new ProviderFailure('LIMIT_EXCEEDED');
+      const admission = role === 'reranking' ? this.currentRerankAdmission(config,scopeId) : undefined;
+      const monotonicStartedMs = performance.now();
+      const bootStartedSeconds = os.uptime();
+      const expiresUnixMs = Date.now()+EVIDENCE_PREVIEW_TTL_MS;
+      if (![monotonicStartedMs,bootStartedSeconds,expiresUnixMs].every(Number.isFinite))
+        throw new ProviderFailure('NOT_READY');
+      const preview = structuredClone({role,sequence:++this.sequence,revision:this.revision,expiresUnixMs,config,scopeId,query:this.lastQuery,hits:response.hits,
+        ...(admission ? {runtimeProfileBinding:admission.bindingDigest,runtimeProfileDigest:admission.profileDigest} : {})});
+      const pending = {preview,monotonicStartedMs,bootStartedSeconds};
+      this.prepared[role] = pending;
+      this.previewTimers[role] = setTimeout(()=>this.expirePreview(role,pending),EVIDENCE_PREVIEW_TTL_MS);
+      changed = true;
+      return structuredClone(preview);
+    } catch (error) {
+      if (role === 'reranking' && !this.disposed && !this.activeEvidence.reranking
+        && error instanceof ProviderFailure && error.code === 'NOT_READY'
+        && this.rerankPort?.config().state === 'configured') {
+        this.state = {...this.state,rerank:{phase:'error',error:error.code,hits:[]}};
+        changed = true;
+      }
+      throw error;
+    } finally {
+      if (changed) this.emitEvidence();
+    }
   }
   private revokeEvidence(role?: EvidenceRole): void {
     for (const r of role ? [role] : ['reranking','generation'] as const) {
@@ -375,6 +398,7 @@ export class SearchController {
   // Role-local revocation and explicit cancellation use the same deadline
   // authority as the worker. A new pending preview is a distinct operation.
   private cancelEvidenceState(role: EvidenceRole, explicit = false): boolean {
+    if (this.disposed) return false;
     const hadPreview = !!this.prepared[role];
     const active = this.activeEvidence[role];
     this.revokeEvidence(role);
@@ -466,20 +490,35 @@ export class SearchController {
     const hit = this.state.response?.hits[index];
     if (this.disposed || !this.enabled || !hit || !Number.isInteger(index)
       || expected && JSON.stringify(expected) !== JSON.stringify(hit)) return failure('NAVIGATION_REJECTED');
+    const revision = this.revision;
     try { await this.navigate(structuredClone(hit)); return { apiVersion: 1, ok: true, value: null }; }
-    catch { this.message('NAVIGATION_REJECTED'); return failure('NAVIGATION_REJECTED'); }
+    catch {
+      if (!this.disposed && this.revision === revision) this.message('NAVIGATION_REJECTED');
+      return failure('NAVIGATION_REJECTED');
+    }
   }
   control(action: 'pause' | 'cancel' | 'resume' | 'rebuild'): ApiResult<{ cancelled: boolean | null }> {
     if (this.disposed || !this.enabled || !this.engine) return failure('DISABLED');
+    const engine = this.engine, revision = this.revision + 1;
     this.invalidate();
+    // The initial shared invalidation is synchronous. Do not execute a stale
+    // control command after an observer supersedes its revision or detaches.
+    if (this.disposed || this.revision !== revision || this.engine !== engine) return failure('SUPERSEDED');
     try {
-      let cancelled: boolean | null = null;
-      if (action === 'pause' || action === 'cancel') { cancelled = this.engine.cancel(); this.paused = true; }
-      else { this.engine[action](); this.paused = false; }
-      this.emit(); return { apiVersion: 1, ok: true, value: { cancelled } };
+      const pause = action === 'pause' || action === 'cancel';
+      const cancelled = pause ? engine.cancel() : (engine[action](), null);
+      if (this.disposed || this.revision !== revision || this.engine !== engine) return failure('SUPERSEDED');
+      this.paused = pause;
+      this.emit();
+      if (this.disposed || this.revision !== revision || this.engine !== engine) return failure('SUPERSEDED');
+      return { apiVersion: 1, ok: true, value: { cancelled } };
     } catch { return failure('INTERNAL_FAILURE'); }
   }
-  dispose(): void { if (this.disposed) return; this.disposed = true; this.rerankProfiles.revoke(); this.invalidateState(true); this.evidenceListeners.clear(); this.engine = undefined; }
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true; this.rerankProfiles.revoke(); this.engine = undefined;
+    this.evidenceListeners.clear(); this.invalidateState(true);
+  }
 }
 /** Stable in-process API. No listener, IPC transport, or external runtime. */
 export class StandaloneApi {
