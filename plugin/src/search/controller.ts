@@ -1,3 +1,4 @@
+import os from 'node:os';
 import { EvidenceGenerator, type GeneratedEvidenceClaim } from '../ai/generation-evidence';
 import { EvidenceReranker, type RerankedHit } from '../ai/rerank-evidence';
 import { pilotConfig } from '../ai/loopback-rerank';
@@ -48,6 +49,8 @@ type Engine = Pick<StandaloneEngine, 'search' | 'status' | 'cancel' | 'resume' |
 type EvidenceRole = 'reranking' | 'generation';
 export const EVIDENCE_PREVIEW_TTL_MS = 300_000;
 export type RerankPreview = { role: EvidenceRole; sequence: number; revision: number; expiresUnixMs: number; config: ProviderConfig; scopeId: string; query: string; hits: EvidenceHit[] };
+// Internal elapsed-time deadlines are never taken from the returned preview.
+type PendingEvidencePreview = { preview: RerankPreview; monotonicStartedMs: number; bootStartedSeconds: number };
 export type RerankState = { phase: 'running' | 'results' | 'error'; error: ProviderFailureCode | null; hits: readonly RerankedHit[] };
 export type RerankPort = {
   config(): ProviderPreference; scopeId(): string | undefined; verify(hit: EvidenceHit): Promise<void>;
@@ -63,7 +66,7 @@ export class SearchController {
   private revision = 0;
   private lastQuery = '';
   private sequence = 0;
-  private prepared: Partial<Record<EvidenceRole,RerankPreview>> = {};
+  private prepared: Partial<Record<EvidenceRole,PendingEvidencePreview>> = {};
   private previewTimers: Partial<Record<EvidenceRole,ReturnType<typeof setTimeout>>> = {};
   private aborts: Partial<Record<EvidenceRole,AbortController>> = {};
   private readonly generator = new EvidenceGenerator();
@@ -72,6 +75,7 @@ export class SearchController {
   private pending?: { request: SearchRequest; revision: number; resolve: (v: ApiResult<SearchResponse>) => void };
   private listeners = new Set<() => void>();
   private evidenceListeners = new Set<() => void>();
+  private pendingExpiryNotification?: object;
   private state: UiState = { phase: 'idle', message: 'Enter a query to search original Markdown.', response: null };
   constructor(private readonly navigate: (hit: EvidenceHit) => Promise<void>,
     private readonly advancedStatus?: () => AdvancedHealth,
@@ -84,13 +88,16 @@ export class SearchController {
   detach(): void { this.engine = undefined; this.invalidate(); }
   status(): SearchStatus { return statusSnapshot(this.engine?.status(), !this.disposed && this.enabled, this.paused,
     this.error, this.advancedStatus?.(), this.ingestionStatus?.()); }
-  snapshot(): UiState { return structuredClone(this.state); }
+  snapshot(): UiState {
+    this.currentPreview('reranking'); this.currentPreview('generation');
+    return structuredClone(this.state);
+  }
   /** No query, passages, source IDs, grants or tokens cross this metadata boundary. */
   evidenceOperationStatus(role: EvidenceRole): AiOperationStatus {
+    const pending = this.currentPreview(role);
     const state = role === 'reranking' ? this.state.rerank : this.state.generation;
     if (state?.phase === 'running') return {phase:'busy',error:null};
-    if (this.prepared[role]) return this.isEvidencePreviewCurrent(role,this.prepared[role]!.sequence)
-      ? {phase:'permission-required',error:null} : {phase:'failed',error:'CANCELLED'};
+    if (pending) return {phase:'permission-required',error:null};
     if (state?.phase === 'error') return {phase:'failed',error:state.error ?? 'NOT_READY'};
     return {phase:state?.phase === 'results' ? 'complete' : 'idle',error:null};
   }
@@ -103,8 +110,24 @@ export class SearchController {
     if (this.disposed) return () => {};
     this.evidenceListeners.add(listener); return () => this.evidenceListeners.delete(listener);
   }
-  private emitEvidence(): void { for (const listener of this.evidenceListeners) listener(); }
-  private emit(): void { for (const listener of this.listeners) listener(); }
+  private emitEvidence(): void {
+    this.pendingExpiryNotification = undefined;
+    for (const listener of this.evidenceListeners) listener();
+  }
+  // Polling/rendering may discover expiry while a listener is already executing.
+  // Commit cancellation now, but publish only after the current synchronous stack.
+  private notifyExpiry(): void {
+    if (this.pendingExpiryNotification) return;
+    const notification = {};
+    this.pendingExpiryNotification = notification;
+    queueMicrotask(() => {
+      if (!this.disposed && this.pendingExpiryNotification === notification) this.emitEvidence();
+    });
+  }
+  private emit(): void {
+    this.pendingExpiryNotification = undefined;
+    for (const listener of this.listeners) listener();
+  }
   invalidate(): void {
     this.revision++; this.revokeEvidence(); this.lastQuery = '';
     this.pending?.resolve(failure('SUPERSEDED')); this.pending = undefined;
@@ -152,9 +175,25 @@ export class SearchController {
   }
   prepareRerank(): RerankPreview { return this.prepareEvidence('reranking'); }
   prepareGeneration(): RerankPreview { return this.prepareEvidence('generation'); }
+  private currentPreview(role: EvidenceRole): PendingEvidencePreview | undefined {
+    const pending = this.prepared[role];
+    if (!pending) return undefined;
+    // performance.now covers elapsed execution (including delayed callbacks).
+    // Linux desktop uptime includes suspend; wall time is only an additional
+    // conservative expiry fence, never authority to extend an elapsed deadline.
+    try {
+      const monotonic = performance.now(), boot = os.uptime(), wall = Date.now();
+      if (Number.isFinite(monotonic) && monotonic >= pending.monotonicStartedMs
+        && monotonic - pending.monotonicStartedMs < EVIDENCE_PREVIEW_TTL_MS
+        && Number.isFinite(boot) && boot >= pending.bootStartedSeconds
+        && boot < pending.bootStartedSeconds+EVIDENCE_PREVIEW_TTL_MS/1000
+        && Number.isFinite(wall) && wall < pending.preview.expiresUnixMs) return pending;
+    } catch { /* An unavailable clock cannot authorize disclosure. */ }
+    this.expirePreview(role,pending);
+    return undefined;
+  }
   isEvidencePreviewCurrent(role: EvidenceRole, sequence: number): boolean {
-    const preview = this.prepared[role];
-    return !!preview && preview.sequence === sequence && Date.now() < preview.expiresUnixMs;
+    return this.currentPreview(role)?.preview.sequence === sequence;
   }
   private clearPreview(role: EvidenceRole): boolean {
     const hadPreview = !!this.prepared[role];
@@ -163,12 +202,12 @@ export class SearchController {
     delete this.previewTimers[role];
     return hadPreview;
   }
-  private expirePreview(role: EvidenceRole, preview: RerankPreview): void {
+  private expirePreview(role: EvidenceRole, preview: PendingEvidencePreview): void {
     if (this.prepared[role] !== preview) return;
     this.clearPreview(role);
     const key = role === 'reranking' ? 'rerank' : 'generation';
     this.state = {...this.state,[key]:{phase:'error',error:'CANCELLED',hits:[]}};
-    this.emitEvidence();
+    this.notifyExpiry();
   }
   private prepareEvidence(role: EvidenceRole): RerankPreview {
     if (this.clearPreview(role)) this.emitEvidence();
@@ -185,9 +224,15 @@ export class SearchController {
     if (response.hits.length > config.limits.maxCandidates
       || Buffer.byteLength(this.lastQuery) + response.hits.reduce((n, hit) => n + Buffer.byteLength(hit.originalExcerpt), 0)
         > config.limits.maxInputBytes) throw new ProviderFailure('LIMIT_EXCEEDED');
-    const preview = structuredClone({role,sequence:++this.sequence,revision:this.revision,expiresUnixMs:Date.now()+EVIDENCE_PREVIEW_TTL_MS,config,scopeId,query:this.lastQuery,hits:response.hits});
-    this.prepared[role] = preview;
-    this.previewTimers[role] = setTimeout(()=>this.expirePreview(role,preview),EVIDENCE_PREVIEW_TTL_MS);
+    const monotonicStartedMs = performance.now();
+    const bootStartedSeconds = os.uptime();
+    const expiresUnixMs = Date.now()+EVIDENCE_PREVIEW_TTL_MS;
+    if (![monotonicStartedMs,bootStartedSeconds,expiresUnixMs].every(Number.isFinite))
+      throw new ProviderFailure('NOT_READY');
+    const preview = structuredClone({role,sequence:++this.sequence,revision:this.revision,expiresUnixMs,config,scopeId,query:this.lastQuery,hits:response.hits});
+    const pending = {preview,monotonicStartedMs,bootStartedSeconds};
+    this.prepared[role] = pending;
+    this.previewTimers[role] = setTimeout(()=>this.expirePreview(role,pending),EVIDENCE_PREVIEW_TTL_MS);
     this.emitEvidence();
     return structuredClone(preview);
   }
@@ -215,14 +260,11 @@ export class SearchController {
     return this.confirmEvidence('generation',preview,classification,token);
   }
   private async confirmEvidence(role: EvidenceRole, preview: RerankPreview, classification: 'synthetic' | 'public', token: string): Promise<void> {
-    const approved = this.prepared[role];
-    if (approved && !this.isEvidencePreviewCurrent(role,approved.sequence)) {
-      this.expirePreview(role,approved);
-      throw new ProviderFailure('DISCLOSURE_DENIED');
-    }
+    const approved = this.currentPreview(role)?.preview;
+    if (!approved) throw new ProviderFailure('DISCLOSURE_DENIED');
     this.clearPreview(role);
     const port = this.port(role);
-    if (!approved || !port || this.aborts[role] || !['synthetic','public'].includes(classification)
+    if (!port || this.aborts[role] || !['synthetic','public'].includes(classification)
       || JSON.stringify(approved) !== JSON.stringify(preview)) { this.emitEvidence(); throw new ProviderFailure('DISCLOSURE_DENIED'); }
     const current = (): boolean => {
       const config = port.config();

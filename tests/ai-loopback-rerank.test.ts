@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
+import os from 'node:os';
 import { LoopbackRerankTransport, servedAlias } from '../plugin/src/ai/loopback-rerank';
 import { EvidenceReranker, type RerankApproval } from '../plugin/src/ai/rerank-evidence';
 import { type ProviderConfig } from '../plugin/src/ai/contracts';
@@ -299,3 +300,75 @@ test('pending evidence previews expire independently, reject late or altered con
     } finally { c.dispose();t.mock.timers.reset(); }
   },(req,res)=>{calls++;req.resume();reply(res,{},400);});
 });
+
+
+for (const role of ['reranking','generation'] as const) {
+  test(role+' pending consent cannot revive after expiry, clock rollback or suspended execution',async t=>{
+    let calls=0, verifies=0;
+    await fixture(async cfg=>{
+      const response:SearchResponse={protocolVersion:2,requestId:'ui',requestedMode:'lexical',
+        executedMode:'lexical',status:'ok',indexGenerationId:hash('generation'),hits,
+        capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0};
+      const port={config:()=>cfg,scopeId:()=>scopeId,verify:async()=>{verifies++;}};
+      const c=new SearchController(async()=>{},undefined,undefined,port,port);
+      c.attach({search:async()=>response,status:()=>({status:'ready',generationId:hash('generation'),
+        sources:2,records:2,busy:false,error:null,maintenanceWarning:null}),
+        cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+      const prepare=()=>role==='reranking'?c.prepareRerank():c.prepareGeneration();
+      const confirm=(p:ReturnType<typeof prepare>)=>role==='reranking'
+        ?c.rerankConfirmed(p,'synthetic',token):c.generationConfirmed(p,'synthetic',token);
+      let wall=Date.now(), mono=1000, boot=1000, events=0, lifecycle=0, reading=false;
+      t.mock.method(Date,'now',()=>wall);
+      t.mock.method(performance,'now',()=>mono);
+      t.mock.method(os,'uptime',()=>boot);
+      c.subscribe(()=>{lifecycle++;});
+      c.subscribeEvidence(()=>{assert.equal(reading,false,'reentrant expiry notification');events++;});
+      const read=()=>{reading=true;try{return c.evidenceOperationStatus(role);}finally{reading=false;}};
+      const denied=async(p:ReturnType<typeof prepare>)=>{
+        await assert.rejects(confirm(p),{message:'DISCLOSURE_DENIED'});
+        assert.equal(calls,0);assert.equal(verifies,0);
+        assert.deepEqual(read(),{phase:'failed',error:'CANCELLED'});
+      };
+      try {
+        await c.search(uiRequest(input.query,2));
+        const first=prepare(), eventCount=events;
+        // Forward wall correction is conservatively terminal even before elapsed TTL.
+        wall=first.expiresUnixMs;
+        assert.deepEqual(read(),{phase:'failed',error:'CANCELLED'});
+        assert.equal(events,eventCount,'expiry must not notify synchronously from polling');
+        wall-=EVIDENCE_PREVIEW_TTL_MS;
+        assert.deepEqual(read(),{phase:'failed',error:'CANCELLED'});
+        await denied(first);await denied(first);
+        assert.equal(events,eventCount+1,'expiry publishes once');
+        // Delayed timer and no prior polling; wall rollback cannot extend elapsed TTL.
+        const late=prepare();mono+=EVIDENCE_PREVIEW_TTL_MS;wall-=100;
+        await denied(late);
+        // Simulate OS suspend: uptime advances while renderer monotonic and wall clocks do not.
+        const suspended=prepare();boot+=EVIDENCE_PREVIEW_TTL_MS/1000;
+        await denied(suspended);
+        // Render-style current check must also be terminal, without reentrant listeners.
+        const rendered=prepare();mono+=EVIDENCE_PREVIEW_TTL_MS;
+        reading=true;
+        try {assert.equal(c.isEvidencePreviewCurrent(role,rendered.sequence),false);}
+        finally{reading=false;}
+        await denied(rendered);
+        // A deferred notification from a retired grant must not publish stale state.
+        const retired=prepare();mono+=EVIDENCE_PREVIEW_TTL_MS;
+        assert.deepEqual(read(),{phase:'failed',error:'CANCELLED'});
+        const valid=prepare(), afterPrepare=events;
+        await Promise.resolve();
+        assert.equal(events,afterPrepare,'obsolete expiry notification discarded');
+        assert.equal(read().phase,'permission-required');
+        assert.equal(c.isEvidencePreviewCurrent(role,valid.sequence),true);
+        // Still valid immediately before the monotonic deadline.
+        mono+=EVIDENCE_PREVIEW_TTL_MS-1;
+        assert.equal(read().phase,'permission-required');
+        await confirm(valid);
+        assert.equal(read().phase,'complete');assert.equal(calls,1);assert.equal(verifies,4);
+        assert.equal(lifecycle,2);assert.deepEqual(c.snapshot().response,response);
+      } finally {c.dispose();t.mock.restoreAll();}
+    },(req,res)=>{calls++;requestBody(req,body=>reply(res,role==='reranking'?good(body.model):
+      {model:body.model,usage:{completion_tokens:4},choices:[{index:0,finish_reason:'stop',
+        message:{role:'assistant',content:JSON.stringify({claims:[{kind:'quotation',text:'REQ-42',citationIds:[0]}]})}}]}));});
+  });
+}
