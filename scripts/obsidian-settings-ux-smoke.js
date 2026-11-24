@@ -13,6 +13,8 @@
   assert(p.settings.presentationMode === 'basic', 'DEFAULT_BASIC');
   assert(Object.values(p.settings.ai).every(pref => pref.state === 'disabled'), 'AI_DEFAULT_OFF');
   assert(!p.settings.ingestion.enabled && !p.settings.advanced.enabled, 'BACKENDS_DEFAULT_OFF');
+  const tmp = process.env.tmp;
+  assert(tmp && app.vault.adapter.getBasePath() === tmp + '/vault', 'SYNTHETIC_ONLY');
   const initialSettings = structuredClone(p.settings);
   const generation = p.standalone.status().generationId, engine = p.standalone;
   const req = {protocolVersion:2,requestId:'ux-synthetic',query:'REQ-OKS-SMOKE',
@@ -52,6 +54,17 @@
     section('AI capabilities (optional)') && section('Documents') && section('Index & maintenance'),
     'TASK_SECTIONS');
   assert(!section('Advanced diagnostics'), 'BASIC_HIDES_EXPERT');
+  const summary = () => row('Optional local capabilities').textContent;
+  const apiIndex = () => row('API dense index (selected Markdown corpus)');
+  const legacyIndex = () => row('Legacy local BGE-M3 index (documents)');
+  const legacyActions = () => row('Legacy document index operations');
+  assert(summary().includes('Health-only backend: disabled') &&
+    summary().includes('legacy synthetic probe: disabled'), 'LOCAL_DEFAULT_DISABLED');
+  assert(apiIndex().textContent.includes('Provider disabled') &&
+    legacyIndex().textContent.includes('This is not the API dense index'), 'DISTINCT_INDEX_STATES');
+  assert(apiIndex().querySelectorAll('button').length === 0 &&
+    legacyActions().querySelectorAll('button')[0].disabled &&
+    legacyActions().querySelectorAll('button')[1].disabled, 'NO_SETTINGS_API_REBUILD');
   // Multi-character editing does not redraw the DOM or persist invalid partial values.
   const results = row('Results per search');
   const top = results.querySelector('input');
@@ -132,6 +145,12 @@
   assert(card('embedding').textContent.includes('not verified'), 'AI_NOT_READY');
   assert(doc.activeElement?.dataset.oksFocus === 'ai-embedding', 'AI_SAVE_FOCUS');
   assert(await offline(), 'BASIC_AFTER_CONFIG');
+  assert(apiIndex().textContent.includes('Local provider configured; not verified') &&
+    apiIndex().textContent.includes('Prepare explicit dense index rebuild') &&
+    apiIndex().textContent.includes('Index readiness and coverage are not verified') &&
+    !apiIndex().textContent.includes('indexed sources:') &&
+    legacyActions().textContent.includes('These actions do not rebuild the API dense index') &&
+    legacyActions().querySelectorAll('button')[1].disabled, 'CONFIGURED_API_NOT_LEGACY_REBUILD');
   press(cardRow('reranking','Connection'), 'Configure');
   choose(cardRow('reranking','Connection type'), 'cloud');
   assert(card('reranking').textContent.includes('Cloud remains unauthorised'), 'CLOUD_EGRESS_BOUNDARY');
@@ -178,6 +197,38 @@
   assert(typeof theme==='string', 'THEME_VARIABLES');
   assert(root().textContent.includes('sources:') && root().textContent.includes('not an estimate'),
     'HONEST_INDEX_STATUS');
+  // Exercise a migrated v5 configuration with explicit historical opt-ins.
+  // Missing paths are under the disposable host directory: no worker can start.
+  const {presentationMode: _mode, ...v5} = structuredClone(p.settings);
+  v5.version = 5;
+  v5.advanced = {enabled:true,profile:'local-stdio',interpreter:tmp+'/missing-python',entry:tmp+'/missing-health'};
+  v5.probe = {fixtureMode:true,interpreter:tmp+'/missing-python',entry:tmp+'/missing-probe'};
+  await p.updateSettings(v5);
+  app.setting.activeTab.display();
+  assert(p.settings.version === 6 && p.settings.presentationMode === 'basic', 'V5_MIGRATION');
+  assert(p.advancedHealth.snapshot().status === 'failed', 'SYNTHETIC_HEALTH_FAILURE');
+  const localSummary = () => summary().includes('Health-only backend: enabled; transport state: failed') &&
+    summary().includes('legacy synthetic probe: enabled for manual use; not a running-state indicator') &&
+    !summary().includes(tmp);
+  assert(localSummary() && !section('Advanced diagnostics'), 'MIGRATED_ACTIVE_SUMMARY');
+  choose(row('Settings view'),'expert');
+  await wait(()=>p.settings.presentationMode==='expert','MIGRATED_EXPERT');
+  assert(localSummary() && section('Advanced diagnostics'), 'MIGRATED_EXPERT_SUMMARY');
+  choose(row('Settings view'),'basic');
+  await wait(()=>p.settings.presentationMode==='basic','MIGRATED_BASIC');
+  assert(localSummary() && !section('Advanced diagnostics') &&
+    p.settings.advanced.enabled && p.settings.probe.fixtureMode &&
+    p.standalone===engine && p.standalone.status().generationId===generation, 'MIGRATED_ROUNDTRIP');
+  assert(await offline(), 'MIGRATED_OFFLINE');
+  // Cloud remains unavailable and malformed embedding preference stays isolated.
+  const configured = structuredClone(p.settings.ai.embedding);
+  await p.patchSettings(s=>{s.ai.embedding={...configured,transport:'cloud',origin:'https://api.example.com'};});
+  app.setting.activeTab.display();
+  assert(apiIndex().textContent.includes('cloud execution is not supported'), 'CLOUD_API_INDEX_UNAVAILABLE');
+  await p.patchSettings(s=>{s.ai.embedding={state:'invalid'};});
+  app.setting.activeTab.display();
+  assert(apiIndex().textContent.includes('invalid saved provider preferences'), 'INVALID_API_INDEX_UNAVAILABLE');
+  assert(await offline(), 'INVALID_API_OFFLINE');
   const beforeReloadMode = p.settings.presentationMode;
   // Leave subsequent optional-role fixture tests the exact clean starting configuration.
   await p.updateSettings(initialSettings);
@@ -185,5 +236,5 @@
   app.setting.close();
   return 'OBSIDIAN_SETTINGS_UX_PASS: clean Basic, task sections, draft/invalid save, failed save ' +
     'preservation, conditional OCR/structured paths, independent AI roles, cloud boundary, Basic/Expert ' +
-    'operational equivalence, native controls, offline evidence; mode=' + beforeReloadMode;
+    'operational equivalence, migrated enabled local summary, separate API/legacy index paths, native controls, offline evidence; mode=' + beforeReloadMode;
 })()

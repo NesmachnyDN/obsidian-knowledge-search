@@ -54,12 +54,20 @@ section can ingest the active synthetic/authorized document manually; there
 is no automatic whole-Vault ingestion, model setup, or download.
 
 **Index & maintenance** displays the committed offline index state and
-the legacy optional extraction/retrieval subsystem separately. Source and
-record counts **do not measure total coverage** without an authoritative
-denominator. The last verified basic request shows requested and executed
-modes when available. Manual advanced indexing, rebuild, cancellation and
-opening the separate advanced search use the existing controllers. Do not
-assume that the legacy optional index is the API embedding generation.
+two optional index paths separately. Source and record counts **do not
+measure total coverage** without an authoritative denominator. The last
+verified basic request shows requested and executed modes when available.
+
+- **API dense index (selected Markdown corpus):** Settings shows provider
+  configuration/unavailability, not verified index readiness or coverage.
+  Use **Open Standalone search → Optional local API dense / hybrid search →
+  Prepare explicit dense index rebuild** with exact corpus paths and vector
+  dimension, then review and authorize the existing one-operation preview.
+  The current pilot is local-only; cloud execution is unavailable.
+- **Legacy local BGE-M3 index (documents):** the legacy retrieval snapshot
+  and **Legacy document index operations** apply to the active document
+  only. Index/rebuild/cancel and legacy search use the existing legacy
+  controllers, never the API dense index.
 
 **Delete derived offline index** requires Standalone indexing to be disabled
 and a separate confirmation. It uses the existing recognized-file guard and
@@ -70,7 +78,11 @@ never deletes original notes.
 Use **Settings view → Expert** to expose existing technical provider limits,
 the opt-in health-only local backend, and historical synthetic probe.
 The backend health status does not imply extraction or AI readiness, and
-the probe is not needed for Basic. The setting is a **presentation preference
+the probe is not needed for Basic. Overview in both modes shows whether
+the health-only backend, document ingestion and manual probe are enabled;
+transport/processing status is separate from AI readiness, and a configured
+probe is not a running-state indicator. Technical paths remain in the
+respective editors. The setting is a **presentation preference
 only**; switching Basic/Expert cannot change search operation, credentials,
 grants, index state or enabled provider identities.
 

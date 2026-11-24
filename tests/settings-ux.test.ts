@@ -44,6 +44,39 @@ test('UX-AC02/05: v5 imports without implicit opt-in, preserving hidden fields a
   assert.throws(() => parseSettings({ ...current, presentationMode: null }));
 });
 
+test('UX-AC05: version 6 presentation mode and migrated enums reject coercible non-string JSON values', () => {
+  const current = defaultSettings();
+  for (const mode of ['basic', 'expert'] as const) {
+    const settings = {...current, presentationMode: mode};
+    assert.deepEqual(parseSettings(JSON.parse(JSON.stringify(settings))), settings);
+  }
+  for (const value of [undefined, null, true, false, 0, 1, {}, [], ['basic'], ['expert'], [['expert']], 'Expert', ' basic']) {
+    assert.throws(() => parseSettings({...current, presentationMode: value}), /SETTINGS_INVALID/);
+  }
+  for (const profile of [['none'], ['local-stdio']]) {
+    assert.throws(() => parseSettings({...current, advanced: {...current.advanced, profile}}), /SETTINGS_INVALID/);
+    const {presentationMode: _mode, ai: _ai, ingestion: _ingestion, ...old} = current;
+    assert.throws(() => parseSettings({...old, version: 2, advanced: {enabled: false, profile}}), /SETTINGS_INVALID/);
+  }
+  for (const pdfMode of [['text'], ['ocr'], ['structured'], ['structured-ocr']]) {
+    const ingestion = {...current.ingestion, enabled: true, interpreter: '/fixture/python',
+      entry: '/fixture/advanced_ingest.py', tokenizerSnapshot: '/fixture/tokenizer', pdfMode};
+    assert.throws(() => parseSettings({...current, ingestion}), /SETTINGS_INVALID/);
+  }
+});
+
+test('UX-AC02: explicitly enabled historical backend and probe survive Basic/Expert migration', () => {
+  const {presentationMode: _mode, ...old} = defaultSettings();
+  const advanced = {enabled: true, profile: 'local-stdio', interpreter: '/fixture/python', entry: '/fixture/health.py'};
+  const probe = {fixtureMode: true, interpreter: '/fixture/python', entry: '/fixture/probe.py'};
+  const migrated = parseSettings({...old, version: 5, advanced, probe});
+  assert.equal(migrated.presentationMode, 'basic');
+  assert.deepEqual(migrated.advanced, advanced);
+  assert.deepEqual(migrated.probe, probe);
+  const expert = parseSettings({...migrated, presentationMode: 'expert'});
+  assert.deepEqual(parseSettings({...expert, presentationMode: 'basic'}), migrated);
+});
+
 test('UX-AC04: Top K draft validates atomically without numeric coercion', () => {
   for (const value of ['', '0', '-1', '51', '3.5', '1e2', '1 ', 'NaN', 'Infinity', '9999999999999'])
     assert.equal(topKDraft(value).ok, false, value);

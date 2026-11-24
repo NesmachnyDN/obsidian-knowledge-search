@@ -154,7 +154,20 @@
     assert(!visible(row('Trusted Python executable')),'PROBE_HIDDEN');press(row('Probe draft'),'Cancel');
     await chooseMode('basic');theme(false);
     assert(p.standalone.status().generationId===before,'MODE_GENERATION');
-    await capture('maintenance',row('Manual index operations'));result.maintenance=fit('MAINTENANCE');
+    await capture('maintenance',row('Legacy document index operations'));result.maintenance=fit('MAINTENANCE');
+    await capture('api-index-separate',row('API dense index (selected Markdown corpus)'));
+    const {presentationMode: _mode,...v5}=structuredClone(p.settings);
+    v5.version=5;
+    v5.advanced={enabled:true,profile:'local-stdio',interpreter:tmp+'/missing-python',entry:tmp+'/missing-health'};
+    v5.probe={fixtureMode:true,interpreter:tmp+'/missing-python',entry:tmp+'/missing-probe'};
+    const beforeMigration=structuredClone(p.settings);
+    await p.updateSettings(v5);app.setting.activeTab.display();
+    assert(p.advancedHealth.snapshot().status==='failed','SYNTHETIC_HEALTH_FAILURE');
+    assert(row('Optional local capabilities').textContent.includes('transport state: failed') &&
+      row('Optional local capabilities').textContent.includes('enabled for manual use'),'MIGRATED_SUMMARY');
+    await capture('basic-migrated-local',row('Optional local capabilities'));
+    result.migrated=fit('MIGRATED');
+    await p.updateSettings(beforeMigration);app.setting.activeTab.display();
     row('Enable offline search').querySelector('.checkbox-container').click();
     await wait(()=>!p.settings.enabled,'DISABLED');
     press(row('Delete derived offline index'),'Clear derived files');

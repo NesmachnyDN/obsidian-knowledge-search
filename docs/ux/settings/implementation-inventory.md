@@ -70,7 +70,9 @@ exact-scope, classification and consent boundaries remain authoritative.
 | Offline indexing status, busy, generation, sources/records, warnings | `SearchController.status()` | Overview / Index & maintenance. Counts refer to the committed index, **not measured total coverage** |
 | Last basic requested/executed mode | `SearchController.snapshot().response` | Display only if a current verified response exists; never fabricated |
 | Optional extraction status | `AdvancedIngestionManager.snapshot()` | Last processing state; not retrieval readiness |
-| Optional Python dense/lexical index state | `AdvancedRetrievalManager.snapshot()` | Labeled model-backed index; its source/chunk counts are **not API embedding-index coverage** |
+| Optional Python dense/lexical index state | `AdvancedRetrievalManager.snapshot()` | Legacy local BGE-M3 index (documents); its source/chunk counts are **not API embedding-index coverage** |
+| API dense index state | Saved embedding preference only in Settings | Explicit disabled/invalid/cloud-unavailable/configured-not-verified; no verified readiness or coverage projection. Existing selected-corpus rebuild in Standalone Search, with separate authorization |
+| Optional local capability summary | Committed settings, health/ingestion snapshots | Both modes show enabled/disabled health backend and ingestion, and manual probe opt-in (not execution); paths remain in editors |
 | Current AI operation (non-persisted) | Existing dense UI and evidence role controllers | Metadata-only idle, permission-required, busy, completed or typed failed/cancelled state on explicit refresh; no source text, tokens or standing readiness claims |
 | AI availability | `preferenceStatus` plus existing permission/execution contracts | Disabled, invalid, configured/not verified; do not advertise Ready from saved fields |
 | Manual ingestion, index, rebuild, cancel, health recheck | Existing plugin controller callbacks | Explicit buttons only; no background downloads, broad indexing or hidden API calls |

@@ -22,6 +22,9 @@ merge before calling the phase complete.
   install an adapter or trigger a dense rebuild.
 - Contextual ingestion paths, including independent OCR language assets
   and structured-layout artifacts, without requiring Python for Basic.
+- Distinct API selected-corpus and legacy local BGE-M3 document index
+  status and maintenance guidance; Overview keeps enabled optional
+  health, ingestion and manual probe visible in both modes.
 - Honest index and legacy extraction status, visible requested/executed
   basic search mode where verified, and existing disabled-only guarded
   cleanup of derived local index data.

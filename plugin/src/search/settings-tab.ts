@@ -73,6 +73,17 @@ export class SearchSettingsTab extends PluginSettingTab {
         'configured, not verified' : 'invalid / unavailable'}`).join('; ') +
         '. Configuration is not execution authorization.' :
         'All optional AI roles are disabled. Basic search works without an API.');
+    const settings = this.current();
+    const health = this.health();
+    const ingestion = this.ingestionStatus?.();
+    new Setting(section).setName('Optional local capabilities')
+      .setDesc('Health-only backend: ' + (settings.advanced.enabled ?
+        `enabled; transport state: ${health.status}${health.error ? ' (' + health.error + ')' : ''}` : 'disabled') +
+        '; document ingestion: ' + (settings.ingestion.enabled ?
+          `enabled; processing state: ${ingestion?.status ?? 'unavailable'}` : 'disabled') +
+        '; legacy synthetic probe: ' + (settings.probe.fixtureMode ?
+          'enabled for manual use; not a running-state indicator' : 'disabled') +
+        '. Health and processing state do not imply AI readiness. Backend and probe setup: Expert.');
     section.createEl('p', { text: 'Basic search works offline with no Python, API key, model or download. ' +
       'Other formats and AI operations require their own independently accepted capability.' });
   }
@@ -206,33 +217,42 @@ export class SearchSettingsTab extends PluginSettingTab {
     new Setting(section).setName('Last verified basic search')
       .setDesc(last ? `Requested: ${last.requestedMode}; executed: ${last.executedMode}; result: ${last.status}.` :
         'No current search response. Requested and executed modes appear in search results.');
+    const embedding = this.current().ai.embedding;
+    const apiState = embedding.state === 'disabled' ? 'Provider disabled.' :
+      embedding.state === 'invalid' ? 'Unavailable: invalid saved provider preferences.' :
+        embedding.state === 'configured' && embedding.transport === 'cloud' ? 'Unavailable: cloud execution is not supported by the current local API pilot.' :
+          'Local provider configured; not verified by preferences.';
+    new Setting(section).setName('API dense index (selected Markdown corpus)')
+      .setDesc(apiState + ' Index readiness and coverage are not verified in Settings. ' +
+        'Use Open Standalone search → Optional local API dense / hybrid search → Prepare explicit dense index rebuild. ' +
+        'Select exact corpus paths and vector dimension, then authorize the operation. No automatic rebuild.');
     const retrieval = this.retrievalStatus?.();
-    new Setting(section).setName('Optional model-backed index')
+    new Setting(section).setName('Legacy local BGE-M3 index (documents)')
       .setDesc(retrieval ? `State: ${retrieval.status}; lexical: ${retrieval.lexical}; dense: ${retrieval.dense}; ` +
         `indexed sources: ${retrieval.indexedSources}; chunks: ${retrieval.indexedChunks}; ` +
-        `error: ${retrieval.error ?? 'none'}. Never inferred from provider preferences.` :
-        'Unavailable / not verified. Existing dense generations are model-specific.');
+        `error: ${retrieval.error ?? 'none'}. This is not the API dense index.` :
+        'Unavailable / not verified. This is not the API dense index.');
     if (this.indexActive && this.rebuildActive && this.cancelAdvanced) {
       const error = alert(section);
       const action = async (task: () => Promise<void>): Promise<void> => {
         try { await task(); this.display(); }
         catch { error.textContent = 'Index operation failed or was refused. Check diagnostics.'; }
       };
-      new Setting(section).setName('Manual index operations')
-        .setDesc('Only the active source. Rebuild may be needed after an embedding-space change; ' +
-          'never automatic. Verified previous generations remain protected by storage contracts.')
-        .addButton(button => button.setButtonText('Index active source')
+      new Setting(section).setName('Legacy document index operations')
+        .setDesc('Local BGE-M3, active document only. These actions do not rebuild the API dense index. ' +
+          'Verified previous generations remain protected by storage contracts.')
+        .addButton(button => button.setButtonText('Index legacy source')
           .setDisabled(!this.current().ingestion.enabled)
           .onClick(() => action(this.indexActive!)))
-        .addButton(button => button.setButtonText('Rebuild active source')
+        .addButton(button => button.setButtonText('Rebuild legacy source')
           .setDisabled(!this.current().ingestion.enabled)
           .onClick(() => action(this.rebuildActive!)))
-        .addButton(button => button.setButtonText('Cancel current operation')
+        .addButton(button => button.setButtonText('Cancel legacy operation')
           .onClick(() => action(this.cancelAdvanced!)));
     }
-    if (this.openAdvanced) new Setting(section).setName('Advanced search')
-      .setDesc('Open separately; no fallback is reported as a successful AI search.')
-      .addButton(button => button.setButtonText('Open advanced search')
+    if (this.openAdvanced) new Setting(section).setName('Legacy document search')
+      .setDesc('Local BGE-M3 document search, separate from the API dense / hybrid search in Standalone.')
+      .addButton(button => button.setButtonText('Open legacy search')
         .setDisabled(!this.current().ingestion.enabled).onClick(() => this.openAdvanced?.()));
     this.showPurge(section);
     new Setting(section).setName('Refresh status')
