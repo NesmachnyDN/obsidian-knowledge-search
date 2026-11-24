@@ -1,7 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, copyFile, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, copyFile, rm, writeFile, readFile, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:http';
+import type { ApiDenseHost } from '../plugin/src/ai/dense-host';
+import type { EmbeddingSpace } from '../plugin/src/ai/contracts';
+import type { IngestResponse } from '../plugin/src/advanced/protocol';
+import type { ModelReply } from '../plugin/src/advanced/model-protocol';
 import { join, resolve } from 'node:path';
 import { parseMarkdown } from '../plugin/src/standalone/markdown';
 import { defaultSettings } from '../plugin/src/search/settings';
@@ -367,4 +372,223 @@ test('05B B2: failed process-group termination blocks reload and health recheck 
     await f.cleanup();
   }
   assert.throws(() => originalKill(previousPid,0),{code:'ESRCH'});
+});
+
+type DenseLifecyclePort = {
+  active?: Promise<unknown>;
+  close(): Promise<void>;
+  port: { admitStorage(): Promise<void> };
+};
+const denseLifecycle = (plugin: InstanceType<typeof PluginClass>) =>
+  (plugin as unknown as { denseHost?: DenseLifecyclePort }).denseHost;
+function deferredDrain() {
+  let release!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((resolve, fail) => { release = resolve; reject = fail; });
+  return { promise, release, reject };
+}
+function replacementPlugin(f: Awaited<ReturnType<typeof fixture>>) {
+  const p = new PluginClass(f.plugin.app, f.plugin.manifest);
+  Object.assign(p, { app: f.plugin.app, manifest: f.plugin.manifest,
+    saved: structuredClone((f.plugin as unknown as { saved: unknown }).saved) });
+  return p;
+}
+const legacyQuery = { query: 'synthetic', requestedMode: 'lexical' as const, limit: 1 };
+const enableLegacy = (s: ReturnType<typeof defaultSettings>) => {
+  s.ingestion = { ...s.ingestion, enabled: true, interpreter: '/synthetic/python',
+    entry: '/synthetic/advanced_ingest.py', tokenizerSnapshot: '/synthetic/tokenizer' };
+};
+
+test('D6 B-LIFECYCLE-01: detached dense drain survives ingestion toggle and reload; legacy admission waits', async () => {
+  const f = await fixture();
+  const drain = deferredDrain(), entered = deferredDrain();
+  let replacement: InstanceType<typeof PluginClass> | undefined;
+  let toggle: Promise<void> | undefined, search: Promise<unknown> | undefined;
+  try {
+    await f.plugin.onload(); f.layout(); await f.internal.initializing;
+    await f.plugin.standalone!.whenIdle();
+    const dense = denseLifecycle(f.plugin)!;
+    assert.ok(dense);
+    // Hold the actual host close at its active-job drain, simulating a writer
+    // still completing asynchronous publication/cleanup after cancellation.
+    dense.active = drain.promise;
+    const close = dense.close.bind(dense);
+    dense.close = () => { entered.release(); return close(); };
+    toggle = f.plugin.patchSettings(enableLegacy);
+    await entered.promise;
+    assert.equal(denseLifecycle(f.plugin), undefined);
+    f.plugin.onunload();
+    replacement = replacementPlugin(f);
+    await replacement.onload(); f.layout();
+    assert.equal(replacement.settings.ingestion.enabled, true);
+    let calls = 0;
+    // Observe actual production searchAdvanced admission at the manager boundary;
+    // no model, subprocess, or provider is needed.
+    replacement.advancedRetrieval.search = async () => {
+      ++calls; throw new Error('synthetic admission reached');
+    };
+    search = replacement.searchAdvanced(legacyQuery);
+    const outcome = assert.rejects(search, /synthetic admission reached/);
+    await (replacement as unknown as { initializing: Promise<void> }).initializing;
+    await replacement.standalone!.whenIdle();
+    assert.equal(replacement.standalone!.status().status, 'ready');
+    assert.equal(calls, 0, 'legacy manager reached before prior dense writer drained');
+    drain.release();
+    await toggle; await outcome;
+    assert.equal(calls, 1);
+  } finally {
+    drain.release(); await toggle?.catch(() => {}); await search?.catch(() => {});
+    replacement?.onunload(); await f.cleanup();
+  }
+});
+
+test('D6 B-LIFECYCLE-01: reverse transition and reload wait for legacy drain without blocking lexical', async () => {
+  const f = await fixture();
+  const drain = deferredDrain(), entered = deferredDrain();
+  let replacement: InstanceType<typeof PluginClass> | undefined;
+  let toggle: Promise<void> | undefined, admission: Promise<void> | undefined;
+  try {
+    await f.plugin.onload(); f.layout(); await f.internal.initializing;
+    await f.plugin.patchSettings(enableLegacy);
+    assert.equal(denseLifecycle(f.plugin), undefined);
+    const stop = f.plugin.advancedRetrieval.stop.bind(f.plugin.advancedRetrieval);
+    f.plugin.advancedRetrieval.stop = async () => { entered.release(); await drain.promise; await stop(); };
+    toggle = f.plugin.patchSettings(s => { s.ingestion.enabled = false; });
+    await entered.promise;
+    f.plugin.onunload();
+    replacement = replacementPlugin(f);
+    await replacement.onload(); f.layout();
+    await (replacement as unknown as { initializing: Promise<void> }).initializing;
+    await replacement.standalone!.whenIdle();
+    assert.equal(replacement.standalone!.status().status, 'ready');
+    const dense = denseLifecycle(replacement)!;
+    assert.ok(dense);
+    let admitted = false;
+    admission = dense.port.admitStorage().then(() => { admitted = true; });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(admitted, false);
+    drain.release(); await toggle; await admission;
+    assert.equal(admitted, true);
+  } finally {
+    drain.release(); await toggle?.catch(() => {}); await admission?.catch(() => {});
+    replacement?.onunload(); await f.cleanup();
+  }
+});
+
+test('D6 B-LIFECYCLE-01: failed prior storage drain denies replacement while lexical remains ready', async () => {
+  const f = await fixture();
+  let replacement: InstanceType<typeof PluginClass> | undefined;
+  try {
+    await f.plugin.onload(); f.layout(); await f.internal.initializing;
+    const dense = denseLifecycle(f.plugin)!;
+    const close = dense.close.bind(dense);
+    dense.close = async () => { await close(); throw new Error('synthetic failed drain'); };
+    await assert.rejects(f.plugin.patchSettings(enableLegacy), /synthetic failed drain/);
+    f.plugin.onunload();
+    replacement = replacementPlugin(f);
+    await replacement.onload(); f.layout();
+    await (replacement as unknown as { initializing: Promise<void> }).initializing;
+    await replacement.standalone!.whenIdle();
+    assert.equal(replacement.standalone!.status().status, 'ready');
+    let calls = 0;
+    replacement.advancedRetrieval.search = async () => { ++calls; throw new Error('unexpected admission'); };
+    await assert.rejects(replacement.searchAdvanced(legacyQuery), /MODEL_UNAVAILABLE/);
+    assert.equal(calls, 0);
+  } finally { replacement?.onunload(); await f.cleanup(); }
+});
+
+
+test('D6 B-LIFECYCLE-02: same host transfers CURRENT ownership, handles events and reopens for legacy rebuild', async () => {
+  const f = await fixture();
+  const files = new Map([['fixture.md', Object.assign(new Empty(), {path:'fixture.md'})]]);
+  const events = new Map<string, (file: {path:string}, oldPath?:string) => void>();
+  const emit = (event:string,file:{path:string},oldPath?:string) => events.get(event)!(file,oldPath);
+  Object.assign(f.plugin.app.vault, {
+    getMarkdownFiles: () => [...files.values()],
+    getAbstractFileByPath: (path:string) => files.get(path) ?? null,
+    on: (event:string,cb:(file:{path:string},oldPath?:string)=>void) => { events.set(event,cb); return {}; },
+  });
+  let calls=0;
+  const server=createServer((req,res)=>{
+    let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
+      ++calls;
+      assert.equal(req.url,'/v1/embeddings');
+      assert.equal(req.headers.authorization,'Bearer fixture-token');
+      const payload=JSON.parse(body) as {model:string;input:string[]};
+      res.writeHead(200,{'content-type':'application/json'});
+      res.end(JSON.stringify({model:payload.model,data:payload.input.map((_,index)=>
+        ({object:'embedding',index,embedding:[1,0,0]}))}));
+    });
+  });
+  try {
+    await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
+    const addr=server.address();assert.ok(addr&&typeof addr!=='string');
+    await f.plugin.onload();f.layout();await f.internal.initializing;
+    await f.plugin.standalone!.whenIdle();
+    await f.plugin.patchSettings(enableLegacy);
+    assert.equal((await f.plugin.searchAdvanced(legacyQuery)).status,'ok','open actual legacy store');
+    await f.plugin.cancelAdvancedWork(); // Ordinary cancellation is not an ownership handoff.
+    assert.equal((await f.plugin.searchAdvanced(legacyQuery)).status,'ok');
+    const space:EmbeddingSpace={model:'fixture',revision:'v1',dimension:3,normalization:'unit-l2',
+      serializationId:'utf8-verbatim-v1',queryInstructionId:'identity-v1',documentInstructionId:'identity-v1'};
+    await f.plugin.patchSettings(s=>{
+      s.ingestion.enabled=false;
+      s.ai.embedding={state:'configured',transport:'local',origin:'http://127.0.0.1:'+addr.port,
+        identity:{model:space.model,revision:space.revision},
+        limits:{timeoutMs:1500,maxInputBytes:4096,maxCandidates:8,maxOutputTokens:32,maxConcurrent:1}};
+    });
+    const dense=(f.plugin as unknown as {denseHost:ApiDenseHost}).denseHost;
+    const preview=await dense.prepare({kind:'rebuild',paths:['fixture.md'],space});
+    const built=await dense.confirm(preview,'synthetic','fixture-token');
+    assert.equal(built.status,'ok',JSON.stringify(built));assert.ok(calls>0);
+
+    // Exercise the real registered Vault handlers after the dense epoch changes.
+    const extra=Object.assign(new Empty(),{path:'extra.md'});
+    files.set(extra.path,extra);await writeFile(join(f.vault,extra.path),'# Extra\nnew synthetic note\n');
+    assert.doesNotThrow(()=>emit('create',extra));
+    const original=files.get('fixture.md')!;
+    await writeFile(join(f.vault,original.path),'# Synthetic\nREQ-LIFE-2: changed.\n');
+    assert.doesNotThrow(()=>emit('modify',original));
+    await rename(join(f.vault,original.path),join(f.vault,'renamed.md'));
+    files.delete(original.path);original.path='renamed.md';files.set(original.path,original);
+    assert.doesNotThrow(()=>emit('rename',original,'fixture.md'));
+    await f.plugin.standalone!.whenIdle();
+    const basic=await f.plugin.standalone!.search({protocolVersion:2,requestId:'handoff',
+      query:'REQ-LIFE-2',requestedMode:'lexical',limit:5});
+    assert.equal(basic.status,'ok');assert.equal(basic.hits[0]?.sourceId,'renamed.md');
+    assert.ok(basic.hits.every(hit=>hit.sourceId!=='fixture.md'));
+
+    await f.plugin.patchSettings(enableLegacy);
+    assert.equal(denseLifecycle(f.plugin),undefined);
+    assert.equal((await f.plugin.searchAdvanced(legacyQuery)).status,'ok','reopen authoritative CURRENT');
+    // Exercise actual legacy publication with the canonical synthetic fixture and
+    // a mocked parser/model boundary; no external provider or model weights.
+    const fixture=JSON.parse(await readFile('contracts/fixtures/advanced-ingestion-v1.json','utf8'))
+      .cases[0] as {rawBase64:string;response:IngestResponse};
+    const response=fixture.response;response.source!.scopeId=preview.scopeId;
+    const path=response.source!.sourceId;
+    files.set(path,Object.assign(new Empty(),{path}));
+    await writeFile(join(f.vault,path),Buffer.from(fixture.rawBase64,'base64'));
+    emit('create',files.get(path)!);
+    f.plugin.advancedIngestion.verified=async (p,allowed)=>p===path&&allowed()?response:null;
+    f.plugin.advancedIngestion.verifiedAll=async allowed=>({documents:allowed(path)?[response]:[],staleCount:0});
+    const model=JSON.parse(await readFile('benchmarks/embedding/results.json','utf8'));
+    f.plugin.advancedIngestion.runner.embed=async (_cfg,texts):Promise<ModelReply>=>({
+      protocolVersion:4,requestId:'synthetic',operation:'embed',status:'ok',error:null,
+      identity:{...model.identity,effective_max_tokens:384,runtime_tokenizer_parity_verified:true},
+      vectors:texts.map(()=>Array.from({length:1024},(_,i)=>i===0?1:0)),diagnostics:[],
+    });
+    await f.plugin.indexAdvancedPath(path,true);
+    assert.equal(f.plugin.advancedRetrieval.snapshot().indexedSources,1);
+    const legacy=await f.plugin.searchAdvanced({...legacyQuery,query:'REQ-X-1',requestedMode:'hybrid'});
+    assert.equal(legacy.status,'ok',legacy.error??'legacy rebuild failed');
+    assert.ok(legacy.hits.some(hit=>hit.sourceId===path));
+  } finally {
+    server.closeAllConnections();
+    if(server.listening)await new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve()));
+    // The final create event schedules a lexical writer independently of legacy.
+    // Drain it before the fixture removes its private index directory.
+    await f.plugin.standalone?.whenIdle();
+    await f.cleanup();
+  }
 });

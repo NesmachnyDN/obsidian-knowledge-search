@@ -1,3 +1,4 @@
+import { ApiDenseHost } from './ai/dense-host';
 import { AdvancedHealthBridge } from './advanced/health';
 import { AdvancedIngestionManager } from './advanced/manager';
 import { AdvancedRetrievalManager } from './advanced/retrieval-manager';
@@ -37,7 +38,7 @@ const pathBarriers = pathHost[pathBarrierKey] ??= new Map<string, Promise<void>>
 const advancedBarrierKey = Symbol.for('oks.advanced.close-barriers.v1');
 const advancedHost = globalThis as typeof globalThis & { [advancedBarrierKey]?: Map<string, Promise<void>> };
 const advancedBarriers = advancedHost[advancedBarrierKey] ??= new Map<string, Promise<void>>();
-// A new plugin instance cannot ingest while the predecessor's unit is stopping.
+// Legacy and API-dense storage owners share a reload-safe drain barrier.
 const ingestionBarrierKey = Symbol.for('oks.ingestion.close-barriers.v1');
 const ingestionHost = globalThis as typeof globalThis & { [ingestionBarrierKey]?: Map<string, Promise<void>> };
 const ingestionBarriers = ingestionHost[ingestionBarrierKey] ??= new Map<string, Promise<void>>();
@@ -57,6 +58,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
   settings: SearchSettings = defaultSettings();
   private navigator?: SourceNavigator<TFile>;
   private sourceReader?: BoundedVaultReader;
+  private denseHost?: ApiDenseHost;
   private rootId?: string;
   private initializing?: Promise<void>;
   private layoutReady = false;
@@ -149,6 +151,8 @@ export default class SyntheticEvidencePlugin extends Plugin {
     // a full authoritative reconciliation after the event handlers are registered.
     const nativeChange = (file: TAbstractFile, oldPath?: string): void => {
       this.navigator?.invalidate();
+      this.denseHost?.invalidate(file.path);
+      if (oldPath !== undefined) this.denseHost?.invalidate(oldPath);
       this.searchController.invalidate();
       this.standalone?.changed(file.path);
       this.advancedIngestion.invalidate(file.path);
@@ -187,14 +191,22 @@ export default class SyntheticEvidencePlugin extends Plugin {
       if (this.purgeInFlight) await this.purgeInFlight.catch(() => {});
       if (this.unloaded) return;
       const settings = parseSettings(change(this.settings));
+      this.denseHost?.invalidate();
       await this.saveData(settings);
       if (this.unloaded) return;
+      this.denseHost?.invalidate();
       const before = this.settings;
+      if (before.ingestion.enabled !== settings.ingestion.enabled) {
+        await this.stopDenseHost();
+      }
+      if (this.unloaded) return;
       this.settings = settings;
       this.standaloneError = null;
       this.searchController.configure(settings.enabled, settings.paused);
       if (JSON.stringify(before.ingestion) !== JSON.stringify(settings.ingestion))
         await this.stopIngestion();
+      if (!settings.ingestion.enabled && this.standalone && !this.denseHost)
+        this.attachDenseHost();
       if (JSON.stringify(before.advanced) !== JSON.stringify(settings.advanced)) {
         await this.stopAdvanced();
         if (settings.advanced.enabled && this.layoutReady && !this.unloaded) await this.initializeAdvanced();
@@ -246,6 +258,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
   }
   async controlSearch(action: 'pause' | 'cancel' | 'resume' | 'rebuild'): Promise<void> {
     this.navigator?.invalidate();
+    this.denseHost?.invalidate();
     const result = this.searchController.control(action);
     if (!result.ok) { new Notice(`OKS: ${result.error}`); return; }
     try { await this.patchSettings(settings => { settings.paused = action === 'pause' || action === 'cancel'; }); }
@@ -281,7 +294,10 @@ export default class SyntheticEvidencePlugin extends Plugin {
     if (!this.settings.ingestion.enabled || this.unloaded || !(file instanceof TFile)) return null;
     const adapter=this.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter)) return null;
-    await ingestionBarriers.get(resolve(adapter.getBasePath()));
+    try { await ingestionBarriers.get(resolve(adapter.getBasePath())); }
+    catch { throw new IngestError('ADVANCED_UNAVAILABLE'); }
+    if (this.unloaded || !this.settings.ingestion.enabled || this.app.vault.adapter!==adapter
+        || this.app.vault.getAbstractFileByPath(path)!==file) return null;
     await this.advancedIngestion.recover(resolve(adapter.getBasePath()),this.manifest.id);
     const allowed=()=>!this.unloaded && this.settings.ingestion.enabled
       && this.app.vault.getAbstractFileByPath(path) === file && file.path===path;
@@ -300,7 +316,10 @@ export default class SyntheticEvidencePlugin extends Plugin {
        ||!(adapter instanceof FileSystemAdapter)||!(file instanceof TFile)||file.path!==path)
       throw new ModelError('SOURCE_REJECTED');
     const root=resolve(adapter.getBasePath());
-    await ingestionBarriers.get(root);
+    try { await ingestionBarriers.get(root); }
+    catch { throw new ModelError('MODEL_UNAVAILABLE'); }
+    if(this.unloaded||!this.settings.ingestion.enabled||this.app.vault.adapter!==adapter
+       ||this.app.vault.getAbstractFileByPath(path)!==file)throw new ModelError('SOURCE_STALE');
     const cfg={...this.settings.ingestion};
     const authorized=()=>!this.unloaded&&this.layoutReady&&this.settings.ingestion.enabled
       &&JSON.stringify(this.settings.ingestion)===JSON.stringify(cfg)
@@ -314,7 +333,10 @@ export default class SyntheticEvidencePlugin extends Plugin {
     if(this.unloaded||!this.layoutReady||!this.settings.ingestion.enabled
        ||!(adapter instanceof FileSystemAdapter))throw new ModelError('MODEL_UNAVAILABLE');
     const root=resolve(adapter.getBasePath());
-    await ingestionBarriers.get(root);
+    try { await ingestionBarriers.get(root); }
+    catch { throw new ModelError('MODEL_UNAVAILABLE'); }
+    if(this.unloaded||!this.settings.ingestion.enabled||this.app.vault.adapter!==adapter)
+      throw new ModelError('MODEL_UNAVAILABLE');
     const cfg={...this.settings.ingestion};
     const authorized=(path:string):boolean=>this.layoutReady&&!this.unloaded
       &&this.settings.ingestion.enabled
@@ -367,7 +389,9 @@ export default class SyntheticEvidencePlugin extends Plugin {
   }
   async cancelAdvancedWork():Promise<void>{await this.advancedRetrieval.stop();}
   private stopIngestion(): Promise<void> {
-    const stopping=this.advancedRetrieval.stop().then(()=>this.advancedIngestion.stop());
+    return this.trackStorageDrain(this.advancedRetrieval.releaseStorage().then(()=>this.advancedIngestion.stop()));
+  }
+  private trackStorageDrain(stopping: Promise<void>): Promise<void> {
     const adapter=this.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter)) return stopping;
     const key=resolve(adapter.getBasePath());
@@ -446,6 +470,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
       this.standalone = engine;
       this.navigator = obsidianNavigator(this.app, provider);
       this.sourceReader = provider;
+      this.attachDenseHost();
       this.searchController.attach(engine);
       await engine.start();
       if (!valid()) { await this.stopStandalone(); return; }
@@ -458,15 +483,43 @@ export default class SyntheticEvidencePlugin extends Plugin {
       }
     }
   }
+  private attachDenseHost(): void {
+    const engine = this.standalone, reader = this.sourceReader, adapter = this.app.vault.adapter;
+    if (!engine || !reader || this.denseHost || this.unloaded || !this.settings.enabled
+        || this.settings.ingestion.enabled || !(adapter instanceof FileSystemAdapter)) return;
+    this.denseHost = new ApiDenseHost(engine, resolve(adapter.getBasePath()), reader.rootId, this.manifest.id, {
+      config: () => this.settings.ai.embedding,
+      admitStorage: async () => { await ingestionBarriers.get(resolve(adapter.getBasePath())); },
+      enabled: () => !this.unloaded && this.settings.enabled && !this.settings.paused
+        && !this.settings.ingestion.enabled && this.standalone === engine && this.sourceReader === reader
+        && this.app.vault.adapter === adapter,
+      allowedPath: path => {
+        const file = this.app.vault.getAbstractFileByPath(path);
+        return file instanceof TFile && file.path === path;
+      },
+    });
+  }
+  private stopDenseHost(): Promise<void> {
+    const host = this.denseHost;
+    if (!host) return Promise.resolve();
+    // Publish the drain before losing ownership. close() revokes synchronously;
+    // the active job can finish against the admission promise it already captured.
+    const drain = this.trackStorageDrain(host.close());
+    this.denseHost = undefined;
+    return drain;
+  }
   private async stopStandalone(): Promise<void> {
     this.navigator?.dispose(); this.navigator = undefined; this.sourceReader = undefined;
     this.searchController.detach();
+    const drain = this.stopDenseHost().catch(() => { /* storage barrier stays closed */ });
     const engine = this.standalone; this.standalone = undefined;
-    if (!engine) return;
+    if (!engine) { await drain; return; }
+    // Basic search owns a separate writer; an AI drain must not block its reload.
     const closing = engine.close();
     if (this.rootId) barriers.set(this.rootId, closing);
     await closing;
     if (this.rootId && barriers.get(this.rootId) === closing) barriers.delete(this.rootId);
+    await drain;
   }
   private async runProbe(): Promise<void> {
     const adapter = this.app.vault.adapter;
