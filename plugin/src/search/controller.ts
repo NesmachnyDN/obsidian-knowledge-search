@@ -80,6 +80,8 @@ export class SearchController {
   private listeners = new Set<() => void>();
   private evidenceListeners = new Set<() => void>();
   private pendingExpiryNotification?: object;
+  private emittingEvidence = false;
+  private evidenceDirty = false;
   private state: UiState = { phase: 'idle', message: 'Enter a query to search original Markdown.', response: null };
   constructor(private readonly navigate: (hit: EvidenceHit) => Promise<void>,
     private readonly advancedStatus?: () => AdvancedHealth,
@@ -118,11 +120,34 @@ export class SearchController {
   }
   private emitEvidence(): void {
     this.pendingExpiryNotification = undefined;
-    for (const listener of this.evidenceListeners) listener();
+    if (this.disposed) return;
+    if (this.emittingEvidence) { this.evidenceDirty = true; return; }
+    this.emittingEvidence = true;
+    const revision = this.revision;
+    try {
+      // Snapshot observers, not an event log. Nested changes are committed now,
+      // then coalesced into a synchronous follow-up, never a recursive callback.
+      // A terminal cleanup wave has at most two role-local changes. Bound even
+      // a trusted listener that continually initiates new work to three passes.
+      for (let pass = 0; pass < 3; pass++) {
+        this.evidenceDirty = false;
+        for (const listener of [...this.evidenceListeners]) {
+          if (this.disposed || this.revision !== revision) return;
+          if (this.evidenceListeners.has(listener)) listener();
+        }
+        if (!this.evidenceDirty) break;
+      }
+    } finally {
+      this.emittingEvidence = false;
+      this.evidenceDirty = false;
+    }
   }
   // Polling/rendering may discover expiry while a listener is already executing.
-  // Commit cancellation now, but publish only after the current synchronous stack.
+  // Commit cancellation now; join the active notification wave or defer to
+  // a single microtask when expiry is discovered outside evidence delivery.
   private notifyExpiry(): void {
+    if (this.disposed) return;
+    if (this.emittingEvidence) { this.evidenceDirty = true; return; }
     if (this.pendingExpiryNotification) return;
     const notification = {};
     this.pendingExpiryNotification = notification;
@@ -285,7 +310,7 @@ export class SearchController {
   }
   // Role-local revocation and explicit cancellation use the same deadline
   // authority as the worker. A new pending preview is a distinct operation.
-  private cancelEvidenceState(role: EvidenceRole): boolean {
+  private cancelEvidenceState(role: EvidenceRole, explicit = false): boolean {
     const hadPreview = !!this.prepared[role];
     const active = this.activeEvidence[role];
     this.revokeEvidence(role);
@@ -296,11 +321,16 @@ export class SearchController {
     const error = current
       ? deadlineFailure(current.context)?.code ?? 'CANCELLED'
       : !hadPreview && previous?.error === 'TIMEOUT' ? 'TIMEOUT' : 'CANCELLED';
+    if (!hadPreview && previous?.phase === 'error' && previous.error === error) {
+      // Keep historical standalone cancel notifications (and worker settlement),
+      // but a listener cleaning up this same terminal snapshot is a no-op.
+      return explicit && !this.emittingEvidence;
+    }
     this.state = {...this.state,[key]:{phase:'error',error,hits:[]}};
     return true;
   }
   private cancelEvidence(role: EvidenceRole): void {
-    if (this.cancelEvidenceState(role)) this.emitEvidence();
+    if (this.cancelEvidenceState(role,true)) this.emitEvidence();
   }
   cancelRerank(): void { this.cancelEvidence('reranking'); }
   cancelGeneration(): void { this.cancelEvidence('generation'); }
@@ -352,7 +382,7 @@ export class SearchController {
         const valid = current();
         remainingOperationMs(context);
         if (!valid) throw new ProviderFailure('CANCELLED');
-        if (this.revision !== approved.revision || this.disposed) return;
+        if (this.activeEvidence[role] !== operation || this.revision !== approved.revision || this.disposed) return;
         // Retire the operation before notifying listeners: a reentrant cancel
         // now concerns a completed result, not a still-running deadline.
         delete this.activeEvidence[role];

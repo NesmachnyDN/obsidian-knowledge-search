@@ -823,3 +823,152 @@ for (const [role, action] of [
         message:{role:'assistant',content:JSON.stringify({claims:[{kind:'quotation',text:'REQ-42',citationIds:[0]}]})}}]}));});
   });
 }
+
+// Exercise the actual controller, both roles and real synthetic loopback. The
+// earlier listener must see a cross-role change made by a later listener.
+for (const role of ['reranking','generation'] as const) {
+  for (const action of ['cancel','cross-role','revoke','replace','configure','invalidate','dispose','search'] as const) {
+    for (const expired of [false,true]) test(`B-R2-TERM-03: ${role} ${action} ${expired?'TIMEOUT':'CANCELLED'} reentrant`,async t=>{
+      let calls=0,reads=0,entered!:()=>void,release!:()=>void,stall=true;
+      const entry=new Promise<void>(r=>{entered=r;});
+      await fixture(async cfg=>{
+        let mono=1000;
+        t.mock.method(performance,'now',()=>mono);
+        const response:SearchResponse={protocolVersion:2,requestId:'ui',requestedMode:'lexical',
+          executedMode:'lexical',status:'ok',indexGenerationId:hash('generation'),hits:hits.slice(0,1),
+          capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0};
+        const port={config:()=>cfg,scopeId:()=>scopeId,verify:async()=>{
+          reads++;if(stall)await new Promise<void>(r=>{release=r;entered();});
+        }};
+        const c=new SearchController(async()=>{},undefined,undefined,port,port);
+        c.attach({search:async()=>response,status:()=>({status:'ready',generationId:hash('generation'),
+          sources:1,records:1,busy:false,error:null,maintenanceWarning:null}),cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+        const other=role==='reranking'?'generation':'reranking';
+        const prepare=(r=role)=>r==='reranking'?c.prepareRerank():c.prepareGeneration();
+        const cancel=(r=role)=>r==='reranking'?c.cancelRerank():c.cancelGeneration();
+        const confirm=(p:ReturnType<typeof prepare>)=>p.role==='reranking'
+          ?c.rerankConfirmed(p,'synthetic',token):c.generationConfirmed(p,'synthetic',token);
+        const internal=c as unknown as {activeEvidence:Record<string,unknown>;previewTimers:Record<string,unknown>;prepared:Record<string,unknown>};
+        const cause=expired?'TIMEOUT':'CANCELLED';
+        const shared=['configure','invalidate','dispose','search'].includes(action);
+        let depth=0,maxDepth=0,notifications=0,lifecycle=0,acted=false;
+        let nextSearch:Promise<unknown>|undefined;
+        const otherSeen:string[]=[];
+        try {
+          await c.search(uiRequest(input.query,1));installFixture(c,cfg);
+          const otherPreview=prepare(other), preview=prepare(), op=confirm(preview);await entry;
+          c.subscribe(()=>{lifecycle++;});
+          const unsubFirst=c.subscribeEvidence(()=>{otherSeen.push(c.evidenceOperationStatus(other).phase);});
+          const unsub=c.subscribeEvidence(()=>{
+            depth++;maxDepth=Math.max(maxDepth,depth);notifications++;
+            try {
+              if(c.evidenceOperationStatus(role).error!==cause)return;
+              cancel(); // unconditional terminal cleanup, including repeated notifications
+              if(acted && action!=='revoke' && action!=='replace')return;
+              acted=true;
+              switch(action){
+                case 'cross-role':cancel(other);break;
+                case 'revoke':c.revokeRerankProfile();break;
+                case 'replace':installFixture(c,cfg);break;
+                case 'configure':c.configure(true,false);break;
+                case 'invalidate':c.invalidate();break;
+                case 'dispose':c.dispose();break;
+                case 'search':nextSearch=c.search(uiRequest(input.query,1));break;
+              }
+            } finally {depth--;}
+          });
+          if(expired)mono+=cfg.limits.timeoutMs+1;
+          cancel();
+          assert.equal(acted,true);assert.equal(maxDepth,1);
+          if(!shared)assert.equal(c.evidenceOperationStatus(role).error,cause);
+          if(!expired)mono+=cfg.limits.timeoutMs+1;
+          await op;release();await nextSearch;await Promise.resolve();await Promise.resolve();
+          assert.equal(calls,0);assert.equal(reads,1);assert.equal(maxDepth,1);
+          assert.equal(internal.activeEvidence[role],undefined);
+          assert.equal(internal.previewTimers[role],undefined);assert.equal(internal.prepared[role],undefined);
+          if(shared){
+            assert.equal(c.snapshot().rerank,undefined);assert.equal(c.snapshot().generation,undefined);
+            assert.equal(internal.previewTimers[other],undefined);assert.equal(internal.prepared[other],undefined);
+            assert.ok(lifecycle>0);assert.equal(notifications,1,'old revision must not publish after shared invalidation');
+          } else {
+            cancel();await Promise.resolve();await Promise.resolve();
+            assert.equal(c.evidenceOperationStatus(role).error,cause);
+            assert.equal(lifecycle,0);assert.equal(maxDepth,1);assert.ok(notifications<=5);
+            const otherCancelled=action==='cross-role'||role==='generation'&&(action==='revoke'||action==='replace');
+            assert.equal(c.isEvidencePreviewCurrent(other,otherPreview.sequence),!otherCancelled);
+            if(otherCancelled){assert.ok(otherSeen.includes('failed'));assert.equal(internal.previewTimers[other],undefined);}
+            assert.deepEqual(c.snapshot().response,response);
+          }
+          unsub();unsubFirst();
+          await assert.rejects(confirm(preview),{message:'DISCLOSURE_DENIED'});
+          if(action==='dispose')return;
+          if(shared && action!=='search')await c.search(uiRequest(input.query,1));
+          installFixture(c,cfg);stall=false;
+          const fresh=prepare();await confirm(fresh);
+          assert.equal(c.evidenceOperationStatus(role).phase,'complete');assert.equal(calls,1);
+          await assert.rejects(confirm(fresh),{message:'DISCLOSURE_DENIED'});
+          // Completion is retired BEFORE its observer runs. Cleanup from that
+          // observer may cancel results but may not recursively notify itself.
+          let completed=false;
+          const finish=c.subscribeEvidence(()=>{
+            depth++;maxDepth=Math.max(maxDepth,depth);
+            try {
+              if(c.evidenceOperationStatus(role).phase==='complete'){
+                assert.equal(internal.activeEvidence[role],undefined);completed=true;cancel();
+              }else if(c.evidenceOperationStatus(role).error==='CANCELLED')cancel();
+            }finally{depth--;}
+          });
+          await confirm(prepare());finish();
+          assert.equal(completed,true);assert.equal(maxDepth,1);assert.equal(c.evidenceOperationStatus(role).error,'CANCELLED');
+          assert.equal(calls,2);assert.equal(internal.activeEvidence[role],undefined);assert.equal(internal.previewTimers[role],undefined);
+        } finally {c.dispose();t.mock.restoreAll();}
+      },(req,res)=>{calls++;requestBody(req,body=>reply(res,role==='reranking'
+        ?{model:body.model,results:[{index:0,relevance_score:1}]}
+        :{model:body.model,usage:{completion_tokens:4},choices:[{index:0,finish_reason:'stop',
+          message:{role:'assistant',content:JSON.stringify({claims:[{kind:'quotation',text:'REQ-42',citationIds:[0]}]})}}]}));});
+    });
+  }
+}
+
+for(const first of ['reranking','generation'] as const) test(`B-R2-TERM-03: ${first} cross-role active cancellation`,async t=>{
+  let calls=0,reads=0,entered!:()=>void;
+  const releases:(()=>void)[]=[];
+  const entry=new Promise<void>(r=>{entered=r;});
+  await fixture(async cfg=>{
+    let mono=1000;t.mock.method(performance,'now',()=>mono);
+    const response:SearchResponse={protocolVersion:2,requestId:'ui',requestedMode:'lexical',
+      executedMode:'lexical',status:'ok',indexGenerationId:hash('generation'),hits:hits.slice(0,1),
+      capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0};
+    const port={config:()=>cfg,scopeId:()=>scopeId,verify:()=>new Promise<void>(r=>{
+      releases.push(r);if(++reads===2)entered();
+    })};
+    const c=new SearchController(async()=>{},undefined,undefined,port,port);
+    c.attach({search:async()=>response,status:()=>({status:'ready',generationId:hash('generation'),
+      sources:1,records:1,busy:false,error:null,maintenanceWarning:null}),cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+    const second=first==='reranking'?'generation':'reranking';
+    const cancel=(role:typeof first|typeof second)=>role==='reranking'?c.cancelRerank():c.cancelGeneration();
+    const start=(role:typeof first|typeof second)=>role==='reranking'
+      ?c.rerankConfirmed(c.prepareRerank(),'synthetic',token):c.generationConfirmed(c.prepareGeneration(),'synthetic',token);
+    try {
+      await c.search(uiRequest(input.query,1));installFixture(c,cfg);
+      const a=start(first);mono+=1000;const b=start(second);await entry;
+      mono+=1001; // first elapsed, second still within its own deadline
+      let nesting=0,maxNesting=0,count=0;const seen:string[]=[];
+      c.subscribeEvidence(()=>seen.push(String(c.evidenceOperationStatus(second).error)));
+      c.subscribeEvidence(()=>{
+        nesting++;maxNesting=Math.max(maxNesting,nesting);count++;
+        try{if(c.evidenceOperationStatus(first).error==='TIMEOUT'){cancel(first);cancel(second);}}
+        finally{nesting--;}
+      });
+      cancel(first);
+      assert.equal(c.evidenceOperationStatus(first).error,'TIMEOUT');
+      assert.equal(c.evidenceOperationStatus(second).error,'CANCELLED');
+      assert.deepEqual(seen,['null','CANCELLED']);
+      mono+=cfg.limits.timeoutMs;await Promise.all([a,b]);releases.forEach(r=>r());await Promise.resolve();
+      assert.equal(c.evidenceOperationStatus(first).error,'TIMEOUT');
+      assert.equal(c.evidenceOperationStatus(second).error,'CANCELLED');
+      assert.equal(maxNesting,1);assert.equal(count,4);assert.equal(calls,0);assert.equal(reads,2);
+      assert.deepEqual(c.snapshot().response,response);
+    } finally{c.dispose();t.mock.restoreAll();}
+  },(req,res)=>{calls++;req.resume();reply(res,{});});
+});
