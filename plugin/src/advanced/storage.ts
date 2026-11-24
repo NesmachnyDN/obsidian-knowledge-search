@@ -1,6 +1,6 @@
 /** Separate, rebuildable Advanced ingestion generation store, never the Standalone lexical index. */
 import { constants } from 'node:fs';
-import { open, lstat, readdir, readFile, rename, unlink } from 'node:fs/promises';
+import { open, readdir, rename, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { privateIndexPath } from '../standalone/source';
@@ -18,13 +18,29 @@ const pointerName = 'CURRENT';
 const namePattern = /^[0-9a-f]{64}\.json$/;
 const stagePattern = /^\.stage-[0-9a-f-]{36}$/;
 export const strictFile = async (file: string, maximum: number): Promise<Buffer> => {
-  const info = await lstat(file);
-  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > maximum || info.size < 1
-      || (info.mode & 0o077) !== 0)
-    throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
-  const bytes = await readFile(file);
-  if (bytes.byteLength !== info.size) throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
-  return bytes;
+  // Inspect the opened inode, not a filename checked before a separate read.
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.nlink !== 1 || info.size > maximum || info.size < 1
+        || (info.mode & 0o077) !== 0)
+      throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
+    const bytes = Buffer.alloc(info.size + 1);
+    let count = 0;
+    while (count < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, count, bytes.length - count, count);
+      if (!bytesRead) break;
+      count += bytesRead;
+    }
+    const after = await handle.stat();
+    if (count !== info.size || after.size !== info.size || after.dev !== info.dev
+        || after.ino !== info.ino || after.mtimeMs !== info.mtimeMs
+        || after.ctimeMs !== info.ctimeMs)
+      throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
+    return bytes.subarray(0, count);
+  } finally {
+    await handle.close();
+  }
 };
 export const parseCanonical = (bytes: Buffer): unknown => {
   let data: unknown;
