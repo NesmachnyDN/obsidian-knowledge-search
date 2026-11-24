@@ -1,3 +1,4 @@
+import {ApiDenseHost} from '../plugin/src/ai/dense-host';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
@@ -474,5 +475,134 @@ test('D5 fenced code remains excluded by lexical metadata and partial sources re
     const result=await new ApiDenseIndexManager(f.engine,f.store).rebuild(
       {paths:['a.md','b.md'],config:f.config,space},token,context(),{...indexPort(f),current:()=>true});
     assert.equal(result.status,'failed');assert.equal(f.calls(),before);
+  });
+});
+
+function denseHost(f:Fixture,now=Date.now,admitStorage=async()=>{}){
+  let enabled=true, allowed=true, config:import('../plugin/src/ai/contracts').ProviderPreference=f.config;
+  const host=new ApiDenseHost(f.engine,f.vault, f.input('common','hybrid').approval.scopeId,
+    'oks-synthetic-evidence',{config:()=>config,enabled:()=>enabled,allowedPath:()=>allowed,admitStorage},now);
+  const rebuild={kind:'rebuild' as const,paths:['a.md','b.md'],space};
+  const query={kind:'search' as const,paths:['a.md','b.md'],space,
+    request:request('common','hybrid',{predicates:[{key:'version',valueType:'number',value:2,operator:'eq'}]})};
+  return {host,rebuild,query,setEnabled:(v:boolean)=>{enabled=v;},setAllowed:(v:boolean)=>{allowed=v;},
+    setConfig:(v:typeof config)=>{config=v;}};
+}
+test('D6 trusted host prepares without HTTP and consumes exact one-time consent; rebuild then query-only hybrid',async()=>{
+  await fixture(async f=>{
+    const {host,rebuild,query}=denseHost(f);
+    try{
+      const before=f.calls(),p=await host.prepare(rebuild);
+      assert.equal(f.calls(),before);assert.equal(p.evidence.length,2);
+      assert.ok(!JSON.stringify(p).includes(token));
+      const bad=structuredClone(p);bad.evidence[0]!.originalExcerpt='modified';
+      await assert.rejects(host.confirm(bad,'synthetic',token),/DISCLOSURE_DENIED/);
+      await assert.rejects(host.confirm(p,'synthetic',token),/DISCLOSURE_DENIED/);
+      assert.equal(f.calls(),before);
+      const consent=await host.prepare(rebuild);
+      const built=await host.confirm(consent,'synthetic',token);
+      assert.equal(built.status,'ok');
+      assert.deepEqual(f.wireRequests().slice(before).flatMap(row=>row.texts),
+        consent.evidence.map(hit=>hit.originalExcerpt));
+      await assert.rejects(host.confirm(consent,'synthetic',token),/DISCLOSURE_DENIED/);
+      const next=f.calls(),q=await host.prepare(query);
+      assert.equal(f.calls(),next);
+      const result=await host.confirm(q,'synthetic',token);
+      assert.ok('executedMode' in result);assert.equal(result.executedMode,'hybrid');
+      assert.ok(result.hits.length>0);assert.ok(result.hits.every(hit=>hit.evidence.sourceId==='b.md'));
+      assert.deepEqual(f.wireRequests().slice(next).map(row=>row.texts),[['common']]);
+    }finally{await host.close();}
+  });
+});
+test('D6 revoked/expired/config-changed or unclassified consent cannot disclose; basic remains usable',async()=>{
+  await fixture(async f=>{
+    let tick=Date.now();
+    const {host,rebuild,query,setEnabled,setAllowed,setConfig}=denseHost(f,()=>tick);
+    try{
+      const before=f.calls();
+      const p=await host.prepare(rebuild);tick+=300001;
+      await assert.rejects(host.confirm(p,'synthetic',token),/CANCELLED/);
+      tick=Date.now();
+      const q=await host.prepare(query);host.invalidate('a.md');
+      await assert.rejects(host.confirm(q,'synthetic',token),/DISCLOSURE_DENIED/);
+      const changed=await host.prepare(rebuild);setConfig({...f.config,limits:{...f.config.limits,timeoutMs:2000}});
+      await assert.rejects(host.confirm(changed,'public',token),/CANCELLED/);
+      setConfig(f.config);
+      const denied=await host.prepare(rebuild);setAllowed(false);
+      await assert.rejects(host.confirm(denied,'synthetic',token),/CANCELLED/);
+      setAllowed(true);
+      const unclassified=await host.prepare(rebuild);
+      await assert.rejects(host.confirm(unclassified,'unknown' as never,token),/DISCLOSURE_DENIED/);
+      setEnabled(false);await assert.rejects(host.prepare(query),/DISABLED/);setEnabled(true);
+      setConfig({...f.config,transport:'cloud',origin:'https://example.org'});
+      await assert.rejects(host.prepare(query),/ENDPOINT_DENIED/);
+      assert.equal(f.calls(),before);
+      const lexical=await f.engine.search({...query.request,requestedMode:'lexical'});
+      assert.equal(lexical.executedMode,'lexical');assert.equal(lexical.status,'ok');
+      await host.close();await assert.rejects(host.prepare(query),/DISABLED/);
+    }finally{await host.close();}
+  });
+});
+test('D6 metadata-filtered query and source mutation during HTTP suppress stale result; new preview required',async()=>{
+  await fixture(async f=>{
+    const {host,rebuild,query}=denseHost(f);
+    try{
+      await metadataFixture(f);
+      const p=await host.prepare(rebuild);
+      assert.equal((await host.confirm(p,'synthetic',token)).status,'ok');
+      const req={...query,request:request('common','hybrid',{metadata:{tag:'approved'}})};
+      const good=await host.confirm(await host.prepare(req),'synthetic',token);
+      assert.ok('hits' in good);assert.equal(good.executedMode,'hybrid');
+      assert.ok(good.hits.length>0&&good.hits.every(h=>h.evidence.sourceId==='a.md'));
+      const pending=await host.prepare(req),before=f.calls();
+      f.onRequest(()=>{host.invalidate('a.md');f.engine.changed('a.md');});
+      const cancelled=await host.confirm(pending,'synthetic',token);
+      assert.equal(cancelled.status,'failed');
+      assert.ok('hits' in cancelled);assert.deepEqual(cancelled.hits,[]);
+      assert.equal(f.calls(),before+1);
+      await assert.rejects(host.confirm(pending,'synthetic',token),/DISCLOSURE_DENIED/);
+      await f.engine.whenIdle();
+      const lexical=await f.engine.search({...req.request,requestedMode:'lexical'});
+      assert.equal(lexical.status,'ok');
+    }finally{await host.close();}
+  });
+});
+test('D6 exact corpus mismatch fails before query disclosure; foreign host preview cannot replay',async()=>{
+  await fixture(async f=>{
+    const first=denseHost(f),second=denseHost(f);
+    try{
+      const p=await first.host.prepare(first.rebuild);
+      await assert.rejects(second.host.confirm(p,'synthetic',token),/DISCLOSURE_DENIED/);
+      assert.equal((await first.host.confirm(p,'synthetic',token)).status,'ok');
+      const before=f.calls();
+      const one=await first.host.prepare({...first.query,paths:['a.md']});
+      const result=await first.host.confirm(one,'synthetic',token);
+      assert.equal(result.status,'failed');
+      assert.equal(f.calls(),before);
+      const stale=await first.host.prepare(first.query);
+      await first.host.close();
+      const fresh=await second.host.prepare(second.query);
+      assert.notEqual(fresh.nonce,stale.nonce);
+      await assert.rejects(second.host.confirm(stale,'synthetic',token),/DISCLOSURE_DENIED/);
+      assert.equal(f.calls(),before);
+    }finally{await first.host.close();await second.host.close();}
+  });
+});
+
+test('D6 storage admission refuses failed prior writer shutdown and cancellation during admission',async()=>{
+  await fixture(async f=>{
+    const before=f.calls();
+    const blocked=denseHost(f,Date.now,async()=>{throw new Error('prior writer failed');});
+    try{
+      await assert.rejects(blocked.host.confirm(await blocked.host.prepare(blocked.rebuild),'synthetic',token),/NOT_READY/);
+      assert.equal(f.calls(),before);
+    }finally{await blocked.host.close();}
+    let release!:()=>void;
+    const waiting=denseHost(f,Date.now,()=>new Promise<void>(resolve=>{release=resolve;}));
+    try{
+      const pending=waiting.host.confirm(await waiting.host.prepare(waiting.rebuild),'synthetic',token);
+      waiting.host.invalidate();release();
+      await assert.rejects(pending,/CANCELLED/);assert.equal(f.calls(),before);
+    }finally{await waiting.host.close();}
   });
 });

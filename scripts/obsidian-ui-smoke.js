@@ -156,13 +156,37 @@
   assert(disable, 'AI_DISABLE_BUTTON'); disable.click();
   await wait(() => p.settings.ai.reranking.state === 'disabled', 'AI_DISABLE');
   await wait(() => settingRow('AI provider: reranking')?.textContent?.includes('disabled'), 'AI_DISABLE_UI');
+  const host = p.denseHost;
+  assert(host, 'D6_HOST_ATTACHED');
+  const embedding = {state:'configured',transport:'local',origin:'http://127.0.0.1:1',
+    identity:{model:'synthetic-embedding',revision:'v1'},
+    limits:{timeoutMs:1500,maxInputBytes:4096,maxCandidates:8,maxOutputTokens:32,maxConcurrent:1}};
+  const space = {...embedding.identity,dimension:3,normalization:'unit-l2',
+    serializationId:'utf8-verbatim-v1',queryInstructionId:'identity-v1',documentInstructionId:'identity-v1'};
+  const denseRequest = {kind:'rebuild',paths:['first.md'],space};
+  await p.updateSettings({...p.settings,ai:{...p.settings.ai,embedding}});
+  await settle();
+  const preview = await host.prepare(denseRequest);
+  assert(preview.evidence.length > 0, 'D6_PREVIEW');
+  const temporary = await app.vault.create('D6-Revocation.md','# Synthetic revocation');
+  const denied = async value => {
+    try { await host.confirm(value,'synthetic','fixture-token'); return false; }
+    catch (error) { return error.code === 'DISCLOSURE_DENIED' || error.code === 'CANCELLED'; }
+  };
+  assert(await denied(preview), 'D6_VAULT_REVOCATION');
+  await app.vault.delete(temporary); await settle();
+  const next = await host.prepare(denseRequest);
+  await p.updateSettings({...p.settings,ai:{...p.settings.ai,embedding:{state:'disabled'}}});
+  assert(await denied(next), 'D6_CONFIG_REVOCATION');
+  assert((await p.api.request({apiVersion:1,operation:'search',request})).value.hits.length === 1, 'D6_LEXICAL');
+  app.setting.activeTab.display();
   const toggleSetting = name => {
     const row = settingRow(name); assert(row, 'SETTINGS_ROW');
     const toggle = row.querySelector('.checkbox-container'); assert(toggle, 'SETTINGS_TOGGLE');
     toggle.click();
   };
   toggleSetting('Enable Standalone indexing and search');
-  await wait(() => !p.settings.enabled && !p.standalone && parser.stopped, 'SETTINGS_DISABLE');
+  await wait(() => !p.settings.enabled && !p.standalone && !p.denseHost && parser.stopped, 'SETTINGS_DISABLE');
   const disabled = await p.api.request({ apiVersion: 1, operation: 'search', request });
   assert(!disabled.ok && disabled.error === 'DISABLED', 'DISABLED_SEARCH');
   await wait(() => settingRow('Clear derived Standalone index')?.querySelector('button')?.disabled === false,
@@ -181,7 +205,7 @@
   await wait(() => p.settings.enabled && p.standalone, 'SETTINGS_ENABLE');
   await settle();
   app.setting.close(); await p.openSearch();
-  assert(p.standalone.parser !== parser && p.standalone.status().status === 'ready', 'REENABLE');
+  assert(p.denseHost && p.denseHost !== host && p.standalone.parser !== parser && p.standalone.status().status === 'ready', 'REENABLE');
   // Leave a real result for the shell's supported CLI command navigation check.
   await query('REQ-OKS-SMOKE');
   assert(element('.oks-results').children.length === 1, 'COMMAND_RESULT');
@@ -198,5 +222,5 @@
     }
   } finally { clearInterval(ticker); }
   const values = uiLatency.sort((a, b) => a - b);
-  return `OBSIDIAN_UI_SMOKE_PASS: mounted text-only lexical typed-filter unicode-crlf exact-navigation stale-click stale-hash rename delete pause resume cancel rebuild real-settings-dialog ai-role-preferences offline-with-config invalid-isolation purge api disabled-worker diagnostics uiP50Ms=${values[4].toFixed(2)} uiP95Ms=${values[8].toFixed(2)} uiEventLoopDelayMaxMs=${maxDelay.toFixed(2)}`;
+  return `OBSIDIAN_UI_SMOKE_PASS: mounted text-only lexical typed-filter unicode-crlf exact-navigation stale-click stale-hash rename delete pause resume cancel rebuild real-settings-dialog ai-role-preferences dense-host-lease offline-with-config invalid-isolation purge api disabled-worker diagnostics uiP50Ms=${values[4].toFixed(2)} uiP95Ms=${values[8].toFixed(2)} uiEventLoopDelayMaxMs=${maxDelay.toFixed(2)}`;
 })()
