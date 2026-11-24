@@ -379,7 +379,7 @@ test('D4 exact wire boundary accepted and split without truncating original evid
     const before=f.calls();
     const result=await new ApiDenseIndexManager(f.engine,f.store).rebuild(
       {paths:['a.md','b.md'],config,space},token,context(),{...indexPort(f),current:()=>true});
-    assert.equal(result.status,'ok',result.error ?? undefined);assert.equal(result.count,2);
+    assert.equal(result.status,'ok',result.error ?? 'expected successful rebuild');assert.equal(result.count,2);
     assert.deepEqual(f.wireRequests().slice(before),[
       {bytes:limit,texts:[boundary]},{bytes:wire([second]),texts:[second]}]);
     const published=await f.store.snapshotApi(embeddingSpaceId(config,space),f.engine.status().generationId!);
