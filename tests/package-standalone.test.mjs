@@ -50,7 +50,11 @@ test('release is deterministic, minimal, self-verified and idempotent', async ()
     assert.deepEqual(await readdir(dir), ['keep.txt']);
   });
   test('path outside ignored build directory is rejected', async () => {
-    await assert.rejects(createPackage('/tmp/oks-should-never-be-created'), /PACKAGE_INVALID/);
+    // An existing project-relative path outside build exercises the same boundary
+    // without presenting a never-created /tmp file as a real temporary-file sink.
+    const outside = join(process.cwd(), 'outside-build-package');
+    await assert.rejects(createPackage(outside), /PACKAGE_INVALID/);
+    await assert.rejects(readdir(outside), { code: 'ENOENT' });
   });
 
 test('CodeQL #7: packaged assets and attestation have owner-only permissions', async () => {
