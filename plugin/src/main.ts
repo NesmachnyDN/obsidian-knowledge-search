@@ -14,7 +14,7 @@ import { StandaloneEngine } from './standalone/engine';
 import { BoundedVaultReader, privateIndexPath } from './standalone/source';
 import { GenerationStore } from './standalone/storage';
 import { WorkerMarkdownParser } from './standalone/worker';
-import { StandaloneError } from './standalone/contracts';
+import { StandaloneError, type EvidenceHit } from './standalone/contracts';
 import { join, resolve } from 'node:path';
 import { SearchController, StandaloneApi } from './search/controller';
 import { purgeDerivedIndex } from './search/purge';
@@ -73,14 +73,19 @@ export default class SyntheticEvidencePlugin extends Plugin {
   }, () => this.advancedHealth.snapshot(), () => this.advancedIngestion.snapshot(), {
     config: () => this.settings.ai.reranking,
     scopeId: () => this.sourceReader?.rootId,
-    verify: async hit => {
-      const reader = this.sourceReader, file = this.app.vault.getAbstractFileByPath(hit.sourceId);
-      if (!reader || !(file instanceof TFile) || file.path !== hit.sourceId) throw new StandaloneError('SOURCE_REJECTED');
-      verifySpan(hit, await reader.read(hit.sourceId));
-      if (this.sourceReader !== reader || this.app.vault.getAbstractFileByPath(hit.sourceId) !== file)
-        throw new StandaloneError('SOURCE_CHANGED');
-    },
+    verify: hit => this.verifyAiEvidence(hit),
+  }, {
+    config: () => this.settings.ai.generation,
+    scopeId: () => this.sourceReader?.rootId,
+    verify: hit => this.verifyAiEvidence(hit),
   });
+  private async verifyAiEvidence(hit: EvidenceHit): Promise<void> {
+    const reader = this.sourceReader, file = this.app.vault.getAbstractFileByPath(hit.sourceId);
+    if (!reader || !(file instanceof TFile) || file.path !== hit.sourceId) throw new StandaloneError('SOURCE_REJECTED');
+    verifySpan(hit, await reader.read(hit.sourceId));
+    if (this.sourceReader !== reader || this.app.vault.getAbstractFileByPath(hit.sourceId) !== file)
+      throw new StandaloneError('SOURCE_CHANGED');
+  }
   readonly api = new StandaloneApi(this.searchController);
   private loaded = false;
   private unloaded = false;

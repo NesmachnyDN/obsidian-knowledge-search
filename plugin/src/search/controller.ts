@@ -1,3 +1,4 @@
+import { EvidenceGenerator, type GeneratedEvidenceClaim } from '../ai/generation-evidence';
 import { EvidenceReranker, type RerankedHit } from '../ai/rerank-evidence';
 import { pilotConfig } from '../ai/loopback-rerank';
 import { configDigest } from '../ai/disclosure';
@@ -44,12 +45,14 @@ export function propertyInput(key: string, valueType: string, operator: string, 
   return predicate as Predicate;
 }
 type Engine = Pick<StandaloneEngine, 'search' | 'status' | 'cancel' | 'resume' | 'rebuild'>;
-export type RerankPreview = { revision: number; config: ProviderConfig; scopeId: string; query: string; hits: EvidenceHit[] };
+type EvidenceRole = 'reranking' | 'generation';
+export type RerankPreview = { role: EvidenceRole; sequence: number; revision: number; config: ProviderConfig; scopeId: string; query: string; hits: EvidenceHit[] };
 export type RerankState = { phase: 'running' | 'results' | 'error'; error: ProviderFailureCode | null; hits: readonly RerankedHit[] };
 export type RerankPort = {
   config(): ProviderPreference; scopeId(): string | undefined; verify(hit: EvidenceHit): Promise<void>;
 };
-export type UiState = { rerank?: RerankState; phase: 'idle' | 'searching' | 'results' | 'error'; message: string; response: SearchResponse | null };
+export type GenerationState = { phase: 'running' | 'results' | 'error'; error: ProviderFailureCode | null; hits: readonly GeneratedEvidenceClaim[] };
+export type UiState = { rerank?: RerankState; generation?: GenerationState; phase: 'idle' | 'searching' | 'results' | 'error'; message: string; response: SearchResponse | null };
 export class SearchController {
   private engine?: Engine;
   private enabled = true;
@@ -58,8 +61,10 @@ export class SearchController {
   private disposed = false;
   private revision = 0;
   private lastQuery = '';
-  private prepared?: RerankPreview;
-  private rerankAbort?: AbortController;
+  private sequence = 0;
+  private prepared: Partial<Record<EvidenceRole,RerankPreview>> = {};
+  private aborts: Partial<Record<EvidenceRole,AbortController>> = {};
+  private readonly generator = new EvidenceGenerator();
   private readonly reranker = new EvidenceReranker();
   private active = false;
   private pending?: { request: SearchRequest; revision: number; resolve: (v: ApiResult<SearchResponse>) => void };
@@ -68,7 +73,7 @@ export class SearchController {
   constructor(private readonly navigate: (hit: EvidenceHit) => Promise<void>,
     private readonly advancedStatus?: () => AdvancedHealth,
     private readonly ingestionStatus?: () => IngestionStatus,
-    private readonly rerankPort?: RerankPort) {}
+    private readonly rerankPort?: RerankPort, private readonly generationPort?: RerankPort) {}
   attach(engine: Engine): void { if (!this.disposed) { this.engine = engine; this.error = null; this.emit(); } }
   configure(enabled: boolean, paused: boolean, error: string | null = null): void {
     this.enabled = enabled; this.paused = paused; this.error = safeCode(error); this.invalidate();
@@ -83,7 +88,7 @@ export class SearchController {
   }
   private emit(): void { for (const listener of this.listeners) listener(); }
   invalidate(): void {
-    this.revision++; this.revokeRerank(); this.lastQuery = '';
+    this.revision++; this.revokeEvidence(); this.lastQuery = '';
     this.pending?.resolve(failure('SUPERSEDED')); this.pending = undefined;
     this.state = { phase: 'idle', message: 'Results cleared; search to verify current sources.', response: null }; this.emit();
   }
@@ -96,7 +101,7 @@ export class SearchController {
     if (this.disposed || !this.enabled) return failure('DISABLED');
     if (!this.engine) return failure(this.error ?? 'INDEX_UNAVAILABLE');
     const revision = ++this.revision;
-    this.revokeRerank(); this.lastQuery = '';
+    this.revokeEvidence(); this.lastQuery = '';
     this.pending?.resolve(failure('SUPERSEDED'));
     this.state = { phase: 'searching', message: 'Verifying original sources…', response: null }; this.emit();
     return new Promise(resolve => {
@@ -124,16 +129,19 @@ export class SearchController {
     }
     job.resolve(result); void this.pump();
   }
-  /** Preview the exact locally verified candidate set; no network until the user confirms. */
-  prepareRerank(): RerankPreview {
-    this.prepared = undefined;
-    const pref = this.rerankPort?.config();
+  private port(role: EvidenceRole): RerankPort | undefined {
+    return role === 'reranking' ? this.rerankPort : this.generationPort;
+  }
+  prepareRerank(): RerankPreview { return this.prepareEvidence('reranking'); }
+  prepareGeneration(): RerankPreview { return this.prepareEvidence('generation'); }
+  private prepareEvidence(role: EvidenceRole): RerankPreview {
+    delete this.prepared[role];
+    const port = this.port(role), pref = port?.config();
     if (!pref || pref.state === 'disabled') throw new ProviderFailure('DISABLED');
     if (pref.state !== 'configured') throw new ProviderFailure('CONFIG_INVALID');
     const config = pilotConfig(pref);
-    const scopeId = this.rerankPort?.scopeId();
-    const response = this.state.response;
-    if (this.disposed || !this.enabled || this.paused || this.rerankAbort || !isDigest(scopeId)
+    const scopeId = port?.scopeId(), response = this.state.response;
+    if (this.disposed || !this.enabled || this.paused || this.aborts[role] || !isDigest(scopeId)
       || !this.lastQuery.trim() || !response || response.status !== 'ok'
       || response.executedMode !== 'lexical' || !response.hits.length
       || this.engine?.status().generationId !== response.indexGenerationId)
@@ -141,54 +149,70 @@ export class SearchController {
     if (response.hits.length > config.limits.maxCandidates
       || Buffer.byteLength(this.lastQuery) + response.hits.reduce((n, hit) => n + Buffer.byteLength(hit.originalExcerpt), 0)
         > config.limits.maxInputBytes) throw new ProviderFailure('LIMIT_EXCEEDED');
-    this.prepared = structuredClone({revision:this.revision,config,scopeId,query:this.lastQuery,hits:response.hits});
-    return structuredClone(this.prepared);
+    const preview = structuredClone({role,sequence:++this.sequence,revision:this.revision,config,scopeId,query:this.lastQuery,hits:response.hits});
+    this.prepared[role] = preview;
+    return structuredClone(preview);
   }
-  private revokeRerank(): void {
-    this.prepared = undefined;
-    this.rerankAbort?.abort();
-  }
-  cancelRerank(): void {
-    this.revokeRerank();
-    if (this.state.rerank) {
-      this.state = {...this.state,rerank:{phase:'error',error:'CANCELLED',hits:[]}}; this.emit();
+  private revokeEvidence(role?: EvidenceRole): void {
+    for (const r of role ? [role] : ['reranking','generation'] as const) {
+      delete this.prepared[r];
+      this.aborts[r]?.abort();
     }
   }
-  async rerankConfirmed(preview: RerankPreview, classification: 'synthetic' | 'public', token: string): Promise<void> {
-    const approved = this.prepared; this.prepared = undefined; // consume once, even on failure
-    if (!approved || !this.rerankPort || this.rerankAbort || !['synthetic','public'].includes(classification)
+  private cancelEvidence(role: EvidenceRole): void {
+    this.revokeEvidence(role);
+    const key = role === 'reranking' ? 'rerank' : 'generation';
+    if (this.state[key]) {
+      this.state = {...this.state,[key]:{phase:'error',error:'CANCELLED',hits:[]}}; this.emit();
+    }
+  }
+  cancelRerank(): void { this.cancelEvidence('reranking'); }
+  cancelGeneration(): void { this.cancelEvidence('generation'); }
+  rerankConfirmed(preview: RerankPreview, classification: 'synthetic' | 'public', token: string): Promise<void> {
+    return this.confirmEvidence('reranking',preview,classification,token);
+  }
+  generationConfirmed(preview: RerankPreview, classification: 'synthetic' | 'public', token: string): Promise<void> {
+    return this.confirmEvidence('generation',preview,classification,token);
+  }
+  private async confirmEvidence(role: EvidenceRole, preview: RerankPreview, classification: 'synthetic' | 'public', token: string): Promise<void> {
+    const approved = this.prepared[role]; delete this.prepared[role];
+    const port = this.port(role);
+    if (!approved || !port || this.aborts[role] || !['synthetic','public'].includes(classification)
       || JSON.stringify(approved) !== JSON.stringify(preview)) throw new ProviderFailure('DISCLOSURE_DENIED');
-    const port = this.rerankPort;
     const current = (): boolean => {
       const config = port.config();
       return !this.disposed && this.enabled && !this.paused && this.revision === approved.revision
         && port.scopeId() === approved.scopeId && config.state === 'configured'
-        && configDigest('reranking',config) === configDigest('reranking',approved.config)
+        && configDigest(role,config) === configDigest(role,approved.config)
         && this.engine?.status().generationId === this.state.response?.indexGenerationId
         && this.state.response?.indexGenerationId === approved.hits[0]?.indexGenerationId;
     };
     if (!current()) throw new ProviderFailure('CANCELLED');
-    const abort = new AbortController(); this.rerankAbort = abort;
+    const abort = new AbortController(); this.aborts[role] = abort;
+    const key = role === 'reranking' ? 'rerank' : 'generation';
     const deadlineUnixMs = Date.now() + approved.config.limits.timeoutMs;
-    this.state = {...this.state,rerank:{phase:'running',error:null,hits:[]}}; this.emit();
+    this.state = {...this.state,[key]:{phase:'running',error:null,hits:[]}}; this.emit();
     try {
-      const hits = await this.reranker.run({
+      const worker = role === 'reranking' ? this.reranker : this.generator;
+      const hits = await worker.run({
         config:approved.config,scopeId:approved.scopeId,query:{text:approved.query,classification},
         candidates:approved.hits.map(hit=>({hit,classification})),
-        grant:{version:1,role:'reranking',configDigest:configDigest('reranking',approved.config),
+        grant:{version:1,role,configDigest:configDigest(role,approved.config),
           scopeId:approved.scopeId,expiresUnixMs:deadlineUnixMs,queryDigest:hash(approved.query),
           queryClassification:classification,sources:approved.hits.map(hit=>({sourceId:hit.sourceId,
             sourceSha256:hit.sourceSha256,excerptDigest:hash(hit.originalExcerpt),classification}))},
       },token,{signal:abort.signal,deadlineUnixMs},hit=>port.verify(hit),current);
-      if (current() && !abort.signal.aborted) {
-        this.state = {...this.state,rerank:{phase:'results',error:null,hits}}; this.emit();
+      if (this.revision === approved.revision && !this.disposed) {
+        if (current() && !abort.signal.aborted) this.state = {...this.state,[key]:{phase:'results',error:null,hits}};
+        else this.state = {...this.state,[key]:{phase:'error',error:'CANCELLED',hits:[]}};
+        this.emit();
       }
     } catch (error) {
       if (this.revision === approved.revision && !this.disposed) {
-        this.state = {...this.state,rerank:{phase:'error',error:error instanceof ProviderFailure?error.code:'NOT_READY',hits:[]}};
+        this.state = {...this.state,[key]:{phase:'error',error:error instanceof ProviderFailure?error.code:'NOT_READY',hits:[]}};
         this.emit();
       }
-    } finally { if (this.rerankAbort === abort) this.rerankAbort = undefined; }
+    } finally { if (this.aborts[role] === abort) delete this.aborts[role]; }
   }
   async open(index: number, expected?: EvidenceHit): Promise<ApiResult<null>> {
     const hit = this.state.response?.hits[index];

@@ -120,3 +120,42 @@ test('generation endpoint denial, authorization, rate limit, abort and no fallba
     assert.equal(calls,3);
   },(req,res)=>{req.resume();calls++;if(calls===1)reply(res,{},403);else if(calls===2)reply(res,{},429);else received();});
 });
+
+import {SearchController,uiRequest} from '../plugin/src/search/controller';
+import type {SearchResponse} from '../plugin/src/standalone/contracts';
+test('generation controller uses independent roles, one-shot preview, no lexical mutation, revoke on lifecycle',async()=>{
+  let calls=0;
+  await fixture(async cfg=>{
+    const response:SearchResponse={protocolVersion:2,requestId:'ui',requestedMode:'lexical',
+      executedMode:'lexical',status:'ok',indexGenerationId:hash('generation'),hits,
+      capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0};
+    const port={config:()=>cfg,scopeId:()=>scopeId,verify:async(hit:EvidenceHit)=>{
+      verifySpan(hit,bytes[hits.findIndex(h=>h.sourceId===hit.sourceId)]!);
+    }};
+    const controller=new SearchController(async()=>{},undefined,undefined,
+      {...port,config:()=>({state:'disabled' as const})},port);
+    controller.attach({search:async()=>response,status:()=>({status:'ready',generationId:hash('generation'),
+      sources:2,records:2,busy:false,error:null,maintenanceWarning:null}),
+      cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+    await controller.search(uiRequest(input.query,2));
+    assert.throws(()=>controller.prepareRerank(),{message:'DISABLED'});
+    const earlier=controller.prepareGeneration(), newer=controller.prepareGeneration();
+    await assert.rejects(controller.generationConfirmed(earlier,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+    await assert.rejects(controller.generationConfirmed(newer,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+    const preview=controller.prepareGeneration();
+    await assert.rejects(controller.generationConfirmed({...preview,role:'reranking'},'synthetic',token),{message:'DISCLOSURE_DENIED'});
+    assert.equal(calls,0);
+    const approved=controller.prepareGeneration();
+    await controller.generationConfirmed(approved,'synthetic',token);
+    assert.equal(controller.snapshot().generation?.phase,'results');
+    assert.deepEqual(controller.snapshot().generation?.hits.map(x=>x.citations),[[hits[0]],[hits[0],hits[1]]]);
+    assert.deepEqual(controller.snapshot().response,response);
+    assert.equal(controller.snapshot().rerank,undefined);
+    await assert.rejects(controller.generationConfirmed(approved,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+    const next=controller.prepareGeneration();controller.invalidate();
+    await assert.rejects(controller.generationConfirmed(next,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+    assert.equal(controller.snapshot().generation,undefined);
+    assert.equal(calls,1);
+    controller.dispose();
+  },(req,res)=>{calls++;req.resume();reply(res,good());});
+});

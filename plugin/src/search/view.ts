@@ -87,22 +87,32 @@ export class SearchView extends ItemView {
     });
     const message = add('p', '', 'oks-message'); message.setAttribute('aria-live', 'polite');
     const results = add('ol', '', 'oks-results');
-    const rerankMessage=add('p','','oks-rerank-message'); rerankMessage.setAttribute('aria-live','polite');
-    const confirmation=add('section','','oks-rerank-preview');
-    const rerankRows=add('ol','','oks-rerank-results');
-    const clearConfirmation=()=>{const token=confirmation.querySelector<HTMLInputElement>('.oks-rerank-token');
-      if(token) token.value=''; confirmation.replaceChildren();};
-    const rerankError=(error:unknown)=>{rerankMessage.textContent='Local rerank: '+(error instanceof ProviderFailure?error.code:'NOT_READY');};
-    button('Prepare local rerank','oks-rerank-prepare',()=>{
-      clearConfirmation();
-      try {
-        const preview=this.controller.prepareRerank();
-        renderRerankConfirmation(confirmation,preview,(classification,token)=>{
-          if(!this.disposed) void this.controller.rerankConfirmed(preview,classification,token).catch(rerankError);
-        },()=>this.controller.cancelRerank());
-      } catch(error) { clearConfirmation();rerankError(error); }
-    });
-    button('Cancel rerank','oks-rerank-cancel',()=>{clearConfirmation();this.controller.cancelRerank();});
+    const makeEvidencePanel = (role: 'rerank' | 'generation') => {
+      const prefix='oks-'+role, label='Local '+role;
+      const message=add('p','',prefix+'-message');message.setAttribute('aria-live','polite');
+      const confirmation=add('section','',prefix+'-preview');
+      const rows=add('ol','',prefix+'-results');
+      const clear=()=>{const token=confirmation.querySelector<HTMLInputElement>('input[type=password]');
+        if(token)token.value='';confirmation.replaceChildren();};
+      const cancel=()=>role==='rerank'?this.controller.cancelRerank():this.controller.cancelGeneration();
+      const error=(e:unknown)=>{if(!this.disposed)message.textContent=label+': '+(e instanceof ProviderFailure?e.code:'NOT_READY');};
+      button('Prepare local '+role,prefix+'-prepare',()=>{
+        clear();
+        try {
+          const preview=role==='rerank'?this.controller.prepareRerank():this.controller.prepareGeneration();
+          renderRerankConfirmation(confirmation,preview,(classification,token)=>{
+            if(this.disposed)return;
+            const request=role==='rerank'?this.controller.rerankConfirmed(preview,classification,token):
+              this.controller.generationConfirmed(preview,classification,token);
+            void request.catch(error);
+          },cancel);
+        } catch(e){clear();error(e);}
+      });
+      button('Cancel '+role,prefix+'-cancel',()=>{clear();cancel();});
+      return {message,rows,clear};
+    };
+    const rerankPanel=makeEvidencePanel('rerank');
+    const generationPanel=makeEvidencePanel('generation');
     const renderStatus = (): void => {
       if (this.disposed) return;
       const s = this.controller.status();
@@ -114,14 +124,27 @@ export class SearchView extends ItemView {
     const render = (): void => {
       if (this.disposed) return;
       renderStatus(); const state = this.controller.snapshot(); message.textContent = state.message; results.replaceChildren();
-      clearConfirmation();rerankRows.replaceChildren();
-      rerankMessage.textContent=state.rerank?'Local rerank: '+(state.rerank.error??state.rerank.phase):'Local rerank: not run';
+      rerankPanel.clear();generationPanel.clear();rerankPanel.rows.replaceChildren();generationPanel.rows.replaceChildren();
+      rerankPanel.message.textContent=state.rerank?'Local rerank: '+(state.rerank.error??state.rerank.phase):'Local rerank: not run';
       state.rerank?.hits.forEach(hit=>{
         const row=textElement(doc,'li','');row.appendChild(textElement(doc,'pre',hit.evidence.originalExcerpt));
         row.appendChild(textElement(doc,'span','Rerank score: '+hit.rerankScore));
         const index=state.response?.hits.findIndex(candidate=>JSON.stringify(candidate)===JSON.stringify(hit.evidence))??-1;
         const open=textElement(doc,'button',hit.evidence.sourceId+' — verify and open','oks-rerank-open');
-        open.onclick=()=>{if(!this.disposed)void this.controller.open(index,hit.evidence);};row.appendChild(open);rerankRows.appendChild(row);
+        open.onclick=()=>{if(!this.disposed)void this.controller.open(index,hit.evidence);};row.appendChild(open);rerankPanel.rows.appendChild(row);
+      });
+      generationPanel.message.textContent=state.generation?'Local generation: '+(state.generation.error??
+        (state.generation.phase==='results'&&!state.generation.hits.length?'no supported claims':state.generation.phase)):'Local generation: not run';
+      state.generation?.hits.forEach(claim=>{
+        const row=textElement(doc,'li','');
+        row.appendChild(textElement(doc,'strong',claim.kind==='quotation'?'Verified literal quotation':'Unverified model inference','oks-generation-kind'));
+        row.appendChild(textElement(doc,'pre',claim.text,'oks-generation-text'));
+        for(const hit of claim.citations){
+          const index=state.response?.hits.findIndex(candidate=>JSON.stringify(candidate)===JSON.stringify(hit))??-1;
+          const open=textElement(doc,'button',hit.sourceId+':'+(hit.sourceLocators[0]?.lineStart??'?')+' — verify and open','oks-generation-open');
+          open.onclick=()=>{if(!this.disposed)void this.controller.open(index,hit);};row.appendChild(open);
+        }
+        generationPanel.rows.appendChild(row);
       });
       state.response?.hits.forEach((hit, index) => {
         const row = textElement(doc, 'li', '');
@@ -136,10 +159,10 @@ export class SearchView extends ItemView {
     render(); input.focus();
   }
   private cleanup(): void {
-    this.disposed = true; this.unsubscribe?.(); this.unsubscribe = undefined; this.controller.cancelRerank();
+    this.disposed = true; this.unsubscribe?.(); this.unsubscribe = undefined; this.controller.cancelRerank(); this.controller.cancelGeneration();
     if (this.timer !== undefined) this.contentEl.ownerDocument.defaultView!.clearInterval(this.timer);
     this.timer = undefined;
-    const token=this.contentEl.querySelector<HTMLInputElement>('.oks-rerank-token');if(token)token.value='';
+    for(const token of this.contentEl.querySelectorAll<HTMLInputElement>('input[type=password]'))token.value='';
     this.contentEl.replaceChildren();
   }
   async onClose(): Promise<void> { this.cleanup(); }
