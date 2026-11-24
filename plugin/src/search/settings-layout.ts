@@ -1,4 +1,7 @@
-import { Setting } from 'obsidian';
+import { Setting, getLanguage } from 'obsidian';
+import { translateSettings } from './settings-i18n';
+
+const t = (source: string): string => translateSettings(source, getLanguage());
 
 // Scope all overrides to OKS. Settings can live in a separate Electron document.
 const layout = `
@@ -76,7 +79,7 @@ export function settingsDisclosure(parent: HTMLElement, openEditors: Set<string>
   key: string, title: string, openLabel: string, onOpen: () => void):
   { form: HTMLElement; open: () => void } {
   // The opener must precede the form in DOM order. Native Tab enters it next.
-  const row = new Setting(parent).setName(title);
+  const row = new Setting(parent).setName(t(title));
   const form = parent.createEl('div');
   form.id = 'oks-settings-editor-' + key;
   let opener: HTMLButtonElement;
@@ -85,7 +88,7 @@ export function settingsDisclosure(parent: HTMLElement, openEditors: Set<string>
     else openEditors.delete(key);
     form.hidden = !open;
     opener.setAttribute('aria-expanded', String(open));
-    opener.textContent = open ? 'Close editor' : openLabel;
+    opener.textContent = t(open ? 'Close editor' : openLabel);
   };
   row.addButton(button => {
     opener = button.buttonEl;

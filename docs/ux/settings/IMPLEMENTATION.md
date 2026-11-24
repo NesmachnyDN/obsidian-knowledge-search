@@ -4,7 +4,74 @@ Applies to the candidate Linux desktop Standalone plugin. It is **not**
 authorization to install into a production Vault, perform external data
 disclosure, enable unsupported formats, or claim Gate B/C acceptance.
 
-## First use (Basic)
+## Interface language (OKS-06UX-L10N)
+
+The Settings tab follows the **language selected in Obsidian**, via the
+public `getLanguage()` API. Russian (`ru` and regional variants) shows
+Russian headings, controls, explanations, validation errors, statuses, editor
+disclosures, and confirmation dialogs. English (`en`) shows English.
+Other Obsidian languages currently use the English fallback. There is no
+plugin-specific language preference, browser/OS locale detection, network
+translation, or additional runtime dependency.
+
+After changing Obsidian's interface language, reopen the plugin Settings
+tab (and restart Obsidian if the host requests it). The language is read on
+each render and when transient notices/dialogs are shown; reopening the tab
+does not rewrite the saved settings. Technical identifiers, configured
+addresses/model IDs, raw diagnostic codes, and source paths remain unchanged
+in any language. This is a Settings-specific UI improvement; the search
+workspace and command labels have a separate localization scope.
+
+Acceptance: `tests/settings-i18n.test.ts` exercises both languages, Russian
+locale variants, English fallback, formatting, exhaustive typed runtime-state
+coverage and settings immutability. Diagnostic codes and format identifiers
+remain verbatim; Russian navigation help uses the actual English Search UI
+command and button labels until that workspace is localized.
+The existing English native-Obsidian Settings UX and visual tests remain
+regression gates. Run those with `LANG=en_US.UTF-8 LANGUAGE=en_US:en
+LC_ALL=en_US.UTF-8` in the isolated host so English assertions are
+deterministic. For the Russian acceptance and three synthetic screenshots
+at 900×700, 760×700 and 760×700/200%, use:
+
+```sh
+LANG=ru_RU.UTF-8 LANGUAGE=ru_RU:ru LC_ALL=ru_RU.UTF-8 \
+  OKS_06UX_L10N_RU_TEST=1 OKS_HOST_NO_ROUTE=1 \
+  OKS_06UX_L10N_RU_VISUAL_DIR=/tmp/oks-ru-screens-fresh \
+  OKS_STANDALONE_PACKAGE_DIR="$PWD/build/standalone-package" \
+  bash scripts/obsidian-host-smoke.sh
+```
+
+A separate end-to-end locale-switch gate uses the **native Obsidian General
+→ Language selector**, actual Electron input events and its visible Relaunch
+action, then restarts only the disposable test process to validate persistence:
+
+```sh
+LANG=en_US.UTF-8 LANGUAGE=en_US:en LC_ALL=en_US.UTF-8 \
+  OKS_06UX_L10N_SWITCH_TEST=1 OKS_HOST_NO_ROUTE=1 \
+  OKS_STANDALONE_PACKAGE_DIR="$PWD/build/standalone-package" \
+  bash scripts/obsidian-host-smoke.sh
+```
+
+It verifies EN → RU → EN, Basic and Expert headings, independently rendered AI
+connection editors and accessible labels, one non-default persisted settings baseline across every phase and restart,
+unchanged index generation within each verification phase, and locale after a
+full application restart with a distinct isolated host process. The harness does
+not stub `getLanguage()`; it operates only inside a synthetic Vault and an
+isolated, no-route Electron profile.
+
+The RU harness uses only an isolated generated Vault and a network-isolated
+session. It asserts Russian controls, accessible labels, AI connection draft
+validation, independent offline search, unchanged settings and index generation,
+and layout at 200% zoom. It also performs a real ItemView search and checks the
+Russian success and paused/degraded status summaries before restoring settings.
+Both L10N modes reject missing package/no-route and conflicting feature-test
+flags before host startup. A fresh absolute screenshot directory is required
+when capturing screenshots.
+Screenshots and SHA-256 checksums stay outside the repository. Locale is still
+read from Obsidian's application selection, not by the plugin from `LANG`;
+the explicit environment locale affects only the clean isolated Obsidian test
+host's initial language.
+
 
 The Settings tab opens in **Basic** on a clean install. No API connection,
 Python, tokenizer or model download is required for offline Markdown search.
