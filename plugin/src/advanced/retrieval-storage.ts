@@ -77,6 +77,7 @@ export class AdvancedRetrievalStore {
   private committedName:string|null=null;
   private lifecycle!:Lifecycle;
   private poisoned=false;
+  private readonly apiSnapshots=new WeakMap<ApiDenseGeneration,{epoch:symbol;revision:number}>();
   private constructor(private readonly root:TrustedVaultRoot,path:string){this.path=path;}
   static async open(root:TrustedVaultRoot,pluginId:string):Promise<AdvancedRetrievalStore>{
     const parent=dirname(privateIndexPath(root.path,root.id,pluginId));
@@ -178,17 +179,27 @@ export class AdvancedRetrievalStore {
     }
   }
   /** A recovered API generation is never exposed without original source verification. */
-  async snapshotApi(spaceId:string,lexicalGenerationId:string):Promise<ApiDenseGeneration|null>{
+  async snapshotApi(spaceId:string,lexicalGenerationId:string,signal?:AbortSignal):Promise<ApiDenseGeneration|null>{
     this.assertCurrent();
     const state=this.lifecycle;
     if(this.generation?.schemaVersion!==2||state.blocked||state.revoked.size)return null;
     const value=this.generation,revision=state.revision;
     if(value.spaceId!==spaceId||value.lexicalGenerationId!==lexicalGenerationId)invalid();
     await withPrivateDerivedDirectory(this.path,this.root.path,async dir=>this.verifyPointer(dir));
-    await this.verifyApi(value);
+    await this.verifyApi(value,signal);
     this.assertCurrent();
+    if(signal?.aborted)throw new ModelError('MODEL_CANCELLED');
     if(state.revision!==revision||this.generation!==value||state.blocked||state.revoked.size)invalid();
-    return structuredClone(value);
+    const snapshot=structuredClone(value);
+    this.apiSnapshots.set(snapshot,{epoch:this.epoch,revision});
+    return snapshot;
+  }
+  /** Only a snapshot issued by this store may fence a retrieval result. */
+  isApiSnapshotCurrent(snapshot:ApiDenseGeneration):boolean{
+    const lease=this.apiSnapshots.get(snapshot),state=this.lifecycle;
+    return !!lease&&!this.poisoned&&!state.blocked&&!state.revoked.size
+      &&lease.epoch===this.epoch&&lease.epoch===state.epoch&&lease.revision===state.revision
+      &&this.generation?.schemaVersion===2&&this.generation.generationId===snapshot.generationId;
   }
   revoke(path:string):void{
     // Even an instance with an obsolete snapshot can deliver a source event.
