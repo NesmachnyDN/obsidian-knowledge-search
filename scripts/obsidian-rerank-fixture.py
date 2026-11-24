@@ -3,6 +3,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import sys
 import time
+from threading import Lock
 from pathlib import Path
 
 class Fixture(BaseHTTPRequestHandler):
@@ -10,6 +11,9 @@ class Fixture(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
+        if self.path == "/v1/embeddings":
+            self.embedding()
+            return
         if self.path not in {"/v1/rerank", "/v1/chat/completions"}:
             self.send_error(404)
             return
@@ -64,7 +68,56 @@ class Fixture(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+
+    def embedding(self):
+        # Count requests, never store bearer credentials, source text or vectors.
+        with self.server.count_lock:
+            self.server.embedding_count += 1
+            self.server.count_path.write_text(str(self.server.embedding_count), encoding="utf-8")
+        auth = self.headers.get("Authorization")
+        if auth not in {"Bearer fixture-success", "Bearer fixture-delay",
+                        "Bearer fixture-rate", "Bearer fixture-invalid"}:
+            self.send_error(401)
+            return
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+            assert 0 < size <= 4096
+            body = json.loads(self.rfile.read(size))
+            assert set(body) == {"model", "input", "encoding_format"}
+            assert body["model"] == "synthetic-embedding@fixture-v1"
+            assert body["encoding_format"] == "float"
+            assert (body["input"] == ["REQ-OKS-DENSE"] or
+                    sorted(body["input"]) == ["REQ-OKS-DENSE: alpha [[target|alias]]",
+                                               "REQ-OKS-DENSE: beta"])
+        except (ValueError, KeyError, AssertionError, TypeError):
+            self.send_error(400)
+            return
+        if auth == "Bearer fixture-rate":
+            self.send_error(429)
+            return
+        if auth == "Bearer fixture-delay":
+            time.sleep(1.3)
+        data = []
+        for index, text in enumerate(body["input"]):
+            vector = [0, 1] if text.endswith("beta") else [1, 0]
+            if auth == "Bearer fixture-invalid":
+                vector = [0, 0]
+            data.append({"object": "embedding", "index": index, "embedding": vector})
+        response = json.dumps({"model": body["model"], "data": data}).encode()
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
 if __name__ == "__main__":
     server = ThreadingHTTPServer(("127.0.0.1", 18765), Fixture)
+    server.count_lock = Lock()
+    server.embedding_count = 0
+    server.count_path = Path(sys.argv[1] + ".count")
+    server.count_path.write_text("0", encoding="utf-8")
     Path(sys.argv[1]).touch()
     server.serve_forever()

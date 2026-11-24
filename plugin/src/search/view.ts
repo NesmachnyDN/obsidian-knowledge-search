@@ -5,15 +5,19 @@ import { diagnostics } from './status';
 import { textElement } from './render';
 import { renderRerankConfirmation } from '../ai/rerank-confirm';
 import { ProviderFailure } from '../ai/contracts';
+import { mountDensePanel } from '../ai/dense-ui';
+import type { DenseUiController } from '../ai/dense-ui-controller';
 
 export const SEARCH_VIEW = 'oks-standalone-search';
 export class SearchView extends ItemView {
   private unsubscribe?: () => void;
   private timer?: number;
   private disposed = true;
+  private densePanel?: {dispose():void};
   constructor(leaf: WorkspaceLeaf, private readonly controller: SearchController,
     private readonly settings: () => SearchSettings,
-    private readonly control: (action: 'pause' | 'cancel' | 'resume' | 'rebuild') => Promise<void>) { super(leaf); }
+    private readonly control: (action: 'pause' | 'cancel' | 'resume' | 'rebuild') => Promise<void>,
+    private readonly denseUi?: DenseUiController) { super(leaf); }
   getViewType(): string { return SEARCH_VIEW; }
   getDisplayText(): string { return 'OKS Standalone search'; }
   async onOpen(): Promise<void> {
@@ -56,18 +60,21 @@ export class SearchView extends ItemView {
     const button = (label: string, cls: string, action: () => void): HTMLButtonElement => {
       const el = add('button', label, cls); el.onclick = () => { if (!this.disposed) action(); }; return el;
     };
+    const request = () => {
+      const filtered = enabled.checked && this.settings().propertiesEnabled;
+      const predicates = filtered ? [propertyInput(key.value, type.value, op.value, value.value)] : [];
+      const metadata = { ...(tag.value.trim() ? { tag: tag.value.trim() } : {}),
+        ...(linkTarget.value.trim() ? { linkTarget: linkTarget.value.trim() } : {}) };
+      return uiRequest(input.value, Number(topK.value), predicates, matchMode.value as 'literal' | 'terms',
+        Object.keys(metadata).length ? metadata : undefined);
+    };
     const search = async (): Promise<void> => {
       const filtered = enabled.checked && this.settings().propertiesEnabled;
       if (!input.value.trim() && !filtered && !tag.value.trim() && !linkTarget.value.trim()) {
         this.controller.invalidate(); return;
       }
       try {
-        const predicates = filtered ? [propertyInput(key.value, type.value, op.value, value.value)] : [];
-        const metadata = { ...(tag.value.trim() ? { tag: tag.value.trim() } : {}),
-          ...(linkTarget.value.trim() ? { linkTarget: linkTarget.value.trim() } : {}) };
-        const result = await this.controller.search(uiRequest(input.value, Number(topK.value),
-          predicates, matchMode.value as 'literal' | 'terms',
-          Object.keys(metadata).length ? metadata : undefined));
+        const result = await this.controller.search(request());
         if (!this.disposed && !result.ok && result.error !== 'SUPERSEDED') this.controller.message(result.error);
       } catch { if (!this.disposed) this.controller.message('INVALID_REQUEST'); }
     };
@@ -111,12 +118,13 @@ export class SearchView extends ItemView {
       button('Cancel '+role,prefix+'-cancel',()=>{clear();cancel();});
       return {message,rows,clear};
     };
+    if(this.denseUi)this.densePanel=mountDensePanel(root,this.denseUi,()=>this.settings().ai.embedding,request);
     const rerankPanel=makeEvidencePanel('rerank');
     const generationPanel=makeEvidencePanel('generation');
     const renderStatus = (): void => {
       if (this.disposed) return;
       const s = this.controller.status();
-      status.textContent = `Lexical: ${s.capabilityReadiness.lexical} | Dense: unavailable | Hybrid: unavailable\n`
+      status.textContent = `Lexical: ${s.capabilityReadiness.lexical} | API v1 Dense: unavailable | API v1 Hybrid: unavailable\n`
         + `Generation: ${s.generationId ?? 'none'}\nSources: ${s.sources} | Records: ${s.records} | Busy: ${s.busy} | Paused: ${s.paused}\n`
         + `Status: ${s.error ?? 'none'} | Maintenance: ${s.maintenanceWarning ?? 'none'}`;
       filters.disabled = !this.settings().propertiesEnabled;
@@ -159,7 +167,7 @@ export class SearchView extends ItemView {
     render(); input.focus();
   }
   private cleanup(): void {
-    this.disposed = true; this.unsubscribe?.(); this.unsubscribe = undefined; this.controller.cancelRerank(); this.controller.cancelGeneration();
+    this.disposed = true; this.densePanel?.dispose(); this.densePanel=undefined; this.unsubscribe?.(); this.unsubscribe = undefined; this.controller.cancelRerank(); this.controller.cancelGeneration();
     if (this.timer !== undefined) this.contentEl.ownerDocument.defaultView!.clearInterval(this.timer);
     this.timer = undefined;
     for(const token of this.contentEl.querySelectorAll<HTMLInputElement>('input[type=password]'))token.value='';

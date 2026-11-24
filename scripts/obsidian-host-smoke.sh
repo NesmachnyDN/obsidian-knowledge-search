@@ -147,6 +147,10 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
     [[ "$generation" == *"OBSIDIAN_GENERATION_FIXTURE_PASS:"* ]] || {
       echo "HOST_SMOKE_FAILURE: isolated generation UI fixture ($generation)" >&2; exit 1; }
     printf "%s\n" "$generation"
+    dense="$(timeout 65s "$cli" eval "code=$(cat "$repo/scripts/obsidian-dense-smoke.js")")"
+    [[ "$dense" == *"OBSIDIAN_DENSE_FIXTURE_PASS:"* ]] || {
+      echo "HOST_SMOKE_FAILURE: isolated API-dense UI fixture ($dense)" >&2; exit 1; }
+    printf "%s\n" "$dense"
   fi
   if [[ "${OKS_ADVANCED_HEALTH_TEST:-0}" == 1 ]]; then
     advanced="$(timeout 25s "$cli" eval "code=$(cat "$repo/scripts/obsidian-advanced-smoke.js")")"

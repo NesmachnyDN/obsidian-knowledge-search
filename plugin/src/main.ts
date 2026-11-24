@@ -1,3 +1,4 @@
+import { DenseUiController } from './ai/dense-ui-controller';
 import { ApiDenseHost } from './ai/dense-host';
 import { AdvancedHealthBridge } from './advanced/health';
 import { AdvancedIngestionManager } from './advanced/manager';
@@ -59,6 +60,15 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private navigator?: SourceNavigator<TFile>;
   private sourceReader?: BoundedVaultReader;
   private denseHost?: ApiDenseHost;
+  private denseSettingsChanging = false;
+  private readonly denseUi = new DenseUiController({
+    host: () => this.denseSettingsChanging ? undefined : this.denseHost,
+    revokeNavigation: () => this.navigator?.invalidate(),
+    navigate: async hit => {
+      if (!this.navigator) throw new StandaloneError('NAVIGATION_REJECTED');
+      await this.navigator.open(hit);
+    },
+  });
   private rootId?: string;
   private initializing?: Promise<void>;
   private layoutReady = false;
@@ -106,8 +116,9 @@ export default class SyntheticEvidencePlugin extends Plugin {
     try { this.settings = parseSettings(saved); }
     catch { this.settings = { ...defaultSettings(), enabled: false }; this.standaloneError = 'SETTINGS_INVALID'; }
     this.searchController.configure(this.settings.enabled, this.settings.paused, this.standaloneError);
+    this.searchController.subscribe(() => this.denseUi.invalidate());
     this.registerView(SEARCH_VIEW, leaf => new SearchView(leaf, this.searchController,
-      () => this.settings, action => this.controlSearch(action)));
+      () => this.settings, action => this.controlSearch(action), this.denseUi));
     this.addCommand({ id: 'open-standalone-search', name: 'Open Standalone search', callback: () => { void this.openSearch(); } });
     this.addCommand({ id: 'open-first-search-source', name: 'Verify and open first search source', callback: () => { void this.searchController.open(0); } });
     for (const action of ['pause','resume','cancel','rebuild'] as const)
@@ -191,33 +202,40 @@ export default class SyntheticEvidencePlugin extends Plugin {
       if (this.purgeInFlight) await this.purgeInFlight.catch(() => {});
       if (this.unloaded) return;
       const settings = parseSettings(change(this.settings));
-      this.denseHost?.invalidate();
-      await this.saveData(settings);
-      if (this.unloaded) return;
-      this.denseHost?.invalidate();
-      const before = this.settings;
-      if (before.ingestion.enabled !== settings.ingestion.enabled) {
-        await this.stopDenseHost();
-      }
-      if (this.unloaded) return;
-      this.settings = settings;
-      this.standaloneError = null;
-      this.searchController.configure(settings.enabled, settings.paused);
-      if (JSON.stringify(before.ingestion) !== JSON.stringify(settings.ingestion))
-        await this.stopIngestion();
-      if (!settings.ingestion.enabled && this.standalone && !this.denseHost)
-        this.attachDenseHost();
-      if (JSON.stringify(before.advanced) !== JSON.stringify(settings.advanced)) {
-        await this.stopAdvanced();
-        if (settings.advanced.enabled && this.layoutReady && !this.unloaded) await this.initializeAdvanced();
-      }
-      if (before.enabled !== settings.enabled) {
-        this.lifecycleRevision++;
-        await this.stopStandalone();
-        await this.initializing;
-        if (settings.enabled && this.layoutReady && !this.unloaded) await this.initializeStandalone();
-      } else if (this.standalone && before.paused !== settings.paused) {
-        if (settings.paused) this.standalone.cancel(); else this.standalone.resume();
+      this.denseSettingsChanging = true;
+      try {
+        this.denseUi.invalidate();
+        this.denseHost?.invalidate();
+        await this.saveData(settings);
+        if (this.unloaded) return;
+        this.denseUi.invalidate();
+        this.denseHost?.invalidate();
+        const before = this.settings;
+        if (before.ingestion.enabled !== settings.ingestion.enabled) {
+          await this.stopDenseHost();
+        }
+        if (this.unloaded) return;
+        this.settings = settings;
+        this.standaloneError = null;
+        this.searchController.configure(settings.enabled, settings.paused);
+        if (JSON.stringify(before.ingestion) !== JSON.stringify(settings.ingestion))
+          await this.stopIngestion();
+        if (!settings.ingestion.enabled && this.standalone && !this.denseHost)
+          this.attachDenseHost();
+        if (JSON.stringify(before.advanced) !== JSON.stringify(settings.advanced)) {
+          await this.stopAdvanced();
+          if (settings.advanced.enabled && this.layoutReady && !this.unloaded) await this.initializeAdvanced();
+        }
+        if (before.enabled !== settings.enabled) {
+          this.lifecycleRevision++;
+          await this.stopStandalone();
+          await this.initializing;
+          if (settings.enabled && this.layoutReady && !this.unloaded) await this.initializeStandalone();
+        } else if (this.standalone && before.paused !== settings.paused) {
+          if (settings.paused) this.standalone.cancel(); else this.standalone.resume();
+        }
+      } finally {
+        this.denseSettingsChanging = false;
       }
     });
     this.settingsQueue = task.catch(() => {});
@@ -490,7 +508,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     this.denseHost = new ApiDenseHost(engine, resolve(adapter.getBasePath()), reader.rootId, this.manifest.id, {
       config: () => this.settings.ai.embedding,
       admitStorage: async () => { await ingestionBarriers.get(resolve(adapter.getBasePath())); },
-      enabled: () => !this.unloaded && this.settings.enabled && !this.settings.paused
+      enabled: () => !this.unloaded && !this.denseSettingsChanging && this.settings.enabled && !this.settings.paused
         && !this.settings.ingestion.enabled && this.standalone === engine && this.sourceReader === reader
         && this.app.vault.adapter === adapter,
       allowedPath: path => {
@@ -500,6 +518,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     });
   }
   private stopDenseHost(): Promise<void> {
+    this.denseUi.invalidate();
     const host = this.denseHost;
     if (!host) return Promise.resolve();
     // Publish the drain before losing ownership. close() revokes synchronously;
@@ -539,6 +558,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     this.resultModal = undefined;
     void this.controller?.unload();
     this.lifecycleRevision++;
+    this.denseUi.dispose();
     this.searchController.dispose();
     this.app.workspace.detachLeavesOfType(SEARCH_VIEW);
     void this.stopStandalone();
