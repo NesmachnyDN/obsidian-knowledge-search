@@ -15,7 +15,21 @@
     'SYNTHETIC_ONLY');
   assert(p.standalone?.status().status === 'ready' && p.standalone.status().sources === 2,
     'OFFLINE_SEARCH_READY');
-  const baseline = JSON.stringify(p.settings);
+  // Capture one non-default persisted baseline, shared by every subsequent
+  // phase including the new processes. This is a synthetic-only file.
+  const fs = require('node:fs');
+  const baselinePath = process.env.tmp + '/native-language-baseline.json';
+  if (action === 'seed') {
+    await p.patchSettings(settings => { settings.topK = 17; settings.propertiesEnabled = true; });
+    assert(p.settings.topK === 17 && p.settings.propertiesEnabled, 'SEED_PREFERENCES');
+    const saved = JSON.stringify(p.settings);
+    assert(JSON.stringify(await p.loadData()) === saved, 'SEED_DISK');
+    fs.writeFileSync(baselinePath, saved, { flag: 'wx', mode: 0o600 });
+    return 'OBSIDIAN_NATIVE_LANGUAGE_PASS: seeded non-default persistent preferences';
+  }
+  const baseline = fs.readFileSync(baselinePath, 'utf8');
+  assert(JSON.stringify(p.settings) === baseline &&
+    JSON.stringify(await p.loadData()) === baseline, 'CROSS_RESTART_PREFERENCES');
   const generation = p.standalone.status().generationId;
   app.setting.open();
   await sleep(350);
@@ -138,8 +152,8 @@
     back.dispatchEvent(new Event('change', { bubbles: true }));
     await wait(() => p.settings.presentationMode === 'basic' && heads().includes(basicHeading) &&
       !heads().includes(expertHeading), 'BASIC_ROUNDTRIP');
-    assert(JSON.stringify(p.settings) === baseline && p.standalone.status().generationId === generation,
-      'NO_PERSISTED_CONFIGURATION_CHANGE');
+    assert(JSON.stringify(p.settings) === baseline && JSON.stringify(await p.loadData()) === baseline &&
+      p.standalone.status().generationId === generation, 'NO_PERSISTED_CONFIGURATION_CHANGE');
     return 'OBSIDIAN_NATIVE_LANGUAGE_PASS: ' + current +
       ' native locale, Basic and Expert labels, AI editor and ARIA, no configuration/index change';
   } finally {

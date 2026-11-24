@@ -9,6 +9,18 @@ for bin in "$app" "$cli"; do
   test -x "$bin" || { echo "HOST_SMOKE_UNAVAILABLE: Obsidian binary missing" >&2; exit 2; }
 done
 command -v xvfb-run >/dev/null || { echo "HOST_SMOKE_UNAVAILABLE: xvfb-run missing" >&2; exit 2; }
+# L10N modes are independent, basic-only acceptance scenarios. Reject unsafe or
+# conflicting flags before creating a profile or starting any host process.
+if [[ "${OKS_06UX_L10N_SWITCH_TEST:-0}" == 1 || "${OKS_06UX_L10N_RU_TEST:-0}" == 1 ]]; then
+  [[ "${OKS_HOST_NO_ROUTE:-0}" == 1 && -n "${OKS_STANDALONE_PACKAGE_DIR:-}" &&
+     -z "${OKS_STANDALONE_PREVIOUS_PACKAGE_DIR:-}" && -z "${OKS_06UX_VISUAL_DIR:-}" &&
+     "${OKS_AI_RERANK_TEST:-0}" == 0 && "${OKS_ADVANCED_HEALTH_TEST:-0}" == 0 &&
+     "${OKS_ADVANCED_INGESTION_TEST:-0}" == 0 && "${OKS_ADVANCED_RETRIEVAL_TEST:-0}" == 0 &&
+     "${OKS_06UX_TEST:-0}" == 0 ]] ||
+    { echo "HOST_SMOKE_FAILURE: L10N requires isolated verified package and basic-only mode" >&2; exit 2; }
+  [[ "${OKS_06UX_L10N_SWITCH_TEST:-0}" != 1 || "${OKS_06UX_L10N_RU_TEST:-0}" != 1 ]] ||
+    { echo "HOST_SMOKE_FAILURE: L10N scenarios must run separately" >&2; exit 2; }
+fi
 tmp="$(mktemp -d /tmp/oks-native-host-XXXXXXXX)"
 trap 'rm -rf -- "$tmp"' EXIT
 ulimit -c 0
@@ -150,8 +162,6 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
   [[ "$initial" == *"\"status\":\"ready\""* && "$initial" == *"\"sources\":2"* ]] ||
     { printf "HOST_SMOKE_FAILURE: native plugin not indexed; result=%s\n" "$initial" >&2; exit 1; }
   if [[ "${OKS_06UX_L10N_SWITCH_TEST:-0}" == 1 ]]; then
-    [[ "${OKS_HOST_NO_ROUTE:-0}" == 1 && -n "${OKS_STANDALONE_PACKAGE_DIR:-}" ]] ||
-      { echo "HOST_SMOKE_FAILURE: native locale switching requires isolated packaged host" >&2; exit 2; }
     language_phase() {
       local action="$1" result
       timeout 8s "$cli" eval "code=(globalThis.__oksNativeLanguageAction=\"$action\",true)" >/dev/null
@@ -164,6 +174,7 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
       # First allow Obsidian native visible Relaunch action to apply the locale
       # and persist it in its isolated application profile.
       sleep 3
+      local old_p="$p"
       # Then test durability across a full host process restart using that
       # same disposable profile. The test controls only the process it launched.
       if kill -0 "$p" 2>/dev/null; then
@@ -172,13 +183,19 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
         kill "$p" 2>/dev/null || :
       fi
       wait "$p" 2>/dev/null || :
+      if kill -0 "$old_p" 2>/dev/null; then
+        echo "HOST_SMOKE_FAILURE: previous isolated host still alive" >&2; exit 1
+      fi
       "$app" --no-sandbox --disable-gpu --ozone-platform=x11 --user-data-dir="$tmp/electron" > "$tmp/host-restarted.log" 2>&1 &
       p=$!
       sleep 13
+      [[ "$p" != "$old_p" && "$(ps -p "$p" -o args=)" == *"--user-data-dir=$tmp/electron"* ]] ||
+        { echo "HOST_SMOKE_FAILURE: restarted isolated host identity mismatch" >&2; exit 1; }
       timeout 8s "$cli" version >/dev/null
       timeout 8s "$cli" plugins:restrict off >/dev/null
       sleep 3
     }
+    language_phase seed
     language_phase verify-en
     language_phase set-ru
     sleep 3

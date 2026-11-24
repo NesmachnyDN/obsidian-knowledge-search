@@ -53,6 +53,11 @@ merge before calling the phase complete.
 - Native EN → RU → EN acceptance, including Obsidian's own language selector,
   Relaunch, Basic/Expert, AI labels and application restart, runs using
   `OKS_06UX_L10N_SWITCH_TEST=1` in the same disposable no-route host.
+- Runtime-state translations are exhaustive against the typed engine, health,
+  ingestion, retrieval and search contracts. Raw diagnostic codes and actual
+  Search UI command names are preserved. RU smoke checks success/degraded
+  summaries; native switching verifies a persisted non-default baseline across
+  restarts. Unsafe or conflicting L10N test modes fail before host startup.
 - The full host smoke re-establishes a verified current search result after
   Settings acceptance invalidates old UI results, then retains the exact
   source-file and excerpt-selection checks for command navigation.

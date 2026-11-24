@@ -4,18 +4,19 @@ import type { RetrievalStatus } from '../advanced/retrieval-manager';
 import type { ProbeConfig } from '../controller';
 import { Modal, PluginSettingTab, Setting, Notice, getLanguage, type App, type Plugin } from 'obsidian';
 import { renderProviderSettings, refreshProviderOperationStatus, type AiDrafts, type OperationStatusReader } from '../ai/settings-ui';
-import { translateSettings, formatSettings, localizeSettingsState } from './settings-i18n';
+import { translateSettings, formatSettings, localizeSettingsState, type SettingsDisplayState } from './settings-i18n';
 import { applySettingsLayout, restoreSettingsFocus, settingsDisclosure } from './settings-layout';
 import { advancedDraft, ingestionDraft, needsOcr, needsStructure, probeDraft, topKDraft } from './settings-draft';
 import type { IngestionConfig, SearchSettings } from './settings';
+import type { SearchResponse } from '../standalone/contracts';
 import type { SearchStatus } from './status';
 
 const t = (source: string): string => translateSettings(source, getLanguage());
 const f = (source: string, values: Record<string, string | number>): string =>
   formatSettings(source, values, getLanguage());
-const st = (state?: string): string => localizeSettingsState(state, getLanguage());
+const st = (state?: SettingsDisplayState): string => localizeSettingsState(state, getLanguage());
 
-type BasicResponse = { requestedMode: string; executedMode: string; status: string };
+type BasicResponse = Pick<SearchResponse, 'requestedMode' | 'executedMode' | 'status'>;
 const heading = (root: HTMLElement, name: string): HTMLElement => {
   const section = root.createEl('section');
   section.setAttribute('aria-label', t(name));
@@ -71,7 +72,7 @@ export class SearchSettingsTab extends PluginSettingTab {
     new Setting(section).setName(t('Offline Markdown search'))
       .setDesc(s ? f('Status: {status}; {enabled}; {paused}; error: {error}.', {
         status: st(s.status), enabled: t(s.enabled ? 'enabled' : 'disabled'),
-        paused: t(s.paused ? 'paused' : 'not paused'), error: st(s.error ?? 'none'),
+        paused: t(s.paused ? 'paused' : 'not paused'), error: s.error ?? t('none'),
       }) : t('State not yet available. No AI service is required.'));
     const roles = this.current().ai;
     const active = (Object.keys(roles) as (keyof typeof roles)[])
@@ -146,8 +147,8 @@ export class SearchSettingsTab extends PluginSettingTab {
     const ingest = this.ingestionStatus?.();
     new Setting(section).setName(t('Last processing state'))
       .setDesc(f('{status}; format: {format}; error: {error}. Not proof of search readiness.', {
-        status: st(ingest?.status ?? 'disabled'), format: st(ingest?.lastFormat ?? 'none'),
-        error: st(ingest?.error ?? 'none'),
+        status: st(ingest?.status ?? 'disabled'), format: ingest?.lastFormat ?? t('none'),
+        error: ingest?.error ?? t('none'),
       }));
     const draft = this.ingestionInput ?? structuredClone(this.current().ingestion);
     const { form: editor } = settingsDisclosure(section, this.openEditors, 'documents',
@@ -222,8 +223,8 @@ export class SearchSettingsTab extends PluginSettingTab {
     new Setting(section).setName(t('Offline index'))
       .setDesc(basic ? f('Status: {status}; indexed sources: {sources}; records: {records}; busy: {busy}; warning: {warning}; error: {error}. Counts are not an estimate of total Vault coverage.', {
         status: st(basic.status), sources: basic.sources, records: basic.records,
-        busy: t(basic.busy ? 'yes' : 'no'), warning: st(basic.maintenanceWarning ?? 'none'),
-        error: st(basic.error ?? 'none'),
+        busy: t(basic.busy ? 'yes' : 'no'), warning: basic.maintenanceWarning ?? t('none'),
+        error: basic.error ?? t('none'),
       }) : t('Index state not available.'));
     const last = this.lastBasic?.();
     new Setting(section).setName(t('Last verified basic search'))
@@ -242,7 +243,7 @@ export class SearchSettingsTab extends PluginSettingTab {
       .setDesc(retrieval ? f('State: {status}; lexical: {lexical}; dense: {dense}; indexed sources: {sources}; chunks: {chunks}; error: {error}. This is not the API dense index.', {
         status: st(retrieval.status), lexical: st(retrieval.lexical), dense: st(retrieval.dense),
         sources: retrieval.indexedSources, chunks: retrieval.indexedChunks,
-        error: st(retrieval.error ?? 'none'),
+        error: retrieval.error ?? t('none'),
       }) : t('Unavailable / not verified. This is not the API dense index.'));
     if (this.indexActive && this.rebuildActive && this.cancelAdvanced) {
       const error = alert(section);
@@ -305,7 +306,7 @@ export class SearchSettingsTab extends PluginSettingTab {
     const health = this.health();
     new Setting(section).setName(t('Health-only local backend'))
       .setDesc(f('State: {status}; profile: {profile}; error: {error}. Health readiness never implies AI, OCR or document readiness.', {
-        status: st(health.status), profile: st(health.profile), error: st(health.error ?? 'none'),
+        status: st(health.status), profile: st(health.profile), error: health.error ?? t('none'),
       }))
       .addButton(button => button.setButtonText(t('Recheck health'))
         .setDisabled(!this.current().advanced.enabled).onClick(async () => {

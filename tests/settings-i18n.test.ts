@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { settingsLocale, translateSettings, formatSettings, localizeSettingsState }
+import { settingsLocale, translateSettings, formatSettings, localizeSettingsState, type SettingsDisplayState }
   from '../plugin/src/search/settings-i18n';
 import { defaultSettings } from '../plugin/src/search/settings';
 
@@ -46,4 +46,29 @@ test('UX-L10N-03: presentation language does not persist or mutate capability pr
     assert.ok(formatSettings('OKS: cleared {count} derived files.', {count: 2}, language).length);
     assert.deepEqual(settings, before);
   }
+});
+
+
+test('UX-L10N-04: all typed Settings states have Russian labels and preserve English fallback', () => {
+  const expected = {
+    initializing: 'инициализация', ready: 'готов', degraded: 'ограниченная работоспособность',
+    failed: 'ошибка', unavailable: 'недоступен', disabled: 'отключён',
+    none: 'нет', 'local-stdio': 'локальный stdio', running: 'выполняется',
+    partial: 'частично обработано', empty: 'нет содержимого', unsupported: 'не поддерживается',
+    indexing: 'индексация', indexed: 'проиндексировано', searching: 'выполняется поиск',
+    'not-ready': 'не готов', ok: 'успешно', lexical: 'лексический',
+    dense: 'семантический', hybrid: 'гибридный',
+  } satisfies Record<SettingsDisplayState, string>;
+  for (const [state, ru] of Object.entries(expected)) {
+    assert.equal(localizeSettingsState(state, 'ru'), ru, state);
+    assert.equal(localizeSettingsState(state, 'ru-RU'), ru, state);
+    assert.equal(localizeSettingsState(state, 'en'), state);
+    assert.equal(localizeSettingsState(state, 'de'), state);
+  }
+  for (const code of ['SOURCE_STALE', 'PERMISSION_DENIED', 'ADVANCED_TIMEOUT',
+    'RECONCILING', 'INDEX_DURABILITY_UNCERTAIN', 'constructor', '__proto__'])
+    assert.equal(localizeSettingsState(code, 'ru'), code);
+  const navigation = translateSettings('Index readiness and coverage are not verified in Settings. Use Open Standalone search → Optional local API dense / hybrid search → Prepare explicit dense index rebuild. Select exact corpus paths and vector dimension, then authorize the operation. No automatic rebuild.', 'ru');
+  for (const label of ['Open Standalone search', 'Optional local API dense / hybrid search',
+    'Prepare explicit dense index rebuild']) assert.ok(navigation.includes(label));
 });

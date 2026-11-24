@@ -23,7 +23,10 @@ in any language. This is a Settings-specific UI improvement; the search
 workspace and command labels have a separate localization scope.
 
 Acceptance: `tests/settings-i18n.test.ts` exercises both languages, Russian
-locale variants, English fallback, formatting and settings immutability.
+locale variants, English fallback, formatting, exhaustive typed runtime-state
+coverage and settings immutability. Diagnostic codes and format identifiers
+remain verbatim; Russian navigation help uses the actual English Search UI
+command and button labels until that workspace is localized.
 The existing English native-Obsidian Settings UX and visual tests remain
 regression gates. Run those with `LANG=en_US.UTF-8 LANGUAGE=en_US:en
 LC_ALL=en_US.UTF-8` in the isolated host so English assertions are
@@ -50,15 +53,20 @@ LANG=en_US.UTF-8 LANGUAGE=en_US:en LC_ALL=en_US.UTF-8 \
 ```
 
 It verifies EN → RU → EN, Basic and Expert headings, independently rendered AI
-connection editors and accessible labels, unchanged saved settings and index
-generation, and the locale after a full application restart. The harness does
+connection editors and accessible labels, one non-default persisted settings baseline across every phase and restart,
+unchanged index generation within each verification phase, and locale after a
+full application restart with a distinct isolated host process. The harness does
 not stub `getLanguage()`; it operates only inside a synthetic Vault and an
 isolated, no-route Electron profile.
 
 The RU harness uses only an isolated generated Vault and a network-isolated
 session. It asserts Russian controls, accessible labels, AI connection draft
 validation, independent offline search, unchanged settings and index generation,
-and layout at 200% zoom. A fresh absolute screenshot directory is mandatory.
+and layout at 200% zoom. It also performs a real ItemView search and checks the
+Russian success and paused/degraded status summaries before restoring settings.
+Both L10N modes reject missing package/no-route and conflicting feature-test
+flags before host startup. A fresh absolute screenshot directory is required
+when capturing screenshots.
 Screenshots and SHA-256 checksums stay outside the repository. Locale is still
 read from Obsidian's application selection, not by the plugin from `LANG`;
 the explicit environment locale affects only the clean isolated Obsidian test

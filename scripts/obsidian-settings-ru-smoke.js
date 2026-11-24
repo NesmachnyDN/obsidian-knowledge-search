@@ -6,6 +6,10 @@
   const p = app.plugins.plugins['oks-synthetic-evidence'];
   const tmp = process.env.tmp;
   assert(p && tmp && app.vault.adapter.getBasePath() === tmp + '/vault', 'SYNTHETIC_ONLY');
+  const wait = async (predicate, code) => {
+    const deadline = Date.now() + 6000;
+    while (!predicate()) { assert(Date.now() < deadline, code); await sleep(40); }
+  };
   const original = structuredClone(p.settings);
   const controller = p.standalone;
   const generation = controller.status().generationId;
@@ -124,7 +128,40 @@
         win.setBounds(oldBounds);
       }
     }
-    return 'OBSIDIAN_SETTINGS_RU_PASS: localized headings, editor, buttons, validation, a11y, provider isolation, stable ids, offline search, no saved changes, screenshots=' + images;
+    // The API smoke alone does not update the UI controller's last response.
+    // Perform an actual ItemView search, then inspect the rendered status.
+    app.setting.close();
+    await p.openSearch();
+    const view = app.workspace.getLeavesOfType('oks-standalone-search')[0]?.view;
+    const query = view?.contentEl.querySelector('.oks-query');
+    const submit = view?.contentEl.querySelector('.oks-submit');
+    assert(query && submit, 'SEARCH_CONTROLS');
+    query.value = 'REQ-OKS-SMOKE';
+    query.dispatchEvent(new Event('input', {bubbles: true}));
+    submit.click();
+    await wait(() => p.searchController.snapshot().phase === 'results', 'UI_SEARCH');
+    const response = p.searchController.snapshot().response;
+    assert(response?.status === 'ok' && response.hits.length === 1 &&
+      response.hits[0].sourceId === 'first.md', 'UI_SEARCH_EVIDENCE');
+    app.setting.open();
+    await sleep(350);
+    app.setting.openTabById(p.manifest.id);
+    await sleep(350);
+    const description = name => row(name)?.querySelector('.setting-item-description')?.textContent;
+    assert(description('Последний проверенный базовый поиск') ===
+      'Запрошено: лексический; выполнено: лексический; результат: успешно.', 'SUCCESS_STATUS_TRANSLATED');
+    const pause = () => row('Приостановить индексацию')?.querySelector('[data-oks-focus=paused]');
+    assert(pause(), 'PAUSE_CONTROL');
+    pause().click();
+    await wait(() => p.settings.paused && p.searchController.status().status === 'degraded' &&
+      description('Автономный поиск по Markdown')?.includes('ограниченная работоспособность'), 'DEGRADED_STATUS_TRANSLATED');
+    assert(description('Автономный индекс')?.includes('ограниченная работоспособность'), 'DEGRADED_INDEX_TRANSLATED');
+    pause().click();
+    await wait(() => !p.settings.paused, 'RESUME');
+    await controller.whenIdle();
+    assert(JSON.stringify(p.settings) === JSON.stringify(original) && controller.status().status === 'ready',
+      'RESTORED_SETTINGS_AND_READY');
+    return 'OBSIDIAN_SETTINGS_RU_PASS: localized headings, editor, buttons, validation, a11y, provider isolation, stable ids, offline search, success/degraded summaries, restored preferences, screenshots=' + images;
   } finally {
     app.setting.close();
   }

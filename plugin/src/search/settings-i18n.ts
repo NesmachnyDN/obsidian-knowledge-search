@@ -1,6 +1,19 @@
 /** Presentation-only settings translations. English is the canonical fallback.
  * Keep identifiers, persisted values and raw diagnostic codes untranslated.
  */
+import type { AdvancedHealth } from '../advanced/health';
+import type { IngestionStatus } from '../advanced/manager';
+import type { RetrievalStatus } from '../advanced/retrieval-manager';
+import type { SearchResponse } from '../standalone/contracts';
+import type { EngineState } from '../standalone/engine';
+
+// Every runtime state rendered by Settings must have a catalog entry.
+// Protocol identifiers and diagnostic codes are not display states.
+export type SettingsDisplayState = EngineState['status'] | AdvancedHealth['status'] |
+  AdvancedHealth['profile'] | IngestionStatus['status'] | RetrievalStatus['status'] |
+  RetrievalStatus['lexical'] | RetrievalStatus['dense'] | SearchResponse['status'] |
+  SearchResponse['requestedMode'] | SearchResponse['executedMode'];
+
 export type SettingsLocale = 'en' | 'ru';
 
 export function settingsLocale(language: string): SettingsLocale {
@@ -180,7 +193,7 @@ const russian: Readonly<Record<string, string>> = {
   'Unavailable: invalid saved provider preferences.': 'Недоступно: некорректные сохранённые параметры провайдера.',
   'Unavailable: cloud execution is not supported by the current local API pilot.': 'Недоступно: текущая пилотная реализация локального API не поддерживает облачное выполнение.',
   'Local provider configured; not verified by preferences.': 'Локальный провайдер настроен; параметры не подтверждают его готовность.',
-  'Index readiness and coverage are not verified in Settings. Use Open Standalone search → Optional local API dense / hybrid search → Prepare explicit dense index rebuild. Select exact corpus paths and vector dimension, then authorize the operation. No automatic rebuild.': 'Готовность и охват индекса не проверяются в настройках. Откройте автономный поиск → Дополнительный локальный семантический/гибридный API-поиск → Подготовить явную переиндексацию. Укажите точные пути набора документов и размерность вектора, затем подтвердите операцию. Автоматической переиндексации нет.',
+  'Index readiness and coverage are not verified in Settings. Use Open Standalone search → Optional local API dense / hybrid search → Prepare explicit dense index rebuild. Select exact corpus paths and vector dimension, then authorize the operation. No automatic rebuild.': 'Готовность и охват индекса не проверяются в настройках. В интерфейсе поиска (пока на английском): Open Standalone search → Optional local API dense / hybrid search → Prepare explicit dense index rebuild. Укажите точные пути набора документов и размерность вектора, затем подтвердите операцию. Автоматической переиндексации нет.',
   'Unavailable / not verified. This is not the API dense index.': 'Недоступен / не проверен. Это не семантический API-индекс.',
   'This is not the API dense index.': 'Это не семантический API-индекс.',
   'enabled': 'включён',
@@ -192,6 +205,14 @@ const russian: Readonly<Record<string, string>> = {
   'none': 'нет',
   'unavailable': 'недоступен',
   'ready': 'готов',
+  'initializing': 'инициализация',
+  'degraded': 'ограниченная работоспособность',
+  'ok': 'успешно',
+  'partial': 'частично обработано',
+  'empty': 'нет содержимого',
+  'unsupported': 'не поддерживается',
+  'indexed': 'проиндексировано',
+  'searching': 'выполняется поиск',
   'idle': 'ожидание',
   'failed': 'ошибка',
   'running': 'выполняется',
@@ -225,7 +246,7 @@ const russian: Readonly<Record<string, string>> = {
   'Requested: {requested}; executed: {executed}; result: {result}.': 'Запрошено: {requested}; выполнено: {executed}; результат: {result}.',
   'State: {status}; lexical: {lexical}; dense: {dense}; indexed sources: {sources}; chunks: {chunks}; error: {error}. This is not the API dense index.': 'Состояние: {status}; лексический: {lexical}; семантический: {dense}; источников: {sources}; фрагментов: {chunks}; ошибка: {error}. Это не семантический API-индекс.',
   'State: {status}; profile: {profile}; error: {error}. Health readiness never implies AI, OCR or document readiness.': 'Состояние: {status}; профиль: {profile}; ошибка: {error}. Доступность проверки состояния не подтверждает готовность ИИ, OCR или обработки документов.',
-};
+} satisfies Record<SettingsDisplayState, string> & Record<string, string>;
 
 export function translateSettings(source: string, language: string): string {
   return settingsLocale(language) === 'ru' && Object.hasOwn(russian, source) ? russian[source]! : source;
