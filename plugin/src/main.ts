@@ -141,7 +141,10 @@ export default class SyntheticEvidencePlugin extends Plugin {
       () => this.advancedRetrieval.snapshot(), () => this.indexAdvancedActiveFile(),
       () => this.openAdvancedSearch(), () => this.cancelAdvancedWork(),
       () => this.indexAdvancedActiveFile(true), () => this.searchController.status(),
-      () => this.searchController.snapshot().response ?? undefined));
+      () => this.searchController.snapshot().response ?? undefined,
+      role => role === 'embedding' ? this.denseMachine.pending() ?
+        {phase:'permission-required',error:null} : this.denseUi.operationStatus() :
+        this.searchController.evidenceOperationStatus(role)));
     this.addCommand({ id:'ingest-active-advanced-source', name:'Ingest active Vault document (Advanced opt-in)',
       callback: () => { void this.ingestAdvancedActiveFile().catch(error =>
         new Notice('OKS Advanced: '+(error instanceof IngestError?error.code:'ADVANCED_UNAVAILABLE'))); } });

@@ -3,7 +3,8 @@ import type { IngestionStatus } from '../advanced/manager';
 import type { RetrievalStatus } from '../advanced/retrieval-manager';
 import type { ProbeConfig } from '../controller';
 import { Modal, PluginSettingTab, Setting, Notice, type App, type Plugin } from 'obsidian';
-import { renderProviderSettings, type AiDrafts } from '../ai/settings-ui';
+import { renderProviderSettings, refreshProviderOperationStatus, type AiDrafts, type OperationStatusReader } from '../ai/settings-ui';
+import { applySettingsLayout, restoreSettingsFocus, settingsDisclosure } from './settings-layout';
 import { advancedDraft, ingestionDraft, needsOcr, needsStructure, probeDraft, topKDraft } from './settings-draft';
 import type { IngestionConfig, SearchSettings } from './settings';
 import type { SearchStatus } from './status';
@@ -29,6 +30,7 @@ export class SearchSettingsTab extends PluginSettingTab {
   private ingestionInput?: IngestionConfig;
   private probeInput?: ProbeConfig;
   private readonly aiInputs: AiDrafts = {};
+  private readonly openEditors = new Set<string>();
 
   constructor(app: App, plugin: Plugin, private readonly current: () => SearchSettings,
     private readonly patchSettings: (change: (s: SearchSettings) => void) => Promise<void>,
@@ -42,7 +44,8 @@ export class SearchSettingsTab extends PluginSettingTab {
     private readonly cancelAdvanced?: () => Promise<void>,
     private readonly rebuildActive?: () => Promise<void>,
     private readonly searchStatus?: () => SearchStatus,
-    private readonly lastBasic?: () => BasicResponse | undefined) { super(app, plugin); }
+    private readonly lastBasic?: () => BasicResponse | undefined,
+    private readonly aiOperationStatus?: OperationStatusReader) { super(app, plugin); }
 
   private async commit(change: (s: SearchSettings) => void, error: HTMLElement): Promise<boolean> {
     try {
@@ -84,10 +87,11 @@ export class SearchSettingsTab extends PluginSettingTab {
       const status = alert(section);
       new Setting(section).setName(name).setDesc(explanation)
         .addToggle(toggle => { toggle.toggleEl.setAttribute('aria-label', name);
+          toggle.toggleEl.dataset.oksFocus = key;
           return toggle.setValue(this.current()[key]).onChange(async value => {
           if (!(await this.commit(settings => { settings[key] = value; }, status)))
             toggle.setValue(this.current()[key]);
-          else this.display();
+          else this.display(key);
         }); });
     }
     this.topKInput ??= String(this.current().topK);
@@ -97,6 +101,7 @@ export class SearchSettingsTab extends PluginSettingTab {
       .addText(text => {
         text.inputEl.type = 'number';
         text.inputEl.setAttribute('aria-label', 'Results per search');
+        text.inputEl.dataset.oksFocus = 'top-k';
         text.inputEl.min = '1'; text.inputEl.max = '50';
         text.setValue(this.topKInput!).onChange(value => { this.topKInput = value; error.textContent = ''; });
       });
@@ -105,11 +110,11 @@ export class SearchSettingsTab extends PluginSettingTab {
         const result = topKDraft(this.topKInput!);
         if (!result.ok) { error.textContent = result.message; return; }
         if (await this.commit(settings => { settings.topK = result.value; }, error)) {
-          this.topKInput = undefined; this.display();
+          this.topKInput = undefined; this.display('top-k');
         }
       }))
       .addButton(button => button.setButtonText('Cancel').onClick(() => {
-        this.topKInput = undefined; this.display();
+        this.topKInput = undefined; this.display('top-k');
       }));
   }
 
@@ -123,12 +128,8 @@ export class SearchSettingsTab extends PluginSettingTab {
       .setDesc(`${ingest?.status ?? 'disabled'}; format: ${ingest?.lastFormat ?? 'none'}; ` +
         `error: ${ingest?.error ?? 'none'}. Not proof of search readiness.`);
     const draft = this.ingestionInput ?? structuredClone(this.current().ingestion);
-    const editor = section.createEl('div');
-    editor.hidden = !this.ingestionInput;
-    new Setting(section).setName('Processing setup')
-      .addButton(button => button.setButtonText('Configure documents').onClick(() => {
-        this.ingestionInput = draft; editor.hidden = !editor.hidden;
-      }));
+    const { form: editor } = settingsDisclosure(section, this.openEditors, 'documents',
+      'Processing setup', 'Configure documents', () => { this.ingestionInput = draft; });
     const fields: Partial<Record<keyof IngestionConfig, HTMLElement>> = {};
     new Setting(editor).setName('Enable local document ingestion after Save')
       .addToggle(toggle => {
@@ -175,11 +176,11 @@ export class SearchSettingsTab extends PluginSettingTab {
         const result = ingestionDraft(draft);
         if (!result.ok) { error.textContent = result.message; return; }
         if (await this.commit(settings => { settings.ingestion = result.value; }, error)) {
-          this.ingestionInput = undefined; this.display();
+          this.ingestionInput = undefined; this.openEditors.delete('documents'); this.display('documents');
         }
       }))
       .addButton(button => button.setButtonText('Cancel').onClick(() => {
-        this.ingestionInput = undefined; this.display();
+        this.ingestionInput = undefined; this.openEditors.delete('documents'); this.display('documents');
       }));
     if (this.ingestActive) {
       const result = alert(section);
@@ -236,7 +237,10 @@ export class SearchSettingsTab extends PluginSettingTab {
     this.showPurge(section);
     new Setting(section).setName('Refresh status')
       .setDesc('Manually reread existing state; does not trigger indexing or network access.')
-      .addButton(button => button.setButtonText('Refresh').onClick(() => this.refreshReadOnly()));
+      .addButton(button => {
+        button.buttonEl.dataset.oksFocus = 'refresh';
+        return button.setButtonText('Refresh').onClick(() => this.refreshReadOnly());
+      });
   }
 
   private showPurge(section: HTMLElement): void {
@@ -247,6 +251,7 @@ export class SearchSettingsTab extends PluginSettingTab {
         .setDisabled(this.current().enabled).onClick(() => {
           const confirm = new class extends Modal {
             onOpen(): void {
+              applySettingsLayout(this.contentEl);
               this.contentEl.createEl('h3', { text: 'Confirm derived-index cleanup' });
               this.contentEl.createEl('p', { text: 'Only recognized host-private index files will be deleted. ' +
                 'Original Vault notes will not be touched. Indexing must remain disabled.' });
@@ -277,11 +282,8 @@ export class SearchSettingsTab extends PluginSettingTab {
           catch { new Notice('OKS: health check failed.'); }
         }));
     const draft = this.advancedInput ?? structuredClone(this.current().advanced);
-    const editor = section.createEl('div'); editor.hidden = !this.advancedInput;
-    new Setting(section).setName('Backend setup')
-      .addButton(button => button.setButtonText('Configure local backend').onClick(() => {
-        this.advancedInput = draft; editor.hidden = !editor.hidden;
-      }));
+    const { form: editor } = settingsDisclosure(section, this.openEditors, 'backend',
+      'Backend setup', 'Configure local backend', () => { this.advancedInput = draft; });
     const fields: HTMLElement[] = [];
     new Setting(editor).setName('Enable trusted local health backend after Save')
       .addToggle(toggle => { toggle.toggleEl.setAttribute('aria-label', 'Enable trusted local health backend after Save');
@@ -312,22 +314,19 @@ export class SearchSettingsTab extends PluginSettingTab {
         const result = advancedDraft(draft);
         if (!result.ok) { error.textContent = result.message; return; }
         if (await this.commit(settings => { settings.advanced = result.value; }, error)) {
-          this.advancedInput = undefined; this.display();
+          this.advancedInput = undefined; this.openEditors.delete('backend'); this.display('backend');
         }
       }))
       .addButton(button => button.setButtonText('Cancel').onClick(() => {
-        this.advancedInput = undefined; this.display();
+        this.advancedInput = undefined; this.openEditors.delete('backend'); this.display('backend');
       }));
 
     const legacy = heading(section, 'Legacy synthetic probe (diagnostic only)');
     new Setting(legacy).setName('Synthetic fixtures only')
       .setDesc('Not part of basic search. This tool does not run automatically.');
     const probe = this.probeInput ?? structuredClone(this.current().probe);
-    const probeForm = legacy.createEl('div'); probeForm.hidden = !this.probeInput;
-    new Setting(legacy).setName('Probe setup')
-      .addButton(button => button.setButtonText('Configure probe').onClick(() => {
-        this.probeInput = probe; probeForm.hidden = !probeForm.hidden;
-      }));
+    const { form: probeForm } = settingsDisclosure(legacy, this.openEditors, 'probe',
+      'Probe setup', 'Configure probe', () => { this.probeInput = probe; });
     const paths: HTMLElement[] = [];
     new Setting(probeForm).setName('Enable manual synthetic probe')
       .addToggle(toggle => { toggle.toggleEl.setAttribute('aria-label', 'Enable manual synthetic probe');
@@ -348,17 +347,18 @@ export class SearchSettingsTab extends PluginSettingTab {
         const result = probeDraft(probe);
         if (!result.ok) { probeError.textContent = result.message; return; }
         if (await this.commit(settings => { settings.probe = result.value; }, probeError)) {
-          this.probeInput = undefined; this.display();
+          this.probeInput = undefined; this.openEditors.delete('probe'); this.display('probe');
         }
       }))
       .addButton(button => button.setButtonText('Cancel').onClick(() => {
-        this.probeInput = undefined; this.display();
+        this.probeInput = undefined; this.openEditors.delete('probe'); this.display('probe');
       }));
   }
 
   /** Refresh only operational rows; never replace an editor that owns an unsaved draft. */
   private refreshReadOnly(): void {
     const root = this.containerEl;
+    const restoreRefresh = (root.ownerDocument.activeElement as HTMLElement | null)?.dataset.oksFocus === 'refresh';
     const redraw = (label: string, render: () => void): void => {
       const old = [...root.children].find(child =>
         child.getAttribute('aria-label') === label);
@@ -371,22 +371,25 @@ export class SearchSettingsTab extends PluginSettingTab {
     };
     redraw('Overview', () => this.showOverview(root));
     redraw('Index & maintenance', () => this.showIndex(root));
+    refreshProviderOperationStatus(root, this.aiOperationStatus);
+    if (restoreRefresh) restoreSettingsFocus(root, 'refresh');
   }
 
-  display(): void {
+  display(focusKey?: string): void {
     const root = this.containerEl;
     root.replaceChildren();
+    applySettingsLayout(root, true);
     root.createEl('h2', { text: 'Obsidian Knowledge Search' });
     const expert = this.current().presentationMode === 'expert';
     const modeError = alert(root);
     new Setting(root).setName('Settings view')
       .setDesc('Basic/Expert changes the presentation only, not providers, permissions or index activity.')
-      .addDropdown(dropdown => { dropdown.selectEl.setAttribute('aria-label', 'Settings view'); return dropdown.addOption('basic','Basic')
+      .addDropdown(dropdown => { dropdown.selectEl.setAttribute('aria-label', 'Settings view'); dropdown.selectEl.dataset.oksFocus = 'view'; return dropdown.addOption('basic','Basic')
         .addOption('expert','Expert').setValue(expert ? 'expert' : 'basic')
         .onChange(async value => {
           if (await this.commit(settings => {
             settings.presentationMode = value as SearchSettings['presentationMode'];
-          }, modeError)) this.display();
+          }, modeError)) this.display('view');
           else dropdown.setValue(this.current().presentationMode);
         }); });
     this.showOverview(root);
@@ -394,11 +397,12 @@ export class SearchSettingsTab extends PluginSettingTab {
     const ai = heading(root, 'AI capabilities (optional)');
     ai.createEl('p', { text: 'Configure each task independently. Preferences are not readiness or ' +
       'permission to disclose content. Credentials are never entered or saved here.' });
-    renderProviderSettings(ai, this.app, this.current().ai, this.aiInputs, expert,
+    renderProviderSettings(ai, this.app, this.current().ai, this.aiInputs, this.openEditors, expert,
       (role, preference) => this.patchSettings(settings => { settings.ai[role] = preference; }),
-      () => this.display());
+      focusKey => this.display(focusKey), this.aiOperationStatus);
     this.showDocuments(root);
     this.showIndex(root);
     if (expert) this.showExpert(root);
+    if (focusKey) restoreSettingsFocus(root, focusKey);
   }
 }

@@ -1,7 +1,8 @@
-import { Modal, Notice, Setting, type App } from 'obsidian';
+import { Modal, Setting, type App } from 'obsidian';
 import { preferenceStatus } from './config';
+import { applySettingsLayout, settingsDisclosure } from '../search/settings-layout';
 import { AI_ROLES, type AiRole, type ProviderConfig, type ProviderPreference,
-  type ProviderPreferences } from './contracts';
+  type ProviderPreferences, type AiOperationStatus } from './contracts';
 import { embeddingSpaceChanged, newProviderDraft, providerDraft,
   type ProviderDraft } from '../search/settings-draft';
 
@@ -12,11 +13,26 @@ const titles: Record<AiRole, string> = {
   generation: 'Evidence-based answers · LLM',
 };
 
+export type OperationStatusReader = (role: AiRole) => AiOperationStatus;
+function operationText(status?: AiOperationStatus): string {
+  if (!status || status.phase === 'idle') return 'No current verified operation. Authorization is required for the next operation.';
+  if (status.phase === 'permission-required') return 'Permission required: review and authorize the exact operation in Search.';
+  if (status.phase === 'busy') return 'Busy: preparing or executing the explicit operation.';
+  if (status.phase === 'complete') return 'Completed: the last authorized operation succeeded. This is not a standing readiness or consent grant.';
+  return 'Failed or cancelled: ' + (status.error ?? 'NOT_READY') + '. Offline search remains separate.';
+}
+export function refreshProviderOperationStatus(root: HTMLElement, status?: OperationStatusReader): void {
+  for (const el of root.querySelectorAll<HTMLElement>('[data-oks-operation]')) {
+    const role = el.dataset.oksOperation as AiRole;
+    if (AI_ROLES.includes(role)) el.textContent = operationText(status?.(role));
+  }
+}
+
 /** A preference is never proof of readiness, a consent grant, or an API call. */
 export function renderProviderSettings(root: HTMLElement, app: App, preferences: ProviderPreferences,
-  drafts: AiDrafts, expert: boolean,
+  drafts: AiDrafts, openEditors: Set<string>, expert: boolean,
   save: (role: AiRole, preference: ProviderPreference) => Promise<void>,
-  refresh: () => void): void {
+  refresh: (focusKey: string) => void, operationStatus?: OperationStatusReader): void {
   for (const role of AI_ROLES) {
     const pref = preferences[role];
     const known = preferenceStatus(role, pref);
@@ -31,16 +47,18 @@ export function renderProviderSettings(root: HTMLElement, app: App, preferences:
     new Setting(section).setName('Provider state')
       .setDesc(headline + (known.error ? ' (' + known.error + ')' : '') +
         '. No connection is tested or content transmitted from Settings.');
+    const operation = new Setting(section).setName('Current AI operation')
+      .setDesc(operationText(operationStatus?.(role)));
+    operation.descEl.dataset.oksOperation = role;
     const draft = drafts[role] ?? newProviderDraft(pref);
-    const form = section.createEl('div');
-    form.hidden = !drafts[role];
+    const key = 'ai-' + role;
+    const disclosure = settingsDisclosure(section, openEditors, key, 'Connection', 'Configure',
+      () => { drafts[role] = draft; });
+    const form = disclosure.form;
     form.setAttribute('aria-label', titles[role] + ' editor');
-    new Setting(section).setName('Connection')
-      .addButton(button => button.setButtonText(drafts[role] ? 'Close editor' : 'Configure')
-        .onClick(() => {
-          if (form.hidden) { drafts[role] = draft; form.hidden = false; button.setButtonText('Close editor'); }
-          else { form.hidden = true; button.setButtonText('Configure'); }
-        }));
+    const finish = (): void => {
+      delete drafts[role]; openEditors.delete(key); refresh(key);
+    };
     const localHelp = form.createEl('p', { text:
       'Local means literal 127.0.0.1 or [::1]; it is not automatically trusted or ready.' });
     const cloudHelp = form.createEl('p', { text:
@@ -93,8 +111,7 @@ export function renderProviderSettings(root: HTMLElement, app: App, preferences:
     const persist = async (next: ProviderConfig): Promise<void> => {
       try {
         await save(role, next);
-        delete drafts[role];
-        refresh();
+        finish();
       } catch {
         error.textContent = 'Settings could not be saved. Your unsaved draft is retained.';
       }
@@ -109,6 +126,7 @@ export function renderProviderSettings(root: HTMLElement, app: App, preferences:
             const next = result.value;
             const confirm = new class extends Modal {
               onOpen(): void {
+                applySettingsLayout(this.contentEl);
                 this.contentEl.createEl('h3', { text: 'Embedding space change' });
                 this.contentEl.createEl('p', { text:
                   'The existing dense generation is not compatible with a new model identity. ' +
@@ -125,10 +143,10 @@ export function renderProviderSettings(root: HTMLElement, app: App, preferences:
           } else await persist(result.value);
         }))
       .addButton(button => button.setButtonText('Cancel draft').onClick(() => {
-        delete drafts[role]; refresh();
+        finish();
       }))
       .addButton(button => button.setButtonText('Disable role').setWarning().onClick(async () => {
-        try { await save(role, { state: 'disabled' }); delete drafts[role]; refresh(); }
+        try { await save(role, { state: 'disabled' }); finish(); }
         catch { error.textContent = 'Disable failed. Saved settings were not changed.'; }
       }));
     if (pref.state === 'configured') {
@@ -136,7 +154,7 @@ export function renderProviderSettings(root: HTMLElement, app: App, preferences:
         .setDesc(pref.transport === 'cloud' ? 'Cloud / not authorized' :
           'Local API / not verified')
         .addButton(b => b.setButtonText('Details').onClick(() => {
-          drafts[role] = draft; form.hidden = false;
+          disclosure.open();
         }));
     }
   }

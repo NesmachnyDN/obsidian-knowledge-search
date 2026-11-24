@@ -2,7 +2,7 @@ import { EvidenceGenerator, type GeneratedEvidenceClaim } from '../ai/generation
 import { EvidenceReranker, type RerankedHit } from '../ai/rerank-evidence';
 import { pilotConfig } from '../ai/loopback-rerank';
 import { configDigest } from '../ai/disclosure';
-import { ProviderFailure, type ProviderConfig, type ProviderPreference, type ProviderFailureCode } from '../ai/contracts';
+import { ProviderFailure, type ProviderConfig, type ProviderPreference, type ProviderFailureCode, type AiOperationStatus } from '../ai/contracts';
 import { hash, isDigest } from '../standalone/contracts';
 import type { AdvancedHealth } from '../advanced/health';
 import type { IngestionStatus } from '../advanced/manager';
@@ -82,6 +82,14 @@ export class SearchController {
   status(): SearchStatus { return statusSnapshot(this.engine?.status(), !this.disposed && this.enabled, this.paused,
     this.error, this.advancedStatus?.(), this.ingestionStatus?.()); }
   snapshot(): UiState { return structuredClone(this.state); }
+  /** No query, passages, source IDs, grants or tokens cross this metadata boundary. */
+  evidenceOperationStatus(role: EvidenceRole): AiOperationStatus {
+    const state = role === 'reranking' ? this.state.rerank : this.state.generation;
+    if (state?.phase === 'running') return {phase:'busy',error:null};
+    if (this.prepared[role]) return {phase:'permission-required',error:null};
+    if (state?.phase === 'error') return {phase:'failed',error:state.error ?? 'NOT_READY'};
+    return {phase:state?.phase === 'results' ? 'complete' : 'idle',error:null};
+  }
   subscribe(listener: () => void): () => void {
     if (this.disposed) return () => {};
     this.listeners.add(listener); return () => this.listeners.delete(listener);
