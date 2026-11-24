@@ -80,13 +80,18 @@ export class SearchController {
   private listeners = new Set<() => void>();
   private evidenceListeners = new Set<() => void>();
   private pendingExpiryNotification?: object;
-  private emittingEvidence = false;
-  private evidenceDirty = false;
+  private notifying = false;
+  private evidencePending?: number;
+  private lifecyclePending?: {revision:number; final:boolean; listeners:(() => void)[]};
+  private notificationVersion = 0;
+  private waveAdditions = 0;
+  private readonly quarantined = new WeakSet<() => void>();
   private state: UiState = { phase: 'idle', message: 'Enter a query to search original Markdown.', response: null };
   constructor(private readonly navigate: (hit: EvidenceHit) => Promise<void>,
     private readonly advancedStatus?: () => AdvancedHealth,
     private readonly ingestionStatus?: () => IngestionStatus,
-    private readonly rerankPort?: RerankPort, private readonly generationPort?: RerankPort) {}
+    private readonly rerankPort?: RerankPort, private readonly generationPort?: RerankPort,
+    private readonly revokeSharedAuthority?: () => void) {}
   attach(engine: Engine): void { if (!this.disposed) { this.engine = engine; this.error = null; this.emit(); } }
   configure(enabled: boolean, paused: boolean, error: string | null = null): void {
     this.enabled = enabled; this.paused = paused; this.error = safeCode(error); this.invalidate();
@@ -110,36 +115,85 @@ export class SearchController {
     return {phase:state?.phase === 'results' ? 'complete' : 'idle',error:null};
   }
   subscribe(listener: () => void): () => void {
-    if (this.disposed) return () => {};
-    this.listeners.add(listener); return () => this.listeners.delete(listener);
+    return this.addObserver(this.listeners, listener);
   }
   // Role-local evidence transitions must not invalidate the independent dense machine.
   subscribeEvidence(listener: () => void): () => void {
+    return this.addObserver(this.evidenceListeners, listener);
+  }
+  private addObserver(channel: Set<() => void>, listener: () => void): () => void {
     if (this.disposed) return () => {};
-    this.evidenceListeners.add(listener); return () => this.evidenceListeners.delete(listener);
+    if (this.quarantined.has(listener)) {
+      console.warn('SEARCH_OBSERVER_REJECTED', 'quarantined');
+      return () => {};
+    }
+    if (!channel.has(listener)) {
+      // Count successful additions, including remove/re-add, across both channels.
+      if (this.notifying && this.waveAdditions >= 32) {
+        console.warn('SEARCH_OBSERVER_REJECTED', 'registration-budget');
+        return () => {};
+      }
+      channel.add(listener);
+      if (this.notifying) {
+        this.waveAdditions++;
+        this.notificationVersion++;
+        if (channel === this.listeners) this.queueLifecycle();
+        else this.evidencePending = this.revision;
+      }
+    }
+    return () => { channel.delete(listener); };
+  }
+  private quarantine(listener: () => void, reason: 'mutation-budget' | 'exception'): void {
+    this.quarantined.add(listener);
+    this.listeners.delete(listener);
+    this.evidenceListeners.delete(listener);
+    // Never log callback identity, exception text, state, or source material.
+    console.warn('SEARCH_OBSERVER_QUARANTINED', reason);
   }
   private emitEvidence(): void {
     this.pendingExpiryNotification = undefined;
     if (this.disposed) return;
-    if (this.emittingEvidence) { this.evidenceDirty = true; return; }
-    this.emittingEvidence = true;
-    const revision = this.revision;
+    this.evidencePending = this.revision;
+    this.notificationVersion++;
+    this.drainNotifications();
+  }
+  private drainNotifications(): void {
+    if (this.notifying) return;
+    this.notifying = true;
+    this.waveAdditions = 0;
+    const mutations = new Map<() => void, number>();
     try {
-      // Snapshot observers, not an event log. Nested changes are committed now,
-      // then coalesced into a synchronous follow-up, never a recursive callback.
-      // A terminal cleanup wave has at most two role-local changes. Bound even
-      // a trusted listener that continually initiates new work to three passes.
-      for (let pass = 0; pass < 3; pass++) {
-        this.evidenceDirty = false;
-        for (const listener of [...this.evidenceListeners]) {
-          if (this.disposed || this.revision !== revision) return;
-          if (this.evidenceListeners.has(listener)) listener();
+      while (this.lifecyclePending || this.evidencePending !== undefined) {
+        const lifecycle = this.lifecyclePending;
+        const revision = this.evidencePending;
+        const evidence = revision === undefined ? [] : [...this.evidenceListeners];
+        this.lifecyclePending = undefined;
+        this.evidencePending = undefined;
+        const deliver = (listener: () => void): void => {
+          if (this.quarantined.has(listener)) return;
+          const before = this.notificationVersion;
+          try { listener(); }
+          catch { this.quarantine(listener, 'exception'); return; }
+          if (before !== this.notificationVersion) {
+            const count = (mutations.get(listener) ?? 0) + 1;
+            mutations.set(listener, count);
+            if (count >= 16) this.quarantine(listener, 'mutation-budget');
+          }
+        };
+        for (const listener of lifecycle?.listeners ?? []) {
+          if (this.revision !== lifecycle!.revision || this.disposed !== lifecycle!.final) break;
+          if (this.listeners.has(listener)) deliver(listener);
         }
-        if (!this.evidenceDirty) break;
+        for (const listener of evidence) {
+          if (this.disposed || this.revision !== revision) break;
+          if (this.evidenceListeners.has(listener)) deliver(listener);
+        }
       }
     } finally {
-      this.emittingEvidence = false;
-      this.evidenceDirty = false;
+      this.notifying = false;
+      this.lifecyclePending = undefined;
+      this.evidencePending = undefined;
+      if (this.disposed) { this.listeners.clear(); this.evidenceListeners.clear(); }
     }
   }
   // Polling/rendering may discover expiry while a listener is already executing.
@@ -147,7 +201,7 @@ export class SearchController {
   // a single microtask when expiry is discovered outside evidence delivery.
   private notifyExpiry(): void {
     if (this.disposed) return;
-    if (this.emittingEvidence) { this.evidenceDirty = true; return; }
+    if (this.notifying) { this.emitEvidence(); return; }
     if (this.pendingExpiryNotification) return;
     const notification = {};
     this.pendingExpiryNotification = notification;
@@ -155,16 +209,26 @@ export class SearchController {
       if (!this.disposed && this.pendingExpiryNotification === notification) this.emitEvidence();
     });
   }
-  private emit(): void {
-    this.pendingExpiryNotification = undefined;
-    for (const listener of this.listeners) listener();
+  private queueLifecycle(): void {
+    this.lifecyclePending = {revision:this.revision,final:this.disposed,listeners:[...this.listeners]};
   }
-  invalidate(): void {
+  private emit(final = false): void {
+    if (this.disposed && !final) return;
+    this.pendingExpiryNotification = undefined;
+    // Host-owned revocation is authority, not an observer. It cannot be deferred or quarantined.
+    this.revokeSharedAuthority?.();
+    this.queueLifecycle();
+    this.notificationVersion++;
+    this.drainNotifications();
+  }
+  invalidate(): void { if (!this.disposed) this.invalidateState(); }
+  private invalidateState(final = false): void {
     this.revision++; this.revokeEvidence(); this.lastQuery = '';
     this.pending?.resolve(failure('SUPERSEDED')); this.pending = undefined;
-    this.state = { phase: 'idle', message: 'Results cleared; search to verify current sources.', response: null }; this.emit();
+    this.state = { phase: 'idle', message: 'Results cleared; search to verify current sources.', response: null }; this.emit(final);
   }
   message(error: string): void {
+    if (this.disposed) return;
     this.invalidate(); this.state = { phase: 'error', message: safeCode(error)!, response: null }; this.emit();
   }
   async search(input: unknown): Promise<ApiResult<SearchResponse>> {
@@ -324,7 +388,7 @@ export class SearchController {
     if (!hadPreview && previous?.phase === 'error' && previous.error === error) {
       // Keep historical standalone cancel notifications (and worker settlement),
       // but a listener cleaning up this same terminal snapshot is a no-op.
-      return explicit && !this.emittingEvidence;
+      return explicit && !this.notifying;
     }
     this.state = {...this.state,[key]:{phase:'error',error,hits:[]}};
     return true;
@@ -415,7 +479,7 @@ export class SearchController {
       this.emit(); return { apiVersion: 1, ok: true, value: { cancelled } };
     } catch { return failure('INTERNAL_FAILURE'); }
   }
-  dispose(): void { this.disposed = true; this.rerankProfiles.revoke(); this.invalidate(); this.listeners.clear(); this.evidenceListeners.clear(); this.engine = undefined; }
+  dispose(): void { if (this.disposed) return; this.disposed = true; this.rerankProfiles.revoke(); this.invalidateState(true); this.evidenceListeners.clear(); this.engine = undefined; }
 }
 /** Stable in-process API. No listener, IPC transport, or external runtime. */
 export class StandaloneApi {

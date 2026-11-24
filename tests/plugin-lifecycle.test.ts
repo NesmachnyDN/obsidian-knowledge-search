@@ -783,7 +783,15 @@ for (const role of ['reranking','generation'] as const) {
       assert.equal(denseCalls,1);assert.equal(calls,6);
       assert.deepEqual(c.snapshot().response,lexical.value);
       // The shared lexical/source fence must still revoke every role.
-      const final=prepare();c.invalidate();
+      const final=prepare();
+      let observedIdle=false, invoked=false;
+      const off=c.subscribeEvidence(()=>{
+        if(invoked)return;
+        invoked=true;c.invalidate();
+        observedIdle=denseUi.snapshot(manual).phase==='idle';
+      });
+      cancel();off();
+      assert.equal(invoked,true);assert.equal(observedIdle,true);
       assert.equal(denseUi.snapshot(manual).phase,'idle');
       assert.equal(c.isEvidencePreviewCurrent(role,final.sequence),false);
       assert.equal(c.isEvidencePreviewCurrent(other,reciprocal.sequence),false);

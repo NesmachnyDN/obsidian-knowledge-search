@@ -35,7 +35,10 @@
     click('.oks-rerank-prepare');assert(el('.oks-rerank-message').textContent.includes('DISABLED'),'DISABLED');
     await p.updateSettings({...p.settings,ai:{...p.settings.ai,reranking:{state:'configured',transport:'local',
       origin:'http://127.0.0.1:18765',identity:{model:'synthetic-reranker',revision:'fixture-v1'},
-      limits:{timeoutMs:3000,maxInputBytes:4096,maxCandidates:2,maxOutputTokens:32,maxConcurrent:1}}}});
+      limits:{timeoutMs:3000,maxInputBytes:4096,maxCandidates:2,maxOutputTokens:32,maxConcurrent:1}},
+      generation:{state:'configured',transport:'local',origin:'http://127.0.0.1:18765',
+        identity:{model:'synthetic-generator',revision:'fixture-v1'},
+        limits:{timeoutMs:3000,maxInputBytes:4096,maxCandidates:2,maxOutputTokens:128,maxConcurrent:1}}}});
     await query();
     // Configuration alone is not permission to verify or call a model.
     const initial=count();
@@ -45,6 +48,33 @@
     host.rerankProfiles.installSyntheticFixture(p.settings.ai.reranking,host.rerankPort.scopeId(),'isolated-obsidian-fixture');
     const lexical=p.searchController.snapshot().response.hits;
     assert(lexical.length===2,'LEXICAL_CANDIDATES');
+    // Last callback mutates on the old wave's third pass. The real view must
+    // receive the fourth snapshot synchronously, before polling or any timer.
+    const genCount=()=>Number(require('node:fs').readFileSync(require('node:path').join(app.vault.adapter.getBasePath(),'..','rerank-ready.generation-count'),'utf8'));
+    const genInitial=genCount();
+    click('.oks-generation-prepare');set('.oks-generation-token','fixture-success');
+    set('.oks-generation-classification','synthetic','change');
+    const genCheck=el('.oks-generation-confirm-check');
+    genCheck.checked=true;genCheck.dispatchEvent(new Event('change',{bubbles:true}));
+    const genToken=el('.oks-generation-token');
+    assert(!el('.oks-generation-confirm').disabled,'WAVE_ARMED');
+    click('.oks-rerank-prepare');
+    let step=0,depth=0,maxDepth=0;
+    const off=host.subscribeEvidence(()=>{
+      depth++;maxDepth=Math.max(maxDepth,depth);
+      try {
+        if(step===0){step++;host.prepareRerank();}
+        else if(step===1){step++;host.cancelRerank();}
+        else if(step===2){step++;host.cancelGeneration();}
+      } finally {depth--;}
+    });
+    try {host.cancelRerank();} finally {off();}
+    assert(step===3&&maxDepth===1,'WAVE_FINITE_NONREENTRANT');
+    assert(el('.oks-generation-message').textContent==='Local generation: CANCELLED','WAVE_FINAL_UI');
+    assert(genToken.value===''&&!root().querySelector('.oks-generation-token'),'WAVE_TOKEN_CLEARED');
+    assert(host.evidenceOperationStatus('generation').error==='CANCELLED'&&operation().error==='CANCELLED','WAVE_FINAL_AUTHORITY');
+    assert(count()===initial&&genCount()===genInitial,'WAVE_ZERO_HTTP');
+    await query();
     // Accelerate only the pending-preview timer in this disposable host, not HTTP deadlines.
     const originalSetTimeout=globalThis.setTimeout;
     let expiryTimer=0;
@@ -113,7 +143,7 @@
     await p.updateSettings({...p.settings,ai:{...p.settings.ai,reranking:originalConfig}});
     await query();click('.oks-rerank-prepare');
     assert(operation().error==='NOT_READY'&&count()===beforeRestore,'CONFIG_RESTORE_NOT_ADMITTED');
-    return 'OBSIDIAN_RERANK_FIXTURE_PASS: explicit consent local HTTP original evidence reorder auth cancel stale suppression lexical independence; mock only';
+    return 'OBSIDIAN_RERANK_FIXTURE_PASS: explicit consent local HTTP original evidence reorder auth cancel stale suppression lexical independence finite wave final UI token cleanup zero unauthorized HTTP; mock only';
   } finally {
     await app.vault.delete(a);await app.vault.delete(b);await p.updateSettings(old);
     await new Promise(r=>setTimeout(r,250));await p.standalone.whenIdle();await p.openSearch();

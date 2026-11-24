@@ -972,3 +972,133 @@ for(const first of ['reranking','generation'] as const) test(`B-R2-TERM-03: ${fi
     } finally{c.dispose();t.mock.restoreAll();}
   },(req,res)=>{calls++;req.resume();reply(res,{});});
 });
+
+// B-R2-TERM-04: no server is opened; admission failures must precede reads/HTTP.
+async function observerController() {
+  let reads=0;
+  const cfg=configAt(1);
+  const port={config:()=>cfg,scopeId:()=>scopeId,verify:async()=>{reads++;}};
+  const c=new SearchController(async()=>{},undefined,undefined,port,port);
+  const response:SearchResponse={protocolVersion:2,requestId:'ui',requestedMode:'lexical',
+    executedMode:'lexical',status:'ok',indexGenerationId:hash('generation'),hits:hits.slice(0,1),
+    capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0};
+  c.attach({search:async()=>response,status:()=>({status:'ready',generationId:hash('generation'),
+    sources:1,records:1,busy:false,error:null,maintenanceWarning:null}),cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+  await c.search(uiRequest(input.query,1));installFixture(c,cfg);
+  return {c,cfg,reads:()=>reads};
+}
+for(const last of [false,true]) for(const steps of [6,15]) {
+  test(`B-R2-TERM-04 finite ${steps} mutation deliveries, mutator ${last?'last':'first'}`,async t=>{
+    const {c,reads}=await observerController();
+    const warnings:unknown[][]=[];t.mock.method(console,'warn',(...args:unknown[])=>warnings.push(args));
+    let remaining=steps,depth=0,maxDepth=0;
+    const seen:string[][]=[[],[],[]];
+    const snapshot=()=>JSON.stringify([c.evidenceOperationStatus('reranking'),c.evidenceOperationStatus('generation')]);
+    const mutator=()=>{
+      depth++;maxDepth=Math.max(maxDepth,depth);
+      try {if(remaining-->0){
+        const role=remaining%2?'reranking':'generation';
+        if(c.evidenceOperationStatus(role).phase==='permission-required') {
+          if(role==='reranking')c.cancelRerank();else c.cancelGeneration();
+        } else if(role==='reranking')c.prepareRerank();else c.prepareGeneration();
+      }}finally{depth--;}
+    };
+    try {
+      c.prepareRerank();
+      if(!last)c.subscribeEvidence(mutator);
+      for(const observations of seen)c.subscribeEvidence(()=>observations.push(snapshot()));
+      if(last)c.subscribeEvidence(mutator);
+      c.cancelRerank();
+      assert.ok(remaining<0);assert.equal(maxDepth,1);assert.deepEqual(warnings,[]);
+      for(const observations of seen)assert.equal(observations.at(-1),snapshot());
+      assert.equal(reads(),0);
+    }finally{c.dispose();}
+  });
+}
+test('B-R2-TERM-04 storm quarantine survives re-add; healthy observers converge and recover',async t=>{
+  const {c,reads}=await observerController();
+  const warnings:unknown[][]=[];t.mock.method(console,'warn',(...args:unknown[])=>warnings.push(args));
+  let deliveries=0,healthy=0,last='',remove=()=>{};
+  const storm=()=>{
+    deliveries++;remove();remove=c.subscribeEvidence(storm);
+    if(c.evidenceOperationStatus('generation').phase==='permission-required')c.cancelGeneration();else c.prepareGeneration();
+  };
+  try {
+    c.prepareRerank();
+    c.subscribeEvidence(()=>{healthy++;last=JSON.stringify(c.snapshot());});
+    remove=c.subscribeEvidence(storm);
+    c.cancelRerank();
+    assert.equal(deliveries,16);assert.ok(healthy<=18);assert.equal(last,JSON.stringify(c.snapshot()));
+    assert.deepEqual(warnings,[['SEARCH_OBSERVER_QUARANTINED','mutation-budget']]);
+    c.subscribeEvidence(storm);c.subscribe(storm);
+    assert.equal(warnings.length,3);
+    const before=healthy;c.prepareRerank();c.cancelRerank();
+    assert.ok(healthy>before);assert.equal(deliveries,16);assert.equal(last,JSON.stringify(c.snapshot()));
+    assert.equal(reads(),0);
+  }finally{c.dispose();}
+});
+test('B-R2-TERM-04 fresh callback registration churn is bounded and explicitly rejected',async t=>{
+  const {c}=await observerController();
+  const warnings:unknown[][]=[];t.mock.method(console,'warn',(...args:unknown[])=>warnings.push(args));
+  let delivered=0,seen='',remove=()=>{};
+  const add=()=>{remove();remove=c.subscribeEvidence(()=>{delivered++;add();});};
+  try {
+    c.prepareRerank();c.subscribeEvidence(()=>{seen=JSON.stringify(c.snapshot());});add();
+    c.cancelRerank();
+    assert.equal(delivered,33);
+    assert.deepEqual(warnings,[['SEARCH_OBSERVER_REJECTED','registration-budget']]);
+    assert.equal(seen,JSON.stringify(c.snapshot()));
+  }finally{c.dispose();}
+});
+test('B-R2-TERM-04 exceptions do not swallow final state or poison subsequent waves',async t=>{
+  const {c}=await observerController();
+  const warnings:unknown[][]=[];t.mock.method(console,'warn',(...args:unknown[])=>warnings.push(args));
+  let seen='',throws=0;
+  try {
+    c.prepareRerank();c.prepareGeneration();
+    c.subscribeEvidence(()=>{seen=JSON.stringify(c.snapshot());});
+    c.subscribeEvidence(()=>{throws++;c.cancelGeneration();throw Error('private text must not be logged');});
+    c.cancelRerank();
+    assert.equal(seen,JSON.stringify(c.snapshot()));assert.equal(throws,1);
+    assert.deepEqual(warnings,[['SEARCH_OBSERVER_QUARANTINED','exception']]);
+    c.prepareGeneration();assert.equal(seen,JSON.stringify(c.snapshot()));assert.equal(throws,1);
+  }finally{c.dispose();}
+});
+for(const action of ['configure','invalidate','dispose'] as const) {
+  test(`B-R2-TERM-04 dual-channel callback ${action} is nonrecursive and supersedes evidence`,async()=>{
+    const {c}=await observerController();
+    let depth=0,maxDepth=0,acted=false,lateEvidence=0,lifecycle=0;
+    const observer=()=>{depth++;maxDepth=Math.max(maxDepth,depth);try{
+      if(!acted){acted=true;if(action==='configure')c.configure(true,false);else c[action]();}
+    }finally{depth--;}};
+    try {
+      c.prepareRerank();c.subscribe(observer);c.subscribe(()=>lifecycle++);
+      c.subscribeEvidence(observer);c.subscribeEvidence(()=>lateEvidence++);
+      c.cancelRerank();await Promise.resolve();
+      assert.equal(maxDepth,1);assert.equal(lateEvidence,0);assert.equal(lifecycle,1);
+      assert.equal(c.snapshot().rerank,undefined);
+    }finally{c.dispose();}
+  });
+}
+test('B-R2-TERM-04 removal, late addition, deferred expiry and stale grant cleanup',async t=>{
+  const {c,cfg,reads}=await observerController();
+  let mono=1000;t.mock.method(performance,'now',()=>mono);installFixture(c,cfg);
+  let last='',removed=0,added=0,once=false;
+  try {
+    const stale=c.prepareRerank();c.prepareGeneration();
+    c.subscribeEvidence(()=>{last=JSON.stringify(c.snapshot());});
+    let unsubscribe=()=>{};
+    c.subscribeEvidence(()=>{if(!once){once=true;unsubscribe();c.subscribeEvidence(()=>added++);mono+=EVIDENCE_PREVIEW_TTL_MS+1;c.snapshot();}});
+    unsubscribe=c.subscribeEvidence(()=>removed++);
+    c.cancelRerank();
+    assert.equal(removed,0);assert.ok(added>0);assert.equal(last,JSON.stringify(c.snapshot()));
+    const before=added;await Promise.resolve();assert.equal(added,before);
+    await assert.rejects(c.rerankConfirmed(stale,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+    assert.equal(reads(),0);
+    installFixture(c,cfg);c.prepareRerank();mono+=EVIDENCE_PREVIEW_TTL_MS+1;
+    c.snapshot();const prior=added;await Promise.resolve();assert.ok(added>prior);
+    assert.equal(last,JSON.stringify(c.snapshot()));
+    const internal=c as unknown as {previewTimers:Record<string,unknown>;prepared:Record<string,unknown>};
+    assert.deepEqual(internal.previewTimers,{});assert.deepEqual(internal.prepared,{});
+  }finally{c.dispose();}
+});

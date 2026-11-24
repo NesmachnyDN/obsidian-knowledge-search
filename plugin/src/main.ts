@@ -97,7 +97,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     config: () => this.settings.ai.generation,
     scopeId: () => this.sourceReader?.rootId,
     verify: hit => this.verifyAiEvidence(hit),
-  });
+  }, () => {this.denseMachine.invalidate();this.denseUi.invalidate();});
   private async verifyAiEvidence(hit: EvidenceHit): Promise<void> {
     const reader = this.sourceReader, file = this.app.vault.getAbstractFileByPath(hit.sourceId);
     if (!reader || !(file instanceof TFile) || file.path !== hit.sourceId) throw new StandaloneError('SOURCE_REJECTED');
@@ -123,7 +123,6 @@ export default class SyntheticEvidencePlugin extends Plugin {
     try { this.settings = parseSettings(saved); }
     catch { this.settings = { ...defaultSettings(), enabled: false }; this.standaloneError = 'SETTINGS_INVALID'; }
     this.searchController.configure(this.settings.enabled, this.settings.paused, this.standaloneError);
-    this.searchController.subscribe(() => {this.denseMachine.invalidate();this.denseUi.invalidate();});
     this.registerView(SEARCH_VIEW, leaf => new SearchView(leaf, this.searchController,
       () => this.settings, action => this.controlSearch(action), this.denseUi, this.denseMachine));
     this.addCommand({ id: 'open-standalone-search', name: 'Open Standalone search', callback: () => { void this.openSearch(); } });
