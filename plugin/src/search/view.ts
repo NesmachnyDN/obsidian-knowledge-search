@@ -100,7 +100,9 @@ export class SearchView extends ItemView {
       const message=add('p','',prefix+'-message');message.setAttribute('aria-live','polite');
       const confirmation=add('section','',prefix+'-preview');
       const rows=add('ol','',prefix+'-results');
-      const clear=()=>{const token=confirmation.querySelector<HTMLInputElement>('input[type=password]');
+      const evidenceRole=role==='rerank'?'reranking':'generation';
+      let sequence: number | undefined;
+      const clear=()=>{sequence=undefined;const token=confirmation.querySelector<HTMLInputElement>('input[type=password]');
         if(token)token.value='';confirmation.replaceChildren();};
       const cancel=()=>role==='rerank'?this.controller.cancelRerank():this.controller.cancelGeneration();
       const error=(e:unknown)=>{if(!this.disposed)message.textContent=label+': '+(e instanceof ProviderFailure?e.code:'NOT_READY');};
@@ -108,6 +110,7 @@ export class SearchView extends ItemView {
         clear();
         try {
           const preview=role==='rerank'?this.controller.prepareRerank():this.controller.prepareGeneration();
+          sequence=preview.sequence;
           renderRerankConfirmation(confirmation,preview,(classification,token)=>{
             if(this.disposed)return;
             const request=role==='rerank'?this.controller.rerankConfirmed(preview,classification,token):
@@ -117,7 +120,10 @@ export class SearchView extends ItemView {
         } catch(e){clear();error(e);}
       });
       button('Cancel '+role,prefix+'-cancel',()=>{clear();cancel();});
-      return {message,rows,clear};
+      const clearStale=()=>{
+        if(sequence!==undefined&&!this.controller.isEvidencePreviewCurrent(evidenceRole,sequence))clear();
+      };
+      return {message,rows,clearStale};
     };
     if(this.denseUi)this.densePanel=mountDensePanel(root,this.denseUi,()=>this.settings().ai.embedding,request,this.denseMachine);
     const rerankPanel=makeEvidencePanel('rerank');
@@ -129,11 +135,12 @@ export class SearchView extends ItemView {
         + `Generation: ${s.generationId ?? 'none'}\nSources: ${s.sources} | Records: ${s.records} | Busy: ${s.busy} | Paused: ${s.paused}\n`
         + `Status: ${s.error ?? 'none'} | Maintenance: ${s.maintenanceWarning ?? 'none'}`;
       filters.disabled = !this.settings().propertiesEnabled;
+      rerankPanel.clearStale();generationPanel.clearStale();
     };
     const render = (): void => {
       if (this.disposed) return;
       renderStatus(); const state = this.controller.snapshot(); message.textContent = state.message; results.replaceChildren();
-      rerankPanel.clear();generationPanel.clear();rerankPanel.rows.replaceChildren();generationPanel.rows.replaceChildren();
+      rerankPanel.rows.replaceChildren();generationPanel.rows.replaceChildren();
       rerankPanel.message.textContent=state.rerank?'Local rerank: '+(state.rerank.error??state.rerank.phase):'Local rerank: not run';
       state.rerank?.hits.forEach(hit=>{
         const row=textElement(doc,'li','');row.appendChild(textElement(doc,'pre',hit.evidence.originalExcerpt));
@@ -163,7 +170,9 @@ export class SearchView extends ItemView {
         row.appendChild(open); results.appendChild(row);
       });
     };
-    this.unsubscribe = this.controller.subscribe(render);
+    const unsubscribe = this.controller.subscribe(render);
+    const unsubscribeEvidence = this.controller.subscribeEvidence(render);
+    this.unsubscribe = () => {unsubscribe();unsubscribeEvidence();};
     this.timer = root.ownerDocument.defaultView!.setInterval(renderStatus, 500);
     render(); input.focus();
   }

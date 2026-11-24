@@ -38,6 +38,25 @@
     await query();
     const lexical=p.searchController.snapshot().response.hits;
     assert(lexical.length===2,'LEXICAL_CANDIDATES');
+    // Observe expiration before the scheduled callback, then roll wall time back.
+    click('.oks-generation-prepare');
+    set('.oks-generation-token','fixture-success');
+    set('.oks-generation-classification','synthetic','change');
+    const staleCheck=el('.oks-generation-confirm-check');staleCheck.checked=true;staleCheck.dispatchEvent(new Event('change',{bubbles:true}));
+    const staleButton=el('.oks-generation-confirm'),staleToken=el('.oks-generation-token');
+    assert(!staleButton.disabled,'LATE_PREVIEW_ARMED');
+    const originalNow=Date.now,wall=originalNow();
+    try {
+      Date.now=()=>wall+300001;
+      assert(operation().error==='CANCELLED','POLL_EXPIRY');
+      Date.now=()=>wall-1000;
+      assert(operation().error==='CANCELLED','NO_REVIVAL');
+    } finally {Date.now=originalNow;}
+    await Promise.resolve();
+    assert(!root().querySelector('.oks-generation-token')&&staleToken.value==='','POLL_EXPIRY_TOKEN_CLEARED');
+    staleButton.click();
+    assert(operation().error==='CANCELLED','DETACHED_CONFIRM_DENIED');
+    assert(JSON.stringify(p.searchController.snapshot().response.hits)===JSON.stringify(lexical),'POLL_EXPIRY_LEXICAL_UNCHANGED');
     confirm('fixture-success');
     await wait(()=>p.searchController.snapshot().generation?.phase==='results','RESULTS');
     const result=p.searchController.snapshot();

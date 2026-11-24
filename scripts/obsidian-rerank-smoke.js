@@ -38,6 +38,41 @@
     await query();
     const lexical=p.searchController.snapshot().response.hits;
     assert(lexical.length===2,'LEXICAL_CANDIDATES');
+    // Accelerate only the pending-preview timer in this disposable host, not HTTP deadlines.
+    const originalSetTimeout=globalThis.setTimeout;
+    let expiryTimer=0;
+    try {
+      globalThis.setTimeout=(fn,ms,...args)=>{
+        if(ms===300000){expiryTimer++;return originalSetTimeout(fn,50,...args);}
+        return originalSetTimeout(fn,ms,...args);
+      };
+      click('.oks-rerank-prepare');
+      assert(operation().phase==='permission-required','EXPIRY_PENDING');
+      set('.oks-rerank-token','fixture-success');
+      const pendingToken=el('.oks-rerank-token');
+      await wait(()=>operation().error==='CANCELLED','EXPIRY_TIMER');
+      assert(expiryTimer===1&&!root().querySelector('.oks-rerank-token')&&pendingToken.value==='','EXPIRY_TOKEN_CLEARED');
+      assert(JSON.stringify(p.searchController.snapshot().response.hits)===JSON.stringify(lexical),'EXPIRY_LEXICAL_UNCHANGED');
+    } finally {globalThis.setTimeout=originalSetTimeout;}
+    // Observe expiration before the scheduled callback, then roll wall time back.
+    click('.oks-rerank-prepare');
+    set('.oks-rerank-token','fixture-success');
+    set('.oks-rerank-classification','synthetic','change');
+    const staleCheck=el('.oks-rerank-confirm-check');staleCheck.checked=true;staleCheck.dispatchEvent(new Event('change',{bubbles:true}));
+    const staleButton=el('.oks-rerank-confirm'),staleToken=el('.oks-rerank-token');
+    assert(!staleButton.disabled,'LATE_PREVIEW_ARMED');
+    const originalNow=Date.now,wall=originalNow();
+    try {
+      Date.now=()=>wall+300001;
+      assert(operation().error==='CANCELLED','POLL_EXPIRY');
+      Date.now=()=>wall-1000;
+      assert(operation().error==='CANCELLED','NO_REVIVAL');
+    } finally {Date.now=originalNow;}
+    await Promise.resolve();
+    assert(!root().querySelector('.oks-rerank-token')&&staleToken.value==='','POLL_EXPIRY_TOKEN_CLEARED');
+    staleButton.click();
+    assert(operation().error==='CANCELLED','DETACHED_CONFIRM_DENIED');
+    assert(JSON.stringify(p.searchController.snapshot().response.hits)===JSON.stringify(lexical),'POLL_EXPIRY_LEXICAL_UNCHANGED');
     confirm('fixture-success');
     await wait(()=>p.searchController.snapshot().rerank?.phase==='results','RESULTS');
     const result=p.searchController.snapshot();
