@@ -22,7 +22,7 @@ import { defaultSettings, parseSettings, type SearchSettings } from './search/se
 import { SearchSettingsTab } from './search/settings-tab';
 import { SearchView, SEARCH_VIEW } from './search/view';
 import { obsidianNavigator } from './search/obsidian-navigation';
-import type { SourceNavigator } from './search/navigation';
+import { verifySpan, type SourceNavigator } from './search/navigation';
 
 // Reload barrier: the prior writer must finish before a replacement store opens.
 const barrierKey = Symbol.for('oks.standalone.close-barriers');
@@ -56,6 +56,7 @@ class ResultModal extends Modal {
 export default class SyntheticEvidencePlugin extends Plugin {
   settings: SearchSettings = defaultSettings();
   private navigator?: SourceNavigator<TFile>;
+  private sourceReader?: BoundedVaultReader;
   private rootId?: string;
   private initializing?: Promise<void>;
   private layoutReady = false;
@@ -69,7 +70,17 @@ export default class SyntheticEvidencePlugin extends Plugin {
   readonly searchController = new SearchController(async hit => {
     if (!this.navigator) throw new StandaloneError('NAVIGATION_REJECTED');
     await this.navigator.open(hit);
-  }, () => this.advancedHealth.snapshot(), () => this.advancedIngestion.snapshot());
+  }, () => this.advancedHealth.snapshot(), () => this.advancedIngestion.snapshot(), {
+    config: () => this.settings.ai.reranking,
+    scopeId: () => this.sourceReader?.rootId,
+    verify: async hit => {
+      const reader = this.sourceReader, file = this.app.vault.getAbstractFileByPath(hit.sourceId);
+      if (!reader || !(file instanceof TFile) || file.path !== hit.sourceId) throw new StandaloneError('SOURCE_REJECTED');
+      verifySpan(hit, await reader.read(hit.sourceId));
+      if (this.sourceReader !== reader || this.app.vault.getAbstractFileByPath(hit.sourceId) !== file)
+        throw new StandaloneError('SOURCE_CHANGED');
+    },
+  });
   readonly api = new StandaloneApi(this.searchController);
   private loaded = false;
   private unloaded = false;
@@ -429,6 +440,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
       catch (error) { await parser.close(); throw error; }
       this.standalone = engine;
       this.navigator = obsidianNavigator(this.app, provider);
+      this.sourceReader = provider;
       this.searchController.attach(engine);
       await engine.start();
       if (!valid()) { await this.stopStandalone(); return; }
@@ -442,7 +454,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     }
   }
   private async stopStandalone(): Promise<void> {
-    this.navigator?.dispose(); this.navigator = undefined;
+    this.navigator?.dispose(); this.navigator = undefined; this.sourceReader = undefined;
     this.searchController.detach();
     const engine = this.standalone; this.standalone = undefined;
     if (!engine) return;
