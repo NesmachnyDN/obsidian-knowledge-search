@@ -3,7 +3,7 @@ import { canonical, sha } from '../advanced/protocol';
 import { hash, isDigest, isRecord, validPath, BOUNDS, type EvidenceHit, type SourceLocator } from '../standalone/contracts';
 import { ProviderFailure, type ProviderConfig, type EmbeddingSpace } from './contracts';
 import { checkedVector, embeddingSpaceId, validateEmbeddingSpace } from './embedding-space';
-import type { EmbeddingBatch } from './loopback-embedding';
+import { readVerifiedDocumentBatch,type VerifiedEmbeddingResult } from './embedding-evidence';
 
 export const MAX_API_VECTORS = 256;
 export type ApiDenseEntry = {
@@ -15,7 +15,12 @@ export type ApiDenseGeneration = {
   origin: string; space: EmbeddingSpace; spaceId: string;
   generationId: string; entries: ApiDenseEntry[];
 };
-export type DocumentBatch = { batch: EmbeddingBatch; evidence: readonly EvidenceHit[] };
+const built=new WeakMap<ApiDenseGeneration,ApiDenseGeneration>();
+export function readBuiltApiDenseGeneration(value:ApiDenseGeneration):ApiDenseGeneration {
+  const original=built.get(value);
+  if(!original||canonical(value)!==canonical(original))throw new ProviderFailure('DISCLOSURE_DENIED');
+  return structuredClone(original);
+}
 const fail = (): never => { throw new ProviderFailure('INVALID_RESPONSE'); };
 const exact = (v: Record<string, unknown>, keys: string[]): boolean =>
   Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v,k));
@@ -69,14 +74,15 @@ export function validateApiDenseGeneration(value:unknown,rootId:string):asserts 
 }
 /** Complete replacement of the explicitly selected evidence set, not whole-Vault coverage. */
 export function buildApiDenseGeneration(rootId:string,config:ProviderConfig,declared:EmbeddingSpace,
-  lexicalGenerationId:string,expected:readonly EvidenceHit[],batches:readonly DocumentBatch[]):ApiDenseGeneration {
+  lexicalGenerationId:string,expected:readonly EvidenceHit[],batches:readonly VerifiedEmbeddingResult[]):ApiDenseGeneration {
   const space=validateEmbeddingSpace(config,declared),spaceId=embeddingSpaceId(config,space);
   if(!isDigest(rootId)||!isDigest(lexicalGenerationId)||!expected.length||expected.length>MAX_API_VECTORS
     ||!batches.length||batches.length>MAX_API_VECTORS)fail();
   const wanted=new Map(expected.map(h=>{const e=identity(h,lexicalGenerationId);return [key(e),e]}));
   if(wanted.size!==expected.length)fail();
   const entries:ApiDenseEntry[]=[];
-  for(const {batch,evidence} of batches){
+  for(const result of batches){
+    const {batch,evidence}=readVerifiedDocumentBatch(result,rootId);
     if(batch.purpose!=='document'||batch.spaceId!==spaceId||!evidence.length||evidence.length>8
       ||batch.vectors.length!==evidence.length)fail();
     for(let i=0;i<evidence.length;i++){
@@ -90,5 +96,6 @@ export function buildApiDenseGeneration(rootId:string,config:ProviderConfig,decl
   const base={schemaVersion:2 as const,rootId,lexicalGenerationId,origin:config.origin,space,spaceId,entries};
   const generation={...base,generationId:digest(base)};
   validateApiDenseGeneration(generation,rootId);
+  built.set(generation,structuredClone(generation));
   return generation;
 }

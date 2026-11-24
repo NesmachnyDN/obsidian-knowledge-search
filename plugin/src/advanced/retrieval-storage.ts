@@ -5,7 +5,7 @@ import { lstat, readdir, rename, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { readSource, type TrustedVaultRoot } from './source';
-import { validateApiDenseGeneration, type ApiDenseGeneration } from '../ai/dense-generation';
+import { validateApiDenseGeneration, readBuiltApiDenseGeneration, type ApiDenseGeneration } from '../ai/dense-generation';
 import { privateIndexPath } from '../standalone/source';
 import { verifySpan } from '../search/navigation';
 import { canonical, sha, validRelative, IngestError } from './protocol';
@@ -196,7 +196,7 @@ export class AdvancedRetrievalStore {
     return this.commit(next,check,signal);
   }
   async publishApi(generation:ApiDenseGeneration,check:()=>Promise<void>,signal:AbortSignal):Promise<ApiDenseGeneration>{
-    const next=structuredClone(generation);
+    const next=readBuiltApiDenseGeneration(generation);
     validateApiDenseGeneration(next,this.root.id);
     return this.commit(next,async()=>{await this.verifyApi(next,signal);await check();},signal);
   }

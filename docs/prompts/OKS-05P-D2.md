@@ -7,6 +7,8 @@ a versioned API generation. Keep legacy generation readability, explicit
 full replacement between spaces, same private directory, no per-model cache.
 Build a complete selected evidence-set generation from D1 document batches,
 reject omissions, duplicates, wrong purpose, stale source and mixed spaces.
+Use in-process verified batch and built-generation provenance capabilities;
+reject swapped, fabricated, mutated or cross-scope batch/evidence pairs.
 Persist only source/locator identity and vectors, not raw excerpts or tokens.
 Verify exact source bytes at publication and on API snapshot; revoke on events.
 Guard competing instances within the single Obsidian process, reject disk

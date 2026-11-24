@@ -1,4 +1,8 @@
 import {test} from 'node:test';
+import {createServer} from 'node:http';
+import {EvidenceEmbedder,type EmbeddingApproval} from '../plugin/src/ai/embedding-evidence';
+import {configDigest} from '../plugin/src/ai/disclosure';
+import {verifySpan} from '../plugin/src/search/navigation';
 import assert from 'node:assert/strict';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
@@ -44,29 +48,61 @@ async function temporary(run:(vault:string,root:Awaited<ReturnType<typeof truste
     await rm(dir,{recursive:true,force:true});
   }
 }
-function generation(rootId:string,config=cfg,declared=space){
+async function generation(rootId:string,config=cfg,declared=space){
   const hits=['a.md','b.md'].map(p=>evidence(rootId,p));
-  const batch={spaceId:embeddingSpaceId(config,declared),purpose:'document' as const,
-    vectors:[Array.from({length:declared.dimension},(_,i)=>i===0?1:0),
-      Array.from({length:declared.dimension},(_,i)=>i===1?1:0)]};
-  return {hits,batch,value:buildApiDenseGeneration(rootId,config,declared,lexicalId,hits,[{batch,evidence:hits}])};
+  const server=createServer((req,res)=>{
+    let body='';req.on('data',x=>body+=x);req.on('end',()=>{
+      const input=JSON.parse(body) as {model:string;input:string[]};
+      const data=input.input.map((_,index)=>({object:'embedding',index,
+        embedding:Array.from({length:declared.dimension},(_,i)=>i===index?1:0)}));
+      res.writeHead(200,{'content-type':'application/json'});
+      res.end(JSON.stringify({model:input.model,data}));
+    });
+  });
+  await new Promise<void>((r,j)=>{server.once('error',j);server.listen(0,'127.0.0.1',r);});
+  try{
+    const address=server.address();if(!address||typeof address==='string')throw Error('FIXTURE_ADDRESS');
+    const local={...config,origin:'http://127.0.0.1:'+address.port};
+    const query={text:'Approved synthetic batch',classification:'synthetic' as const};
+    const grant={version:1 as const,role:'embedding' as const,purpose:'document' as const,
+      spaceId:embeddingSpaceId(local,declared),configDigest:configDigest('embedding',local),
+      scopeId:rootId,expiresUnixMs:Date.now()+10000,queryDigest:hash(query.text),queryClassification:query.classification,
+      sources:hits.map(hit=>({sourceId:hit.sourceId,sourceSha256:hit.sourceSha256,
+        excerptDigest:hash(hit.originalExcerpt),classification:'synthetic' as const}))};
+    const approval:EmbeddingApproval={config:local,space:declared,purpose:'document',scopeId:rootId,query,
+      candidates:hits.map(hit=>({hit,classification:'synthetic'})),grant};
+    const result=await new EvidenceEmbedder().run(approval,'synthetic-token',
+      {signal:sig(),deadlineUnixMs:Date.now()+3000},async hit=>{verifySpan(hit,raw);},()=>true);
+    return {hits,result,config:local,value:buildApiDenseGeneration(rootId,local,declared,lexicalId,hits,[result])};
+  }finally{
+    server.closeAllConnections();await new Promise<void>((r,j)=>server.close(e=>e?j(e):r()));
+  }
 }
-test('D2 full selected-set coverage and space checks reject omission, duplication, purpose and dimension',()=>{
-  const rootId=hash('root'),{hits,batch}=generation(rootId);
-  const build=(b:typeof batch,e:EvidenceHit[]=hits)=>buildApiDenseGeneration(rootId,cfg,space,lexicalId,hits,[{batch:b,evidence:e}]);
-  assert.throws(()=>build({...batch,vectors:[[1,0,0]]},[hits[0]!]));
-  assert.throws(()=>build(batch,[hits[0]!,hits[0]!]));
-  assert.throws(()=>build({...batch,spaceId:hash('other')}));
-  assert.throws(()=>build({...batch,vectors:[[1,0],[0,1,0]]}));
-  assert.throws(()=>build(batch,[{...hits[0]!,indexGenerationId:hash('other')},hits[1]!]));
-  assert.throws(()=>buildApiDenseGeneration(rootId,cfg,space,lexicalId,hits,[{batch:{...batch,purpose:'query'},evidence:hits}]));
+test('D2 complete coverage and issued ordinal provenance reject fabricated, swapped, mutated and cross-scope batches',async()=>{
+  const rootId=hash('root'),{hits,result,config}=await generation(rootId);
+  const build=(expected:EvidenceHit[]=hits,rows=[result],root=rootId)=>
+    buildApiDenseGeneration(root,config,space,lexicalId,expected,rows);
+  assert.throws(()=>build([hits[0]!]));
+  assert.throws(()=>build([hits[0]!,hits[0]!]));
+  assert.throws(()=>build(hits,[result,result]));
+  assert.throws(()=>build(hits,[{...result,evidence:[...result.evidence].reverse()}]));
+  assert.throws(()=>build(hits,[structuredClone(result)]));
+  assert.throws(()=>build(hits,[result],hash('foreign scope')));
+  assert.throws(()=>build([{...hits[0]!,indexGenerationId:hash('other')},hits[1]!]));
+  const valid=build();
+  assert.deepEqual(valid.entries.map(x=>[x.sourcePath,x.vector]),[['a.md',[1,0,0]],['b.md',[0,1,0]]]);
+  result.batch.vectors.reverse();
+  assert.throws(()=>build());
+  const other=await generation(rootId,{...cfg,identity:{model:space.model,revision:'v2'}},{...space,revision:'v2'});
+  assert.throws(()=>build(hits,[other.result]));
 });
 test('D2 atomic single CURRENT legacy -> API -> changed model, no old model files and cold recovery',async()=>{
   await temporary(async(vault,root)=>{
     const store=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
     await store.publish(legacyEntry,legacy,async()=>{},sig());
     const old=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
-    const first=generation(root.id).value;
+    const first=(await generation(root.id)).value;
+    await assert.rejects(store.publishApi(structuredClone(first),async()=>{},sig()));
     await store.publishApi(first,async()=>{},sig());
     assert.equal(store.snapshot(),null);assert.throws(()=>old.snapshot());
     assert.deepEqual(await store.snapshotApi(first.spaceId,lexicalId),first);
@@ -75,7 +111,7 @@ test('D2 atomic single CURRENT legacy -> API -> changed model, no old model file
     await assert.rejects(store.snapshotApi(first.spaceId,hash('different')));
     const secondSpace={...space,revision:'v2',dimension:4};
     const secondCfg={...cfg,identity:{model:space.model,revision:'v2'}};
-    const second=generation(root.id,secondCfg,secondSpace).value;
+    const second=(await generation(root.id,secondCfg,secondSpace)).value;
     const canceled=new AbortController();let checks=0;
     await assert.rejects(store.publishApi(second,async()=>{if(++checks===3)canceled.abort()},canceled.signal));
     assert.deepEqual(await store.snapshotApi(first.spaceId,lexicalId),first);
@@ -99,7 +135,7 @@ test('D2 stale source, revoke, concurrent writer and forged pointer fail closed'
   await temporary(async(vault,root)=>{
     const store=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
     const competing=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
-    const g=generation(root.id).value;
+    const g=(await generation(root.id)).value;
     let entered!:()=>void,release!:()=>void;
     const ready=new Promise<void>(r=>entered=r),blocked=new Promise<void>(r=>release=r);
     const job=store.publishApi(g,async()=>{entered();await blocked;},sig());
