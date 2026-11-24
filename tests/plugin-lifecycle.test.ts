@@ -586,6 +586,9 @@ test('D6 B-LIFECYCLE-02: same host transfers CURRENT ownership, handles events a
   } finally {
     server.closeAllConnections();
     if(server.listening)await new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve()));
+    // The final create event schedules a lexical writer independently of legacy.
+    // Drain it before the fixture removes its private index directory.
+    await f.plugin.standalone?.whenIdle();
     await f.cleanup();
   }
 });
