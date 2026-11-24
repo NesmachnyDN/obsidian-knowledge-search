@@ -48,6 +48,12 @@ production Vault deployment, or public release.
 - `tests/settings-ux.test.ts` and `tests/plugin-lifecycle.test.ts`
 - `scripts/obsidian-settings-ux-smoke.js`, real Obsidian synthetic Vault
 - `scripts/obsidian-host-smoke.sh` with `OKS_06UX_TEST=1`
-- Visual screenshots remain outstanding: the isolated headless Obsidian host
-  supports DOM acceptance but cannot capture the Settings surface. Do not
-  treat UI smoke as light/dark/zoom or visual acceptance proof.
+- Real rendered visual/keyboard acceptance: opt-in
+  OKS_06UX_VISUAL_DIR mode of the isolated host script captures the separate
+  Settings window, verifies effective conditional visibility, native focus
+  order, 200% zoom and long-label geometry. See the user guide for the
+  reproducible command and evidence handling. Scoped layout and disclosure
+  remediation address B-VISUAL-02–04.
+- Current AI operation is metadata-only status from the existing role
+  controller; successful execution is never advertised as standing provider
+  readiness or consent. No new provider or execution contract.

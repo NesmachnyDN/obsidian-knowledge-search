@@ -71,6 +71,7 @@ exact-scope, classification and consent boundaries remain authoritative.
 | Last basic requested/executed mode | `SearchController.snapshot().response` | Display only if a current verified response exists; never fabricated |
 | Optional extraction status | `AdvancedIngestionManager.snapshot()` | Last processing state; not retrieval readiness |
 | Optional Python dense/lexical index state | `AdvancedRetrievalManager.snapshot()` | Labeled model-backed index; its source/chunk counts are **not API embedding-index coverage** |
+| Current AI operation (non-persisted) | Existing dense UI and evidence role controllers | Metadata-only idle, permission-required, busy, completed or typed failed/cancelled state on explicit refresh; no source text, tokens or standing readiness claims |
 | AI availability | `preferenceStatus` plus existing permission/execution contracts | Disabled, invalid, configured/not verified; do not advertise Ready from saved fields |
 | Manual ingestion, index, rebuild, cancel, health recheck | Existing plugin controller callbacks | Explicit buttons only; no background downloads, broad indexing or hidden API calls |
 | Cleanup | `purgeIndex()` with existing gate | Only disabled Standalone, explicit warning modal, recognized derived files only, original notes untouched |

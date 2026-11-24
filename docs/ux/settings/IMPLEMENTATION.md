@@ -129,11 +129,41 @@ OCR/structured paths, view-only mode switches and disabled-only cleanup.
 Complete release acceptance still requires exact-HEAD CI, CodeQL and
 **a separate independent full-diff SDD review** before any merge.
 
-## Known acceptance limitation
+## Visual and keyboard acceptance (B-VISUAL-01–04)
 
-The isolated Obsidian smoke tests real Settings DOM, offline search and
-state transitions, but its headless renderer does not yield reliably
-capturable Settings screenshots. Visual inspection and sanitized captures
-for light/dark themes, narrow layout, 200% scale, long labels and
-maintenance/error views remain **open UX-AC08/UX-AC09 evidence**. A green
-DOM test is not a substitute for the prescribed visual acceptance.
+The separate Settings Electron window is captured directly on a dedicated
+X11/Xvfb display in an isolated no-route generated Vault. The host runner
+does not inherit the workstation's Wayland/DBus session. The reproducible
+visual mode must use a fresh absolute evidence directory:
+
+```sh
+OKS_06UX_TEST=1 OKS_HOST_NO_ROUTE=1 OKS_HOST_TIMEOUT_SECONDS=250 \
+  OKS_06UX_VISUAL_DIR=/tmp/oks-settings-evidence-fresh \
+  OKS_STANDALONE_PACKAGE_DIR="$PWD/build/standalone-package" \
+  bash scripts/obsidian-host-smoke.sh
+```
+
+The visual harness captures the actual Settings window, checks actual
+computed visibility and nonzero layout rectangles (not only the hidden
+attribute), sends native Tab/Shift+Tab/Space events, and measures overflow
+at 900×700 and 760×700 windows with 100% and 200% native zoom. Long translated
+labels are synthetic DOM stress inputs, not an implemented translation.
+It saves PNGs, geometry results and SHA-256 sums outside the repository.
+A failing scenario does not emit a visual PASS. Review the rendered
+screenshots separately; a green DOM test alone does not prove visual
+acceptance. No real Vault, provider or credentials are used.
+
+Settings layout rules are scoped to OKS; they respect hidden descendants
+despite host CSS, wrap native controls and keep disclosure openers before
+their editors in DOM order. Save/Cancel restores focus to the relevant
+control and status refresh does not replace an unrelated editor.
+
+The Current AI operation row is a read-only projection of the existing
+role controller, updated when Settings opens or Refresh is selected.
+Idle, permission-required, busy, completed and failed/cancelled are
+separate from provider preferences. Completion is evidence of one
+authorized operation, **not standing provider readiness or permission**.
+No operation, credential or source content is created or read by this
+projection. Optional role transition/failure evidence uses the existing
+isolated loopback fixture with OKS_AI_RERANK_TEST=1; it is not Gate B
+acceptance of any real provider.
