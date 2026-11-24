@@ -219,8 +219,22 @@
       app.setting.openTabById(p.manifest.id); await new Promise(r=>setTimeout(r,300));
       doc = root().ownerDocument;
       assert(!status('generation').textContent && JSON.stringify(p.settings)===baseline,'CHECK_HIDE_FENCE');
-      press(cardRow('generation','Draft preferences'),'Cancel draft');
-      checkEvidence='embedding-generation-auth-duplicate-close-edit-hide-no-save-no-index';
+      // Save a synthetic generation assignment, then disable that active role while
+      // its Check request is actually in flight. Only the explicit Save/Disable
+      // operations may mutate preferences, never the Check.
+      press(cardRow('generation','Draft preferences'),'Save connection');
+      await wait(()=>p.settings.ai.generation.state==='configured','CHECK_DISABLE_PREP_SAVE');
+      await wait(()=>cardRow('generation','Connection').querySelector('button').textContent==='Configure','CHECK_DISABLE_PREP_EDITOR');
+      press(cardRow('generation','Connection'),'Configure');
+      const disablingStatus=status('generation');
+      const disablingToken=credential('generation','synthetic-check-slow');
+      check('generation');await wait(()=>calls===7,'CHECK_DISABLE_REQUEST');
+      press(cardRow('generation','Draft preferences'),'Disable role');
+      await wait(()=>cancelled===4 && p.settings.ai.generation.state==='disabled','CHECK_DISABLE_ABORTS');
+      assert(disablingStatus.textContent==='' && disablingToken.value==='' &&
+        JSON.stringify(p.settings)===baseline && p.standalone===engine &&
+        p.standalone.status().generationId===generation,'CHECK_DISABLE_FENCE');
+      checkEvidence='embedding-generation-auth-duplicate-close-edit-hide-disable-no-save-no-index';
     } finally {
       server.closeAllConnections();
       await new Promise(resolve=>server.close(resolve));

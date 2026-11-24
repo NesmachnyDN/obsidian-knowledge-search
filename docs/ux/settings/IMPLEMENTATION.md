@@ -110,7 +110,9 @@ input, validates the declared identity and output, and reports elapsed time
 or a typed error. No notes, file names, secrets in diagnostics, indexing,
 grant, persistent readiness state or settings save. Changes, editor close,
 redraw, tab hide and plugin unload cancel or invalidate the result.
-No network request is initiated by opening or saving settings.
+No network request is initiated by opening or saving settings. Shared
+role/endpoint admission prevents a Check and a normal provider request from
+executing concurrently against the same local role endpoint.
 
 Actual reranking remains unavailable for connection testing until its
 real runtime profile is independently accepted (#57). Cloud checks require

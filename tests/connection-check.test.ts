@@ -2,7 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { checkLocalConnection, ConnectionCheckSession } from '../plugin/src/ai/connection-check';
-import type { ProviderConfig } from '../plugin/src/ai/contracts';
+import { LoopbackGenerationTransport } from '../plugin/src/ai/loopback-generation';
+import { LoopbackEmbeddingTransport } from '../plugin/src/ai/loopback-embedding';
+import type { EmbeddingSpace, ProviderConfig } from '../plugin/src/ai/contracts';
 
 const token = 'synthetic-check-token';
 const model = 'synthetic-check@v1';
@@ -125,5 +127,70 @@ test('CHECK-03/04: timeout, duplicate run, cancellation, stale completion and di
     calls++;
     if(calls===3)json(res,generated());
     else entered();
+  });
+});
+
+test('CHECK-03: shared admission excludes Settings and runtime requests in both directions and releases after cancel',async()=>{
+  let calls=0,entered!:()=>void;
+  let pending=new Promise<void>(r=>entered=r);
+  const runtime=new LoopbackGenerationTransport();
+  const input={query:'Synthetic question',passages:[{id:0,text:'The color is blue.'}]};
+  await fixture(async cfg=>{
+    const ctx=(abort:AbortController)=>({signal:abort.signal,deadlineUnixMs:Date.now()+3000});
+    const runtimeAbort=new AbortController();
+    const running=runtime.generate(cfg,input,token,ctx(runtimeAbort));
+    await pending;
+    const rejected=await checkLocalConnection('generation',cfg,token,undefined,signal());
+    assert.equal(rejected.ok,false);if(!rejected.ok)assert.equal(rejected.error,'QUOTA_EXCEEDED');
+    // Changing model or bearer token cannot evade same role/origin admission.
+    const alternate=await checkLocalConnection('generation',{...cfg,identity:{...cfg.identity,model:'other'}},'other-token',undefined,signal());
+    assert.equal(alternate.ok,false);if(!alternate.ok)assert.equal(alternate.error,'QUOTA_EXCEEDED');
+    assert.equal(calls,1);
+    // Independent role endpoints remain independent.
+    assert.equal((await checkLocalConnection('embedding',cfg,token,3,signal())).ok,true);
+    assert.equal(calls,2);
+    runtimeAbort.abort();await assert.rejects(running,{message:'CANCELLED'});
+    pending=new Promise<void>(r=>entered=r);
+    const checkAbort=new AbortController();
+    const checking=checkLocalConnection('generation',cfg,token,undefined,checkAbort.signal);
+    await pending;
+    await assert.rejects(new LoopbackGenerationTransport().generate(cfg,input,token,ctx(new AbortController())),
+      {message:'QUOTA_EXCEEDED'});
+    assert.equal(calls,3);
+    checkAbort.abort();const cancelled=await checking;
+    assert.equal(cancelled.ok,false);if(!cancelled.ok)assert.equal(cancelled.error,'CANCELLED');
+    assert.equal((await checkLocalConnection('generation',cfg,token,undefined,signal())).ok,true);
+    assert.equal(calls,4);
+  },(req,res)=>{
+    calls++;
+    if(req.url==='/v1/embeddings')json(res,embedding());
+    else if(calls===4)json(res,generated());
+    else entered();
+  });
+});
+test('CHECK-03: embedding runtime shares admission and network failure releases it',async()=>{
+  let calls=0,entered!:()=>void;
+  const pending=new Promise<void>(r=>entered=r);
+  await fixture(async cfg=>{
+    const space:EmbeddingSpace={...cfg.identity,dimension:3,normalization:'unit-l2',
+      serializationId:'utf8-verbatim-v1',queryInstructionId:'identity-v1',documentInstructionId:'identity-v1'};
+    const abort=new AbortController();
+    const context={signal:abort.signal,deadlineUnixMs:Date.now()+3000};
+    const runtime=new LoopbackEmbeddingTransport();
+    const running=runtime.embed(cfg,space,'query',{query:'test',passages:[]},token,context);
+    await pending;
+    const rejected=await checkLocalConnection('embedding',cfg,token,3,signal());
+    assert.equal(rejected.ok,false);if(!rejected.ok)assert.equal(rejected.error,'QUOTA_EXCEEDED');
+    assert.equal(calls,1);
+    abort.abort();await assert.rejects(running,{message:'CANCELLED'});
+    const broken=await checkLocalConnection('embedding',cfg,token,3,signal());
+    assert.equal(broken.ok,false);if(!broken.ok)assert.equal(broken.error,'NETWORK');
+    assert.equal((await checkLocalConnection('embedding',cfg,token,3,signal())).ok,true);
+    assert.equal(calls,3);
+  },(req,res)=>{
+    calls++;
+    if(calls===1)entered();
+    else if(calls===2)req.socket.destroy();
+    else json(res,embedding());
   });
 });

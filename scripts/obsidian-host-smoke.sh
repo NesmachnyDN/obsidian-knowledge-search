@@ -337,8 +337,20 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
   before_reload="$(timeout 8s "$cli" eval "code=(globalThis.__oksPreviousParser=app.plugins.plugins[\"oks-synthetic-evidence\"].standalone.parser,app.plugins.plugins[\"oks-synthetic-evidence\"].standalone.status().generationId)")"
   before_id="$(printf "%s" "$before_reload" | grep -oE "[0-9a-f]{64}" | head -1)"
   test -n "$before_id" || { echo "HOST_SMOKE_FAILURE: missing before-reload generation" >&2; exit 1; }
+  if [[ "${OKS_06UX_TEST:-0}" == 1 && "${OKS_HOST_NO_ROUTE:-0}" == 1 ]]; then
+    unload_ready="$(timeout 20s "$cli" eval "code=$(cat "$repo/scripts/obsidian-settings-check-unload-smoke.js")")"
+    [[ "$unload_ready" == *"OBSIDIAN_SETTINGS_CHECK_UNLOAD_READY:"* ]] ||
+      { echo "HOST_SMOKE_FAILURE: active connection check before reload ($unload_ready)" >&2; exit 1; }
+    printf "%s\n" "$unload_ready"
+  fi
   timeout 8s "$cli" plugin:reload id=oks-synthetic-evidence >/dev/null
   sleep 3
+  if [[ "${OKS_06UX_TEST:-0}" == 1 && "${OKS_HOST_NO_ROUTE:-0}" == 1 ]]; then
+    unload_result="$(timeout 20s "$cli" eval "code=$(cat "$repo/scripts/obsidian-settings-check-unload-smoke.js")")"
+    [[ "$unload_result" == *"OBSIDIAN_SETTINGS_CHECK_UNLOAD_PASS:"* ]] ||
+      { echo "HOST_SMOKE_FAILURE: active check unload ($unload_result)" >&2; exit 1; }
+    printf "%s\n" "$unload_result"
+  fi
   restarted="$(timeout 8s "$cli" eval "code=JSON.stringify({status:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standalone?.status(),error:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standaloneError})")"
   [[ "$restarted" == *"\"status\":\"ready\""* && "$restarted" == *"\"sources\":3"* ]] ||
     { echo "HOST_SMOKE_FAILURE: reload" >&2; exit 1; }
