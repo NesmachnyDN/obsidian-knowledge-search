@@ -35,7 +35,7 @@ function validLocator(v: unknown, version: string): v is SourceLocator {
     ||!ordinal(v.lineStart,BOUNDS.fileBytes)||!ordinal(v.lineEnd,BOUNDS.fileBytes)||v.lineEnd<v.lineStart)return false;
   return true;
 }
-const key = (e: Omit<ApiDenseEntry,'vector'>): string =>
+export const apiDenseEntryKey = (e: Omit<ApiDenseEntry,'vector'>): string =>
   canonical([e.sourcePath,e.sourceSha256,e.locator,e.excerptSha256]);
 function identity(hit:EvidenceHit,lexicalGenerationId:string):Omit<ApiDenseEntry,'vector'> {
   if(hit.indexGenerationId!==lexicalGenerationId||hit.retrievalMode!=='lexical'
@@ -45,6 +45,8 @@ function identity(hit:EvidenceHit,lexicalGenerationId:string):Omit<ApiDenseEntry
   return {sourcePath:hit.sourceId,sourceSha256:hit.sourceSha256,excerptSha256:hash(hit.originalExcerpt),
     locator:structuredClone(hit.sourceLocators[0])};
 }
+export const apiDenseEvidenceKey = (hit:EvidenceHit,lexicalGenerationId:string):string =>
+  apiDenseEntryKey(identity(hit,lexicalGenerationId));
 const digest = (v:Omit<ApiDenseGeneration,'generationId'>):string=>sha(canonical(v));
 /** Revalidate the nonsecret persisted space without persisting operational limits. */
 function configFor(origin:string,space:EmbeddingSpace):ProviderConfig {
@@ -65,7 +67,7 @@ export function validateApiDenseGeneration(value:unknown,rootId:string):asserts 
     if(!isRecord(e)||!exact(e,['sourcePath','sourceSha256','excerptSha256','locator','vector'])
       ||!validPath(e.sourcePath)||!isDigest(e.sourceSha256)||!isDigest(e.excerptSha256)
       ||!validLocator(e.locator,e.sourceSha256))fail();
-    const k=key(e);
+    const k=apiDenseEntryKey(e);
     if(k<=prior||versions.has(e.sourcePath)&&versions.get(e.sourcePath)!==e.sourceSha256)fail();
     prior=k;versions.set(e.sourcePath,e.sourceSha256);checkedVector(e.vector,space);
   }
@@ -78,7 +80,7 @@ export function buildApiDenseGeneration(rootId:string,config:ProviderConfig,decl
   const space=validateEmbeddingSpace(config,declared),spaceId=embeddingSpaceId(config,space);
   if(!isDigest(rootId)||!isDigest(lexicalGenerationId)||!expected.length||expected.length>MAX_API_VECTORS
     ||!batches.length||batches.length>MAX_API_VECTORS)fail();
-  const wanted=new Map(expected.map(h=>{const e=identity(h,lexicalGenerationId);return [key(e),e]}));
+  const wanted=new Map(expected.map(h=>{const e=identity(h,lexicalGenerationId);return [apiDenseEntryKey(e),e]}));
   if(wanted.size!==expected.length)fail();
   const entries:ApiDenseEntry[]=[];
   for(const result of batches){
@@ -86,13 +88,13 @@ export function buildApiDenseGeneration(rootId:string,config:ProviderConfig,decl
     if(batch.purpose!=='document'||batch.spaceId!==spaceId||!evidence.length||evidence.length>8
       ||batch.vectors.length!==evidence.length)fail();
     for(let i=0;i<evidence.length;i++){
-      const e=identity(evidence[i]!,lexicalGenerationId),k=key(e);
+      const e=identity(evidence[i]!,lexicalGenerationId),k=apiDenseEntryKey(e);
       if(!wanted.delete(k))fail();
       entries.push({...e,vector:checkedVector(batch.vectors[i],space)});
     }
   }
   if(wanted.size)fail();
-  entries.sort((a,b)=>key(a)<key(b)?-1:key(a)>key(b)?1:0);
+  entries.sort((a,b)=>apiDenseEntryKey(a)<apiDenseEntryKey(b)?-1:apiDenseEntryKey(a)>apiDenseEntryKey(b)?1:0);
   const base={schemaVersion:2 as const,rootId,lexicalGenerationId,origin:config.origin,space,spaceId,entries};
   const generation={...base,generationId:digest(base)};
   validateApiDenseGeneration(generation,rootId);
