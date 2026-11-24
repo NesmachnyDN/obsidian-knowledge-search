@@ -17,6 +17,10 @@ The historical Obsidian Vault (~1.67 GB visible in Yandex Cloud console) uses **
 7. **Controlled migration, not wholesale replacement:** treat Yandex S3 as a **legacy source** and keep its backups intact. Gradually import selected approved files into the **new local Vault**, verify raw-byte hashes and source mapping, then synchronize to Cloud.ru. Never start two writers against the same active Vault or delete historical Yandex objects merely because a new bucket exists. Reconcile migrated subsets on intended devices and perform backup restore before disabling Yandex billing or access. Migration and decommission are separate owner-approved operations.
 8. **Privacy:** Vault files, filenames and embeddings can be confidential. Use private buckets, secure transport, least privilege and appropriate encryption. Require a specific policy/consent review for corporate materials and any client-side encryption before putting them in Cloud.ru; do not assume S3 storage or Remotely Save E2E meets every organizational security requirement.
 
+## Independent delivery and consistency boundary
+
+Source synchronization and optional OKS portable-cache publication are independent; either may arrive first, be incomplete, or diverge. A cache commit does not establish that the source bucket or any replica has the corresponding files. OKS treats the authorized local Vault as the source of truth and uses the authenticated content manifest and deferred local activation protocol in [ADR-0010](0010-portable-bge-m3-embedding-cache.md#cross-bucket-consistency-and-deferred-activation-maintainer-direction-2026-11-24). OKS neither reads nor writes the source bucket to validate imports, does not orchestrate the external sync client, and does not share its credentials. The external sync client's synthetic acceptance remains separate; before claiming portable reuse across synchronized replicas, OKS-06C must independently prove both delivery orders, missing/divergent content, recovery and zero stale evidence. Eventual convergence requires eventual delivery and reconciliation; neither bucket is a transactional peer of the other.
+
 ## Deployment
 
 ```text
