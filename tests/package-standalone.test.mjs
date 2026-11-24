@@ -1,6 +1,6 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFile, copyFile, link, mkdir, mkdtemp, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, copyFile, link, mkdir, mkdtemp, readdir, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createPackage, verifyPackage, assetNames } from '../scripts/standalone-package.mjs';
 
@@ -52,3 +52,23 @@ test('release is deterministic, minimal, self-verified and idempotent', async ()
   test('path outside ignored build directory is rejected', async () => {
     await assert.rejects(createPackage('/tmp/oks-should-never-be-created'), /PACKAGE_INVALID/);
   });
+
+test('CodeQL #7: packaged assets and attestation have owner-only permissions', async () => {
+  for (const name of assetNames) {
+    const metadata = await stat(join(validDir, name));
+    assert.equal(metadata.mode & 0o077, 0, name + ' permissions');
+  }
+  assert.equal((await stat(sidecar(validDir))).mode & 0o077, 0, 'attestation permissions');
+});
+
+test('CodeQL #5: symlinked attestation fails closed without following its target', () =>
+  altered(async dir => {
+    await unlink(sidecar(dir));
+    await symlink(sidecar(validDir), sidecar(dir));
+  }));
+
+test('CodeQL #5: hardlinked attestation fails closed', () =>
+  altered(async dir => {
+    await unlink(sidecar(dir));
+    await link(sidecar(validDir), sidecar(dir));
+  }));

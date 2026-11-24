@@ -75,25 +75,25 @@ export class BoundedVaultReader implements SourceProvider {
   }
   async read(relative: string): Promise<Uint8Array> {
     if (!validPath(relative)) throw new StandaloneError('SOURCE_REJECTED');
-    await this.rootCheck();
     const parts = relative.split('/');
-    let node = this.root;
-    for (const part of parts.slice(0, -1)) {
-      node = join(node, part);
-      const s = await lstat(node);
-      if (!s.isDirectory() || s.isSymbolicLink()) throw new StandaloneError('SOURCE_REJECTED');
-    }
-    const target = join(node, parts[parts.length - 1]!);
-    if (!target.startsWith(this.root + sep)) throw new StandaloneError('SOURCE_REJECTED');
-    const before = await lstat(target);
-    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1
-        || before.size > BOUNDS.fileBytes || before.size < 0) throw new StandaloneError('SOURCE_REJECTED');
-    const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    // Linux descriptor-anchored walk forbids redirecting an ancestor via symlink.
+    const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
+    let directory = await open(this.root, directoryFlags);
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
+      const rootInfo = await directory.stat();
+      if (!rootInfo.isDirectory() || rootInfo.dev !== this.device || rootInfo.ino !== this.inode)
+        throw new StandaloneError('VAULT_IDENTITY_CHANGED');
+      for (const part of parts.slice(0, -1)) {
+        const child = await open('/proc/self/fd/' + directory.fd + '/' + part, directoryFlags);
+        await directory.close();
+        directory = child;
+      }
+      handle = await open('/proc/self/fd/' + directory.fd + '/' + parts[parts.length - 1]!,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       const opened = await handle.stat();
-      if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== before.dev
-          || opened.ino !== before.ino || opened.size !== before.size)
-        throw new StandaloneError('SOURCE_CHANGED');
+      if (!opened.isFile() || opened.nlink !== 1 || opened.size > BOUNDS.fileBytes || opened.size < 0)
+        throw new StandaloneError('SOURCE_REJECTED');
       const bytes = Buffer.allocUnsafe(BOUNDS.fileBytes + 1);
       let count = 0;
       while (count < bytes.length) {
@@ -103,6 +103,7 @@ export class BoundedVaultReader implements SourceProvider {
       }
       if (count > BOUNDS.fileBytes) throw new StandaloneError('SOURCE_LIMIT');
       const after = await handle.stat();
+      const target = join(this.root, ...parts);
       const pathAfter = await lstat(target);
       await this.rootCheck();
       if (after.size !== count || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs
@@ -110,8 +111,14 @@ export class BoundedVaultReader implements SourceProvider {
           || pathAfter.ino !== opened.ino || pathAfter.dev !== opened.dev
           || pathAfter.isSymbolicLink()) throw new StandaloneError('SOURCE_CHANGED');
       return bytes.subarray(0, count);
+    } catch (cause) {
+      if (cause instanceof StandaloneError) throw cause;
+      // ENOTDIR/ELOOP from descriptor traversal is an explicit denied source,
+      // never an untyped filesystem error or a fallback to pathname reading.
+      throw new StandaloneError('SOURCE_REJECTED');
     } finally {
-      await handle.close();
+      await handle?.close();
+      await directory.close();
     }
   }
 }

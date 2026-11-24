@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync } from 'node:fs';
+import { constants, closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import { BOUNDS, StandaloneError, hash, validPath, type SourceVersion } from './contracts';
 
 export interface MarkdownParser {
@@ -37,14 +37,28 @@ export class WorkerMarkdownParser implements MarkdownParser {
   constructor(path: string, factory: (code: string) => WorkerPort = browserWorker) {
     // Read only the reviewed JS bundled beside the plugin; no model/runtime download.
     let code: string;
+    let descriptor: number | undefined;
     try {
-      const info = lstatSync(path);
-      if (!info.isFile() || info.isSymbolicLink() || info.size < 1 || info.size > 128 * 1024)
+      descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      const info = fstatSync(descriptor);
+      if (!info.isFile() || info.nlink !== 1 || info.size < 1 || info.size > 128 * 1024)
         throw new StandaloneError('PARSER_ASSET_INVALID');
-      code = readFileSync(path, { encoding: 'utf8', flag: 'r' });
-      if (Buffer.byteLength(code) > 128 * 1024 || !code)
+      const bytes = Buffer.alloc(info.size + 1);
+      let count = 0;
+      while (count < bytes.length) {
+        const n = readSync(descriptor, bytes, count, bytes.length - count, count);
+        if (!n) break;
+        count += n;
+      }
+      const after = fstatSync(descriptor);
+      if (count !== info.size || after.size !== info.size || after.dev !== info.dev
+          || after.ino !== info.ino || after.mtimeMs !== info.mtimeMs
+          || after.ctimeMs !== info.ctimeMs)
         throw new StandaloneError('PARSER_ASSET_INVALID');
+      code = bytes.subarray(0, count).toString('utf8');
+      if (!code) throw new StandaloneError('PARSER_ASSET_INVALID');
     } catch { throw new StandaloneError('PARSER_ASSET_INVALID'); }
+    finally { if (descriptor !== undefined) closeSync(descriptor); }
     this.port = factory(code);
     this.port.onMessage(value => this.receive(value));
     this.port.onError(() => this.fail('PARSER_FAILURE'));

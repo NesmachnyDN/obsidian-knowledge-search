@@ -3,10 +3,15 @@ import { StandaloneError } from './shared';
 // Browser Web Worker; this bundle must contain no Node import, no filesystem API,
 // no network call and no dynamically generated document code.
 const scope = self as unknown as {
-  onmessage: ((event: { data: unknown }) => void) | null;
+  location: { origin: string };
+  onmessage: ((event: MessageEvent<unknown>) => void) | null;
   postMessage(message: unknown): void;
 };
-scope.onmessage = ({ data }) => {
+scope.onmessage = event => {
+  // Dedicated-worker MessagePort messages have an empty origin and null source.
+  // Do not handle postMessage traffic from a foreign origin or source.
+  if (event.source !== null || (event.origin !== '' && event.origin !== scope.location.origin)) return;
+  const { data } = event;
   const message = data as Record<string, unknown> | null;
   const id = message && Number.isSafeInteger(message.id) ? message.id : null;
   try {

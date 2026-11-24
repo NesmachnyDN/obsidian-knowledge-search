@@ -1,6 +1,7 @@
 /** Deterministic, offline Standalone directory package. No release publishing. */
 import { createHash } from 'node:crypto';
 import { readFile, readdir, lstat, mkdir, open } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -33,26 +34,47 @@ async function checkDirectories(dir, createBuild = false) {
     assert(item?.isDirectory() && !item.isSymbolicLink(), 'linked/missing parent directory');
   }
 }
+// Descriptor-bound and size-limited verification avoids pathname TOCTOU.
+async function secureRead(path, maximum = 20 * 1024 * 1024) {
+  let handle;
+  try { handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+  catch { throw new Error('PACKAGE_INVALID: missing or unsafe file'); }
+  try {
+    const st = await handle.stat();
+    assert(st.isFile() && st.nlink === 1, 'linked or nonregular file');
+    assert(st.size > 0 && st.size <= maximum, 'empty/oversize file');
+    const bytes = Buffer.alloc(st.size + 1);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (!bytesRead) break;
+      offset += bytesRead;
+    }
+    const after = await handle.stat();
+    assert(offset === st.size && after.size === st.size && after.dev === st.dev
+      && after.ino === st.ino && after.mtimeMs === st.mtimeMs && after.ctimeMs === st.ctimeMs,
+    'file changed during verification');
+    return bytes.subarray(0, offset);
+  } finally { await handle.close(); }
+}
 async function records(dir) {
   const names = (await readdir(dir)).sort();
   assert(JSON.stringify(names) === JSON.stringify([...assetNames].sort()), 'missing or extra assets');
   const assets = {};
+  const contents = {};
   for (const filename of assetNames) {
-    const filepath = join(dir, filename);
-    const st = await lstat(filepath);
-    assert(st.isFile() && !st.isSymbolicLink() && st.nlink === 1, 'linked or nonregular file: ' + filename);
-    assert(st.size > 0 && st.size <= 20 * 1024 * 1024, 'empty/oversize file: ' + filename);
-    const bytes = await readFile(filepath);
+    const bytes = await secureRead(join(dir, filename));
+    contents[filename] = bytes;
     assets[filename] = { sha256: hash(bytes), bytes: bytes.length };
   }
   let manifest;
-  try { manifest = JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8')); }
+  try { manifest = JSON.parse(contents['manifest.json'].toString('utf8')); }
   catch { throw new Error('PACKAGE_INVALID: malformed manifest'); }
   assert(manifest?.id === 'oks-synthetic-evidence' && manifest.isDesktopOnly === true, 'plugin ID or desktop flag');
   assert(typeof manifest.name === 'string' && manifest.name.length > 0 &&
     /^\d+\.\d+\.\d+$/.test(manifest.version) &&
     /^\d+\.\d+\.\d+$/.test(manifest.minAppVersion), 'manifest version/name');
-  assert((await readFile(join(dir, 'main.js'), 'utf8')).includes('standalone-worker.js'),
+  assert(contents['main.js'].includes(Buffer.from('standalone-worker.js')),
     'main.js does not reference packaged worker');
   return { schemaVersion: 1, profile: 'standalone', pluginId: manifest.id,
     pluginVersion: manifest.version, assets };
@@ -62,16 +84,14 @@ export async function verifyPackage(dir = defaultPackageDir) {
   await checkDirectories(dir);
   const actual = await records(dir);
   const sidecar = attestationPath(dir);
-  const st = await lstat(sidecar);
-  assert(st.isFile() && !st.isSymbolicLink() && st.nlink === 1, 'linked/nonregular attestation');
   let expected;
-  try { expected = JSON.parse(await readFile(sidecar, 'utf8')); }
+  try { expected = JSON.parse((await secureRead(sidecar, 16 * 1024)).toString('utf8')); }
   catch { throw new Error('PACKAGE_INVALID: malformed attestation'); }
   assert(JSON.stringify(expected) === JSON.stringify(actual), 'asset bytes/hash/identity differ');
   return actual;
 }
 async function exclusive(path, bytes) {
-  const file = await open(path, 'wx', 0o644);
+  const file = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
 }
 export async function createPackage(dir = defaultPackageDir) {
@@ -87,7 +107,7 @@ export async function createPackage(dir = defaultPackageDir) {
     return current;
   }
   assert(!await info(attestationPath(dir)), 'unexpected existing attestation');
-  await mkdir(dir);
+  await mkdir(dir, { mode: 0o700 });
   for (const name of assetNames) await exclusive(join(dir, name), await readFile(join(sourceDir, name)));
   await exclusive(attestationPath(dir), JSON.stringify(expected, null, 2) + '\n');
   return verifyPackage(dir);

@@ -7,8 +7,8 @@ import type { WorkerPort } from '../../plugin/src/standalone/worker';
 export function syntheticNodeWorkerPort(source: string): WorkerPort {
   const bootstrap = [
     "const {parentPort}=require('node:worker_threads');",
-    "globalThis.self={onmessage:null,postMessage:(value)=>parentPort.postMessage(value)};",
-    "parentPort.on('message',(data)=>globalThis.self.onmessage({data}));",
+    "globalThis.self={location:{origin:''},onmessage:null,postMessage:(value)=>parentPort.postMessage(value)};",
+    "parentPort.on('message',(data)=>globalThis.self.onmessage({data,origin:'',source:null}));",
   ].join('\n') + '\n' + source;
   const thread = new Worker(bootstrap, { eval: true,
     resourceLimits: { maxOldGenerationSizeMb: 64, maxYoungGenerationSizeMb: 16 } });
