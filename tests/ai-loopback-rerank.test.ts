@@ -748,3 +748,78 @@ test('B-R2-ERR-01: late socket disconnect preserves elapsed timeout, not NETWORK
     });
   });
 });
+
+// Controller-level terminal reason must be stable at every observable boundary,
+// including the synchronous cancellation notification before the worker settles.
+for (const [role, action] of [
+  ['reranking','cancel'], ['generation','cancel'],
+  ['reranking','revoke'], ['reranking','replace'],
+] as const) for (const expired of [true,false]) {
+  test('B-R2-TERM-02: '+role+' '+action+' '+(expired?'after expiry':'before expiry'),async t=>{
+    let calls=0,reads=0,entered!:()=>void,release!:()=>void,stall=true;
+    const entry=new Promise<void>(r=>{entered=r;});
+    await fixture(async cfg=>{
+      let wall=Date.now(),mono=1000,boot=1000;
+      t.mock.method(Date,'now',()=>wall);
+      t.mock.method(performance,'now',()=>mono);
+      t.mock.method(os,'uptime',()=>boot);
+      const response:SearchResponse={protocolVersion:2,requestId:'ui',requestedMode:'lexical',
+        executedMode:'lexical',status:'ok',indexGenerationId:hash('generation'),hits:hits.slice(0,1),
+        capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0};
+      const port={config:()=>cfg,scopeId:()=>scopeId,verify:async()=>{
+        reads++;if(stall)await new Promise<void>(r=>{release=r;entered();});
+      }};
+      const c=new SearchController(async()=>{},undefined,undefined,port,port);
+      c.attach({search:async()=>response,status:()=>({status:'ready',generationId:hash('generation'),
+        sources:1,records:1,busy:false,error:null,maintenanceWarning:null}),
+        cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+      const prepare=()=>role==='reranking'?c.prepareRerank():c.prepareGeneration();
+      const confirm=(p:ReturnType<typeof prepare>)=>role==='reranking'
+        ?c.rerankConfirmed(p,'synthetic',token):c.generationConfirmed(p,'synthetic',token);
+      const cancel=()=>role==='reranking'?c.cancelRerank():c.cancelGeneration();
+      const other=role==='reranking'?'generation':'reranking';
+      const expected=expired?'TIMEOUT':'CANCELLED';
+      const observed:string[]=[];
+      let lifecycle=0;
+      try {
+        await c.search(uiRequest(input.query,1));installFixture(c,cfg);
+        const otherPreview=other==='generation'?c.prepareGeneration():c.prepareRerank();
+        const pending=confirm(prepare());await entry;
+        c.subscribe(()=>{lifecycle++;});
+        const unsubscribe=c.subscribeEvidence(()=>{
+          const status=c.evidenceOperationStatus(role);
+          if(status.error)observed.push(status.error);
+        });
+        if(expired)mono+=cfg.limits.timeoutMs+1;
+        if(action==='revoke')c.revokeRerankProfile();
+        else if(action==='replace')installFixture(c,cfg);
+        else cancel();
+        assert.deepEqual(c.evidenceOperationStatus(role),{phase:'failed',error:expected});
+        // No timer delivery or worker continuation is needed to publish the
+        // correct cause. Repeated cancellation must not change it.
+        if(!expired)mono+=cfg.limits.timeoutMs+1;
+        wall-=100;cancel();
+        assert.deepEqual(c.evidenceOperationStatus(role),{phase:'failed',error:expected});
+        await pending;release();await Promise.resolve();await Promise.resolve();
+        cancel();
+        assert.deepEqual(c.evidenceOperationStatus(role),{phase:'failed',error:expected});
+        assert.ok(observed.length>0);assert.ok(observed.every(x=>x===expected),JSON.stringify(observed));
+        assert.equal(calls,0);assert.equal(reads,1);assert.equal(lifecycle,0);
+        assert.equal(c.isEvidencePreviewCurrent(other,otherPreview.sequence),true);
+        assert.deepEqual(c.snapshot().response,response);
+        unsubscribe();
+        if(action==='revoke')installFixture(c,cfg);
+        // A distinct new preview can be cancelled; its reason is not inherited.
+        if(expired){prepare();cancel();assert.equal(c.evidenceOperationStatus(role).error,'CANCELLED');}
+        stall=false;await confirm(prepare());
+        assert.deepEqual(c.evidenceOperationStatus(role),{phase:'complete',error:null});
+        assert.equal(calls,1);assert.equal(reads,3);
+        assert.equal(c.isEvidencePreviewCurrent(other,otherPreview.sequence),true);
+        assert.deepEqual(c.snapshot().response,response);
+      } finally {c.dispose();t.mock.restoreAll();}
+    },(req,res)=>{calls++;requestBody(req,body=>reply(res,role==='reranking'
+      ?{model:body.model,results:[{index:0,relevance_score:1}]}
+      :{model:body.model,usage:{completion_tokens:4},choices:[{index:0,finish_reason:'stop',
+        message:{role:'assistant',content:JSON.stringify({claims:[{kind:'quotation',text:'REQ-42',citationIds:[0]}]})}}]}));});
+  });
+}

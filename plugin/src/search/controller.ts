@@ -5,7 +5,7 @@ import { pilotConfig } from '../ai/loopback-rerank';
 import { bindActiveDeadline, remainingOperationMs, deadlineFailure } from '../ai/active-deadline';
 import { RerankRuntimeProfiles, type RerankAdmission } from '../ai/rerank-profile';
 import { configDigest } from '../ai/disclosure';
-import { ProviderFailure, type ProviderConfig, type ProviderPreference, type ProviderFailureCode, type AiOperationStatus } from '../ai/contracts';
+import { ProviderFailure, type ProviderConfig, type ProviderPreference, type ProviderFailureCode, type AiOperationStatus, type CallContext } from '../ai/contracts';
 import { hash, isDigest } from '../standalone/contracts';
 import type { AdvancedHealth } from '../advanced/health';
 import type { IngestionStatus } from '../advanced/manager';
@@ -52,6 +52,7 @@ type EvidenceRole = 'reranking' | 'generation';
 export const EVIDENCE_PREVIEW_TTL_MS = 300_000;
 export type RerankPreview = { role: EvidenceRole; sequence: number; revision: number; expiresUnixMs: number; config: ProviderConfig; scopeId: string; query: string; hits: EvidenceHit[]; runtimeProfileBinding?: string; runtimeProfileDigest?: string };
 // Internal elapsed-time deadlines are never taken from the returned preview.
+type ActiveEvidenceOperation = { abort: AbortController; context: CallContext; revision: number };
 type PendingEvidencePreview = { preview: RerankPreview; monotonicStartedMs: number; bootStartedSeconds: number };
 export type RerankState = { phase: 'running' | 'results' | 'error'; error: ProviderFailureCode | null; hits: readonly RerankedHit[] };
 export type RerankPort = {
@@ -70,7 +71,7 @@ export class SearchController {
   private sequence = 0;
   private prepared: Partial<Record<EvidenceRole,PendingEvidencePreview>> = {};
   private previewTimers: Partial<Record<EvidenceRole,ReturnType<typeof setTimeout>>> = {};
-  private aborts: Partial<Record<EvidenceRole,AbortController>> = {};
+  private activeEvidence: Partial<Record<EvidenceRole,ActiveEvidenceOperation>> = {};
   private readonly generator = new EvidenceGenerator();
   private readonly reranker = new EvidenceReranker();
   private readonly rerankProfiles = new RerankRuntimeProfiles(()=>this.invalidateRerankProfile());
@@ -181,7 +182,7 @@ export class SearchController {
   prepareRerank(): RerankPreview {
     try { return this.prepareEvidence('reranking'); }
     catch (error) {
-      if (!this.disposed && !this.aborts.reranking && error instanceof ProviderFailure
+      if (!this.disposed && !this.activeEvidence.reranking && error instanceof ProviderFailure
         && error.code === 'NOT_READY' && this.rerankPort?.config().state === 'configured') {
         this.state = {...this.state,rerank:{phase:'error',
           error:error.code,hits:[]}};
@@ -194,12 +195,7 @@ export class SearchController {
   /** Settings changes revoke admission itself, not just pending consent. */
   revokeRerankProfile(): void { this.rerankProfiles.revoke(); }
   private invalidateRerankProfile(): void {
-    const affected = !!this.prepared.reranking || !!this.aborts.reranking || !!this.state.rerank;
-    this.revokeEvidence('reranking');
-    if (affected) {
-      this.state = {...this.state,rerank:{phase:'error',error:'CANCELLED',hits:[]}};
-      this.notifyExpiry();
-    }
+    if (this.cancelEvidenceState('reranking')) this.notifyExpiry();
   }
   private currentRerankAdmission(config: ProviderConfig, scopeId: string): RerankAdmission {
     return this.rerankProfiles.current(config,scopeId);
@@ -259,7 +255,7 @@ export class SearchController {
     if (pref.state !== 'configured') throw new ProviderFailure('CONFIG_INVALID');
     const config = pilotConfig(pref);
     const scopeId = port?.scopeId(), response = this.state.response;
-    if (this.disposed || !this.enabled || this.paused || this.aborts[role] || !isDigest(scopeId)
+    if (this.disposed || !this.enabled || this.paused || this.activeEvidence[role] || !isDigest(scopeId)
       || !this.lastQuery.trim() || !response || response.status !== 'ok'
       || response.executedMode !== 'lexical' || !response.hits.length
       || this.engine?.status().generationId !== response.indexGenerationId)
@@ -284,17 +280,27 @@ export class SearchController {
   private revokeEvidence(role?: EvidenceRole): void {
     for (const r of role ? [role] : ['reranking','generation'] as const) {
       this.clearPreview(r);
-      this.aborts[r]?.abort();
+      this.activeEvidence[r]?.abort.abort();
     }
   }
-  private cancelEvidence(role: EvidenceRole): void {
+  // Role-local revocation and explicit cancellation use the same deadline
+  // authority as the worker. A new pending preview is a distinct operation.
+  private cancelEvidenceState(role: EvidenceRole): boolean {
     const hadPreview = !!this.prepared[role];
+    const active = this.activeEvidence[role];
     this.revokeEvidence(role);
     const key = role === 'reranking' ? 'rerank' : 'generation';
-    if (hadPreview || this.state[key]) {
-      this.state = {...this.state,[key]:{phase:'error',error:'CANCELLED',hits:[]}};
-      this.emitEvidence();
-    }
+    const previous = this.state[key];
+    const current = active?.revision === this.revision ? active : undefined;
+    if (!hadPreview && !previous && !current) return false;
+    const error = current
+      ? deadlineFailure(current.context)?.code ?? 'CANCELLED'
+      : !hadPreview && previous?.error === 'TIMEOUT' ? 'TIMEOUT' : 'CANCELLED';
+    this.state = {...this.state,[key]:{phase:'error',error,hits:[]}};
+    return true;
+  }
+  private cancelEvidence(role: EvidenceRole): void {
+    if (this.cancelEvidenceState(role)) this.emitEvidence();
   }
   cancelRerank(): void { this.cancelEvidence('reranking'); }
   cancelGeneration(): void { this.cancelEvidence('generation'); }
@@ -309,7 +315,7 @@ export class SearchController {
     if (!approved) throw new ProviderFailure('DISCLOSURE_DENIED');
     this.clearPreview(role);
     const port = this.port(role);
-    if (!port || this.aborts[role] || !['synthetic','public'].includes(classification)
+    if (!port || this.activeEvidence[role] || !['synthetic','public'].includes(classification)
       || role === 'reranking' && classification !== 'synthetic'
       || JSON.stringify(approved) !== JSON.stringify(preview)) { this.emitEvidence(); throw new ProviderFailure('DISCLOSURE_DENIED'); }
     const current = (): boolean => {
@@ -327,9 +333,11 @@ export class SearchController {
     const key = role === 'reranking' ? 'rerank' : 'generation';
     const context = bindActiveDeadline({signal:abort.signal,deadlineUnixMs:Date.now()+approved.config.limits.timeoutMs},approved.config.limits.timeoutMs);
     const {deadlineUnixMs} = context;
-    this.aborts[role] = abort;
-    this.state = {...this.state,[key]:{phase:'running',error:null,hits:[]}}; this.emitEvidence();
+    const operation = {abort,context,revision:approved.revision};
+    this.activeEvidence[role] = operation;
+    this.state = {...this.state,[key]:{phase:'running',error:null,hits:[]}};
     try {
+      this.emitEvidence();
       const worker = role === 'reranking' ? this.reranker : this.generator;
       const hits = await worker.run({
         config:approved.config,scopeId:approved.scopeId,query:{text:approved.query,classification},
@@ -345,16 +353,20 @@ export class SearchController {
         remainingOperationMs(context);
         if (!valid) throw new ProviderFailure('CANCELLED');
         if (this.revision !== approved.revision || this.disposed) return;
+        // Retire the operation before notifying listeners: a reentrant cancel
+        // now concerns a completed result, not a still-running deadline.
+        delete this.activeEvidence[role];
         this.state = {...this.state,[key]:{phase:'results',error:null,hits}};
         this.emitEvidence();
       }
     } catch (error) {
       error = deadlineFailure(context) ?? error;
-      if (this.revision === approved.revision && !this.disposed) {
+      if (this.activeEvidence[role] === operation && this.revision === approved.revision && !this.disposed) {
+        delete this.activeEvidence[role];
         this.state = {...this.state,[key]:{phase:'error',error:error instanceof ProviderFailure?error.code:'NOT_READY',hits:[]}};
         this.emitEvidence();
       }
-    } finally { if (this.aborts[role] === abort) delete this.aborts[role]; }
+    } finally { if (this.activeEvidence[role] === operation) delete this.activeEvidence[role]; }
   }
   async open(index: number, expected?: EvidenceHit): Promise<ApiResult<null>> {
     const hit = this.state.response?.hits[index];
