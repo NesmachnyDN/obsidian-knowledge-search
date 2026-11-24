@@ -11,7 +11,6 @@ export function bindActiveDeadline(context: CallContext, maxMs: number,
   grantExpiresUnixMs = context.deadlineUnixMs): CallContext {
   if (!Number.isSafeInteger(context.deadlineUnixMs) || !Number.isSafeInteger(maxMs)
     || maxMs <= 0 || !Number.isSafeInteger(grantExpiresUnixMs)) throw new ProviderFailure('CONFIG_INVALID');
-  if (context.signal.aborted) throw new ProviderFailure('CANCELLED');
   const existing = budgets.get(context);
   if (existing) {
     if (context.deadlineUnixMs > grantExpiresUnixMs || existing.limitMs > maxMs)
@@ -19,6 +18,7 @@ export function bindActiveDeadline(context: CallContext, maxMs: number,
     existing.remaining();
     return context;
   }
+  if (context.signal.aborted) throw new ProviderFailure('CANCELLED');
   const wall = Date.now(), monotonic = performance.now(), boot = os.uptime();
   const deadlineUnixMs = Math.min(context.deadlineUnixMs, grantExpiresUnixMs, wall + maxMs);
   if (!Number.isSafeInteger(wall) || !Number.isSafeInteger(deadlineUnixMs)
@@ -26,12 +26,12 @@ export function bindActiveDeadline(context: CallContext, maxMs: number,
   const limitMs = deadlineUnixMs - wall;
   if (limitMs <= 0) return timeout();
   const bound = Object.freeze({ signal:context.signal, deadlineUnixMs });
-  let expired = false, observedWall = wall, observedElapsed = 0, observedUptime = 0;
-  const expire = (): void => { expired = true; };
-  budgets.set(bound, {
+  let terminal: 'TIMEOUT' | 'CANCELLED' | undefined, observedWall = wall, observedElapsed = 0, observedUptime = 0;
+  const expire = (): void => { terminal ??= 'TIMEOUT'; };
+  const budget: Budget = {
     limitMs, expire,
     remaining(): number {
-      if (expired) return timeout();
+      if (terminal) throw new ProviderFailure(terminal);
       try {
         const now = Date.now(), elapsed = performance.now() - monotonic, uptime = os.uptime() - boot;
         if (Number.isSafeInteger(now) && Number.isFinite(elapsed) && elapsed >= observedElapsed
@@ -39,22 +39,42 @@ export function bindActiveDeadline(context: CallContext, maxMs: number,
           observedWall = Math.max(observedWall, now);
           observedElapsed = elapsed; observedUptime = uptime;
           const left = Math.min(deadlineUnixMs - observedWall, limitMs - elapsed, limitMs - uptime * 1000);
-          if (left > 0) return Math.max(1, Math.ceil(left));
+          if (left > 0) {
+            if (!bound.signal.aborted) return Math.max(1, Math.ceil(left));
+            terminal = 'CANCELLED';
+          }
         }
       } catch { /* unavailable clocks cannot authorize an active operation */ }
-      expire(); return timeout();
+      expire(); throw new ProviderFailure(terminal!);
     },
-  });
+  };
+  budgets.set(bound, budget);
+  // Observe cancellation at dispatch, not at a later async continuation.
+  // No strong reference from the signal back to the context is retained after abort.
+  const ref = new WeakRef(budget);
+  bound.signal.addEventListener('abort', () => {
+    try { ref.deref()?.remaining(); } catch { /* terminal reason recorded */ }
+  }, { once: true });
   return bound;
 }
 
 // Legacy callers without an evidence budget keep their existing wall-clock contract.
 export function remainingOperationMs(context: CallContext): number {
-  if (context.signal.aborted) throw new ProviderFailure('CANCELLED');
   const budget = budgets.get(context);
   if (budget) return budget.remaining();
+  if (context.signal.aborted) throw new ProviderFailure('CANCELLED');
   const remaining = context.deadlineUnixMs - Date.now();
   if (!Number.isFinite(remaining) || remaining <= 0) return timeout();
   return remaining;
 }
 export function expireActiveDeadline(context: CallContext): void { budgets.get(context)?.expire(); }
+
+/** Preserve legacy embedding error semantics; evidence operations share terminal authority. */
+export function deadlineFailure(context: CallContext, fallback?: ProviderFailure): ProviderFailure | undefined {
+  if (!budgets.has(context)) return fallback;
+  try { remainingOperationMs(context); } catch (error) {
+    if (error instanceof ProviderFailure) return error;
+    throw error;
+  }
+  return fallback;
+}

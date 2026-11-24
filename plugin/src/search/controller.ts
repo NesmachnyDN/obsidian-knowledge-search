@@ -2,7 +2,7 @@ import os from 'node:os';
 import { EvidenceGenerator, type GeneratedEvidenceClaim } from '../ai/generation-evidence';
 import { EvidenceReranker, type RerankedHit } from '../ai/rerank-evidence';
 import { pilotConfig } from '../ai/loopback-rerank';
-import { bindActiveDeadline, remainingOperationMs } from '../ai/active-deadline';
+import { bindActiveDeadline, remainingOperationMs, deadlineFailure } from '../ai/active-deadline';
 import { RerankRuntimeProfiles, type RerankAdmission } from '../ai/rerank-profile';
 import { configDigest } from '../ai/disclosure';
 import { ProviderFailure, type ProviderConfig, type ProviderPreference, type ProviderFailureCode, type AiOperationStatus } from '../ai/contracts';
@@ -341,13 +341,15 @@ export class SearchController {
             sourceSha256:hit.sourceSha256,excerptDigest:hash(hit.originalExcerpt),classification}))},
       },token,context,hit=>port.verify(hit),current,admission);
       if (this.revision === approved.revision && !this.disposed) {
-        if (!current() || abort.signal.aborted) throw new ProviderFailure('CANCELLED');
+        const valid = current();
         remainingOperationMs(context);
+        if (!valid) throw new ProviderFailure('CANCELLED');
         if (this.revision !== approved.revision || this.disposed) return;
         this.state = {...this.state,[key]:{phase:'results',error:null,hits}};
         this.emitEvidence();
       }
     } catch (error) {
+      error = deadlineFailure(context) ?? error;
       if (this.revision === approved.revision && !this.disposed) {
         this.state = {...this.state,[key]:{phase:'error',error:error instanceof ProviderFailure?error.code:'NOT_READY',hits:[]}};
         this.emitEvidence();

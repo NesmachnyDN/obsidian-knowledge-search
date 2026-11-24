@@ -7,7 +7,7 @@ import { LoopbackRerankTransport, servedAlias } from '../plugin/src/ai/loopback-
 import { EvidenceReranker, type RerankApproval } from '../plugin/src/ai/rerank-evidence';
 import { RerankRuntimeProfiles, type RerankAdmission, syntheticRuntimeProfile, parseRerankRuntimeProfile,
   rerankProfileDigest, assertRerankAdmission, FIXTURE_PROFILE_TTL_MS } from '../plugin/src/ai/rerank-profile';
-import { bindActiveDeadline, remainingOperationMs } from '../plugin/src/ai/active-deadline';
+import { bindActiveDeadline, remainingOperationMs, expireActiveDeadline } from '../plugin/src/ai/active-deadline';
 import { ProviderFailure, type ProviderConfig } from '../plugin/src/ai/contracts';
 import { configDigest } from '../plugin/src/ai/disclosure';
 import { hash, type EvidenceHit } from '../plugin/src/standalone/contracts';
@@ -704,4 +704,47 @@ test('B-R2-DEADLINE-01: response after elapsed deadline cannot succeed even with
     // The response callback runs before the real timer. Elapsed time, not timer delivery, is authoritative.
     mono+=500;wall-=100;reply(res,good(body.model));
   });});
+});
+
+test('B-R2-TERM-01: observed monotonic expiry survives later abort and time rollback',t=>{
+  let wall=100_000,mono=3000,boot=900;
+  t.mock.method(Date,'now',()=>wall);
+  t.mock.method(performance,'now',()=>mono);
+  t.mock.method(os,'uptime',()=>boot);
+  try {
+    const abort=new AbortController();
+    const active=bindActiveDeadline({signal:abort.signal,deadlineUnixMs:wall+10_000},1000);
+    mono+=1000;
+    assert.throws(()=>remainingOperationMs(active),{message:'TIMEOUT'});
+    abort.abort();wall-=5000;mono-=1000;
+    assert.throws(()=>remainingOperationMs(active),{message:'TIMEOUT'});
+    const secondAbort=new AbortController();
+    const second=bindActiveDeadline({signal:secondAbort.signal,deadlineUnixMs:wall+5000},1000);
+    expireActiveDeadline(second);
+    secondAbort.abort();
+    assert.throws(()=>remainingOperationMs(second),{message:'TIMEOUT'});
+    const thirdAbort=new AbortController();
+    const third=bindActiveDeadline({signal:thirdAbort.signal,deadlineUnixMs:wall+5000},1000);
+    thirdAbort.abort();boot+=2;
+    assert.throws(()=>remainingOperationMs(third),{message:'CANCELLED'});
+  } finally {t.mock.restoreAll();}
+});
+
+test('B-R2-ERR-01: late socket disconnect preserves elapsed timeout, not NETWORK',async t=>{
+  let wall=Date.now(),mono=performance.now(),boot=os.uptime(),calls=0;
+  await fixture(async cfg=>{
+    t.mock.method(Date,'now',()=>wall);
+    t.mock.method(performance,'now',()=>mono);
+    t.mock.method(os,'uptime',()=>boot);
+    try {
+      await assert.rejects(transportFixture(new LoopbackRerankTransport(),cfg,input,token,
+        {signal:new AbortController().signal,deadlineUnixMs:wall+cfg.limits.timeoutMs}),{message:'TIMEOUT'});
+      assert.equal(calls,1);
+    } finally {t.mock.restoreAll();}
+  },(req,_res)=>{
+    calls++;req.resume();req.on('end',()=>{
+      mono+=3000;wall+=3000;
+      req.socket.destroy();
+    });
+  });
 });

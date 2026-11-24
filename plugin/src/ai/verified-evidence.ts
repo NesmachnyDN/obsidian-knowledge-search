@@ -2,7 +2,7 @@ import { type EvidenceHit } from '../standalone/contracts';
 import { ProviderFailure, type ProviderConfig, type CallContext } from './contracts';
 import { projectDisclosure, type Classification, type DisclosureGrant } from './disclosure';
 import { pilotConfig } from './loopback-json';
-import { bindActiveDeadline, remainingOperationMs, expireActiveDeadline } from './active-deadline';
+import { bindActiveDeadline, remainingOperationMs, expireActiveDeadline, deadlineFailure } from './active-deadline';
 
 export type ClassifiedHit = { hit: EvidenceHit; classification: Classification };
 export type EvidenceApproval = {
@@ -19,7 +19,6 @@ export class VerifiedEvidenceOperation {
   private pendingVerification = 0;
   private verifyBounded(hit: EvidenceHit, verify: (hit: EvidenceHit) => Promise<void>,
     context: CallContext, check: () => void): Promise<void> {
-    if (context.signal.aborted) return Promise.reject(new ProviderFailure('CANCELLED'));
     const remaining = remainingOperationMs(context);
     if (this.pendingVerification >= 2) return Promise.reject(new ProviderFailure('QUOTA_EXCEEDED'));
     this.pendingVerification++;
@@ -28,7 +27,8 @@ export class VerifiedEvidenceOperation {
       const finish=(error?:ProviderFailure):void=>{
         if(settled)return;
         settled=true;clearTimeout(timer);context.signal.removeEventListener('abort',cancel);
-        if(error)reject(error);else resolve();
+        const failure=deadlineFailure(context,error);
+        if(failure)reject(failure);else resolve();
       };
       const cancel=()=>finish(new ProviderFailure('CANCELLED'));
       const timer=setTimeout(()=>{expireActiveDeadline(context);finish(new ProviderFailure('TIMEOUT'));},remaining);
@@ -59,8 +59,10 @@ export class VerifiedEvidenceOperation {
       ? {signal:context.signal,deadlineUnixMs:Math.min(context.deadlineUnixMs,Date.now()+config.limits.timeoutMs)}
       : bindActiveDeadline(context,config.limits.timeoutMs,snapshot.grant?.expiresUnixMs);
     const check = (): void => {
-      if (context.signal.aborted || !current()) throw new ProviderFailure('CANCELLED');
       remainingOperationMs(context);
+      const valid = current();
+      remainingOperationMs(context);
+      if (!valid) throw new ProviderFailure('CANCELLED');
     };
     const verifyAll = async (): Promise<void> => {
       for (const { hit } of snapshot.candidates) {
@@ -79,6 +81,8 @@ export class VerifiedEvidenceOperation {
       const result = await invoke(config, projection(), context);
       check(); projection(); await verifyAll(); check(); projection(); remainingOperationMs(context);
       return {result, evidence:snapshot.candidates.map(c=>c.hit)};
+    } catch (error) {
+      throw deadlineFailure(context) ?? error;
     } finally { this.busy = false; }
   }
 }

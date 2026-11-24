@@ -26,8 +26,9 @@ export class EvidenceReranker {
     };
     const {result,evidence} = await this.operation.run('reranking', approval, context, verify, stillCurrent,
       (config,input,call)=>this.transport.rerank(config,input,token,call,admission));
-    if (!stillCurrent() || context.signal.aborted) throw new ProviderFailure('CANCELLED');
+    const valid = stillCurrent();
     remainingOperationMs(context);
+    if (!valid) throw new ProviderFailure('CANCELLED');
     return result.map((row,i)=>({evidence:evidence[row.id]!,rerankRank:i+1,rerankScore:row.score}));
   }
 }

@@ -16,8 +16,9 @@ export class EvidenceGenerator {
     context=bindActiveDeadline(context,pilotConfig(approval.config).limits.timeoutMs,approval.grant?.expiresUnixMs);
     const {result,evidence}=await this.operation.run('generation',approval,context,verify,current,
       (config,input,call)=>this.transport.generate(config,input,token,call));
-    if (!current() || context.signal.aborted) throw new ProviderFailure('CANCELLED');
+    const valid = current();
     remainingOperationMs(context);
+    if (!valid) throw new ProviderFailure('CANCELLED');
     return result.map(claim=>({kind:claim.kind,text:claim.text,citations:claim.citationIds.map(id=>evidence[id]!)}));
   }
 }

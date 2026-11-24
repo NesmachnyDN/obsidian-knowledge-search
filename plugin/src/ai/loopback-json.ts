@@ -1,5 +1,5 @@
 import { Agent, request, type ClientRequest } from 'node:http';
-import { remainingOperationMs, expireActiveDeadline } from './active-deadline';
+import { remainingOperationMs, expireActiveDeadline, deadlineFailure } from './active-deadline';
 import { parsePreference } from './config';
 import { ProviderFailure, type CallContext, type ProviderConfig, type AuthorizedCandidates } from './contracts';
 
@@ -50,7 +50,7 @@ export class LoopbackJsonTransport {
     context: CallContext): Promise<unknown> {
     const config = pilotConfig(value);
     if (!['/v1/rerank','/v1/chat/completions','/v1/embeddings'].includes(path)) return fail('ENDPOINT_DENIED');
-    if (context.signal.aborted) return fail('CANCELLED');
+    if (context.signal.aborted) remainingOperationMs(context);
     if (!Number.isSafeInteger(context.deadlineUnixMs)) return fail('CONFIG_INVALID');
     if (typeof token !== 'string' || !/^[A-Za-z0-9._~+\/=-]{1,512}$/.test(token)) return fail('UNAUTHENTICATED');
     if (this.busy) return fail('QUOTA_EXCEEDED');
@@ -73,7 +73,8 @@ export class LoopbackJsonTransport {
         settled = true;
         clearTimeout(timer); signal.removeEventListener('abort', cancel);
         req?.destroy(); agent.destroy();
-        if (error) reject(error); else resolve(result);
+        const failure = deadlineFailure(context,error ?? undefined);
+        if (failure) reject(failure); else resolve(result);
       };
       const cancel = (): void => finish(new ProviderFailure('CANCELLED'));
       const timer = setTimeout(() => { expireActiveDeadline(context); finish(new ProviderFailure('TIMEOUT')); }, timeout);
