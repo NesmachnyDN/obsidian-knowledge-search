@@ -23,10 +23,23 @@ if [[ -n "${OKS_STANDALONE_PACKAGE_DIR:-}" ]]; then
   node "$repo/scripts/standalone-package.mjs" verify "$package_dir" >/dev/null ||
     { echo "HOST_SMOKE_FAILURE: package verification failed" >&2; exit 1; }
 fi
+previous_package_dir="${OKS_STANDALONE_PREVIOUS_PACKAGE_DIR:-}"
+install_dir="$package_dir"
+if [[ -n "$previous_package_dir" ]]; then
+  [[ -n "${OKS_STANDALONE_PACKAGE_DIR:-}" && "${OKS_HOST_NO_ROUTE:-0}" == 1 &&
+     "${OKS_AI_RERANK_TEST:-0}" == 0 && "${OKS_ADVANCED_HEALTH_TEST:-0}" == 0 &&
+     "${OKS_ADVANCED_INGESTION_TEST:-0}" == 0 && "${OKS_ADVANCED_RETRIEVAL_TEST:-0}" == 0 ]] ||
+    { echo "HOST_SMOKE_FAILURE: transition requires verified packages and isolated basic-only mode" >&2; exit 2; }
+  node "$repo/scripts/standalone-package.mjs" verify "$previous_package_dir" >/dev/null
+  if cmp -s "$previous_package_dir/main.js" "$package_dir/main.js"; then
+    echo "HOST_SMOKE_FAILURE: transition requires distinct bundles" >&2; exit 2
+  fi
+  install_dir="$previous_package_dir"
+fi
 for asset in main.js manifest.json standalone-worker.js; do
-  test -f "$package_dir/$asset" ||
+  test -f "$install_dir/$asset" ||
     { echo "HOST_SMOKE_FAILURE: required package asset missing: $asset" >&2; exit 1; }
-  cp "$package_dir/$asset" "$tmp/vault/.obsidian/plugins/oks-synthetic-evidence/"
+  cp "$install_dir/$asset" "$tmp/vault/.obsidian/plugins/oks-synthetic-evidence/"
 done
 printf '%s\n' '["oks-synthetic-evidence"]' > "$tmp/vault/.obsidian/community-plugins.json"
 printf '%s\n' '{"safeMode":false}' > "$tmp/vault/.obsidian/app.json"
@@ -45,7 +58,7 @@ if [[ "${OKS_ADVANCED_HEALTH_TEST:-0}" == 1 ]]; then
   export OKS_ADVANCED_PYTHON="/usr/bin/python3.12"
   export OKS_ADVANCED_ENTRY="$repo/engine/persistent.py"
 fi
-export tmp app cli repo
+export tmp app cli repo package_dir previous_package_dir
 python3 - <<'PY'
 import json,os,time
 root=os.environ['tmp']
@@ -54,7 +67,7 @@ for target in [os.environ['XDG_CONFIG_HOME']+'/obsidian/obsidian.json',root+'/el
  with open(target,'w',encoding='utf-8') as stream: json.dump(settings,stream)
 PY
 fixture_sha="$(sha256sum "$tmp/vault/second.md" | cut -d' ' -f1)"
-first_sha="$(sha256sum "$tmp/vault/first.md" | cut -d' ' -f1)"; export first_sha
+first_sha="$(sha256sum "$tmp/vault/first.md" | cut -d' ' -f1)"; export first_sha fixture_sha
 assert_contains() {
   local got="$1" expected="$2"
   if [[ "$got" != *"$expected"* ]]; then
@@ -114,6 +127,37 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
   initial="$(timeout 8s "$cli" eval "code=JSON.stringify({plugin:!!app.plugins.plugins[\"oks-synthetic-evidence\"],status:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standalone?.status(),error:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standaloneError})")"
   [[ "$initial" == *"\"status\":\"ready\""* && "$initial" == *"\"sources\":2"* ]] ||
     { printf "HOST_SMOKE_FAILURE: native plugin not indexed; result=%s\n" "$initial" >&2; exit 1; }
+  if [[ -n "$previous_package_dir" ]]; then
+    # Test only the disposable profile: D7 -> D8 -> D7 -> D8.
+    transition_state() {
+      timeout 8s "$cli" eval "code=(async()=>{const p=app.plugins.plugins[\"oks-synthetic-evidence\"];await p.standalone.whenIdle();const r=await p.standalone.search({protocolVersion:2,requestId:\"transition\",query:\"REQ-OKS-SMOKE\",requestedMode:\"lexical\",limit:5});return JSON.stringify({ready:p.standalone.status().status===\"ready\",generation:p.standalone.status().generationId,denseApi:!!p.denseApi,oldWorkerStopped:globalThis.__oksTransitionParser?.stopped===true,basic:r.status===\"ok\"&&r.hits.length===1&&r.hits[0].sourceSha256===\"$first_sha\",disabled:Object.values(p.settings.ai).every(x=>x.state===\"disabled\")&&!p.settings.ingestion.enabled})})()"
+    }
+    old_state="$(transition_state)"
+    generation="$(printf "%s" "$old_state" | grep -oE "[0-9a-f]{64}" | head -1)"
+    test -n "$generation"
+    [[ "$old_state" == *"\"denseApi\":false"* && "$old_state" == *"\"basic\":true"* && "$old_state" == *"\"disabled\":true"* ]]
+    transition() {
+      local dir="$1" expected="$2" state asset
+      timeout 8s "$cli" eval "code=(globalThis.__oksTransitionParser=app.plugins.plugins[\"oks-synthetic-evidence\"].standalone.parser,true)" >/dev/null
+      for asset in main.js manifest.json standalone-worker.js; do
+        cp "$dir/$asset" "$tmp/vault/.obsidian/plugins/oks-synthetic-evidence/$asset"
+        cmp -s "$dir/$asset" "$tmp/vault/.obsidian/plugins/oks-synthetic-evidence/$asset"
+      done
+      timeout 8s "$cli" plugin:reload id=oks-synthetic-evidence >/dev/null
+      sleep 3
+      state="$(transition_state)"
+      [[ "$state" == *"\"denseApi\":$expected"* && "$state" == *"\"ready\":true"* &&
+         "$state" == *"\"oldWorkerStopped\":true"* && "$state" == *"\"basic\":true"* &&
+         "$state" == *"\"disabled\":true"* && "$state" == *"\"generation\":\"$generation\""* ]] ||
+        { echo "HOST_SMOKE_FAILURE: package transition ($state)" >&2; exit 1; }
+      test "$(sha256sum "$tmp/vault/first.md" | cut -d" " -f1)" = "$first_sha"
+      test "$(sha256sum "$tmp/vault/second.md" | cut -d" " -f1)" = "$fixture_sha"
+    }
+    transition "$package_dir" true
+    transition "$previous_package_dir" false
+    transition "$package_dir" true
+    echo "OBSIDIAN_PACKAGE_TRANSITION_PASS: update rollback re-update; generation, original hashes, basic search, default-off AI and prior-worker shutdown verified"
+  fi
   searched="$(timeout 8s "$cli" eval "code=(async()=>{const p=app.plugins.plugins[\"oks-synthetic-evidence\"];const r=await p.standalone.search({protocolVersion:2,requestId:\"host\",query:\"REQ-OKS-SMOKE\",requestedMode:\"lexical\",limit:5});return JSON.stringify({status:r.status,hits:r.hits.length,line:r.hits[0]?.sourceLocators[0]?.lineStart,byteStart:r.hits[0]?.sourceLocators[0]?.byteStart,sha:r.hits[0]?.sourceSha256,excerpt:r.hits[0]?.originalExcerpt})})()")"
   [[ "$searched" == *"\"status\":\"ok\""* && "$searched" == *"\"hits\":1"* &&
      "$searched" == *"\"line\":2"* && "$searched" == *"\"sha\":\"$first_sha\""* &&
