@@ -1,0 +1,120 @@
+{"id":"aster-1","group":"aster","split":"tuning","query":"REQ-AST-101"}
+{"id":"aster-2","group":"aster","split":"tuning","query":"Как Aster gateway удостоверяет клиента в действующем решении?"}
+{"id":"aster-3","group":"aster","split":"tuning","query":"Which Aster network rule prevents direct access to a service?"}
+{"id":"aster-4","group":"aster","split":"tuning","query":"Aster mTLS сколько длится перекрытие при ротации сертификатов?"}
+{"id":"aster-5","group":"aster","split":"tuning","query":"Aster gateway verified identity","predicates":[{"key":"critical","valueType":"boolean","value":true,"operator":"eq"}]}
+{"id":"aster-6","group":"aster","split":"tuning","query":"REQ-AST-9999"}
+{"id":"birch-1","group":"birch","split":"tuning","query":"REQ-BIR-102"}
+{"id":"birch-2","group":"birch","split":"tuning","query":"Как согласовать запись заказа и отправку события Birch?"}
+{"id":"birch-3","group":"birch","split":"tuning","query":"Birch consumer duplicate event protection"}
+{"id":"birch-4","group":"birch","split":"tuning","query":"Birch outbox retention сколько хранится?"}
+{"id":"birch-5","group":"birch","split":"tuning","query":"Birch transactional outbox","predicates":[{"key":"revision","valueType":"number","value":2,"operator":"eq"},{"key":"domain","valueType":"string","value":"birch","operator":"eq"}]}
+{"id":"birch-6","group":"birch","split":"tuning","query":"Birch event bus: сколько физических partitions настроено в broker?"}
+{"id":"cobalt-1","group":"cobalt","split":"tuning","query":"REQ-COB-103"}
+{"id":"cobalt-2","group":"cobalt","split":"tuning","query":"Как Cobalt перемещает объекты между классами без смены ключа?"}
+{"id":"cobalt-3","group":"cobalt","split":"tuning","query":"Cobalt delete marker previous version retention rule"}
+{"id":"cobalt-4","group":"cobalt","split":"tuning","query":"Cobalt cold tier срок перехода"}
+{"id":"cobalt-5","group":"cobalt","split":"tuning","query":"Cobalt класс хранения стабильный ключ","predicates":[{"key":"audiences","valueType":"list","value":"operations","operator":"contains"}]}
+{"id":"cobalt-6","group":"cobalt","split":"tuning","query":"Cobalt object storage: какой алгоритм шифрования применяется к объекту?"}
+{"id":"delta-1","group":"delta","split":"tuning","query":"REQ-DEL-104"}
+{"id":"delta-2","group":"delta","split":"tuning","query":"Как Delta ограничивает область применения access token?"}
+{"id":"delta-3","group":"delta","split":"tuning","query":"Delta secure refresh token storage"}
+{"id":"delta-4","group":"delta","split":"tuning","query":"Сколько минут живёт access token Delta?"}
+{"id":"delta-5","group":"delta","split":"tuning","query":"Delta token audience","predicates":[{"key":"reviewed","valueType":"date","value":"2026-01-15","operator":"eq"},{"key":"domain","valueType":"string","value":"delta","operator":"eq"}]}
+{"id":"delta-6","group":"delta","split":"tuning","query":"Delta identity: каким алгоритмом подписывается access token?"}
+{"id":"ember-1","group":"ember","split":"tuning","query":"REQ-EMB-105"}
+{"id":"ember-2","group":"ember","split":"tuning","query":"Как связать span разных сервисов Ember?"}
+{"id":"ember-3","group":"ember","split":"tuning","query":"Ember logging credentials payload restriction"}
+{"id":"ember-4","group":"ember","split":"tuning","query":"What percentage of Ember traces are sampled under normal load?"}
+{"id":"ember-5","group":"ember","split":"tuning","query":"Ember traceparent","predicates":[{"key":"owner","valueType":"string","value":"platform","operator":"eq"}]}
+{"id":"ember-6","group":"ember","split":"tuning","query":"Ember observability: сколько дней сохраняются trace records?"}
+{"id":"fjord-1","group":"fjord","split":"held_out","query":"REQ-FJO-106"}
+{"id":"fjord-2","group":"fjord","split":"held_out","query":"Как отличить исходный документ от представления PDF или OCR в архивном API Fjord?"}
+{"id":"fjord-3","group":"fjord","split":"held_out","query":"Fjord derived file must not replace original format"}
+{"id":"fjord-4","group":"fjord","split":"held_out","query":"С какой периодичностью Fjord проверяет контрольные суммы?"}
+{"id":"fjord-5","group":"fjord","split":"held_out","query":"Fjord оригинальный документ SHA-256","predicates":[{"key":"critical","valueType":"boolean","value":true,"operator":"eq"},{"key":"domain","valueType":"string","value":"fjord","operator":"eq"}]}
+{"id":"fjord-6","group":"fjord","split":"held_out","query":"Fjord archive: какие языки OCR настроены?"}
+{"id":"garnet-1","group":"garnet","split":"held_out","query":"REQ-GAR-107"}
+{"id":"garnet-2","group":"garnet","split":"held_out","query":"Database service failover: how does Garnet prevent two writable primaries?"}
+{"id":"garnet-3","group":"garnet","split":"held_out","query":"Garnet write availability quorum restriction"}
+{"id":"garnet-4","group":"garnet","split":"held_out","query":"За сколько секунд должен произойти failover Garnet?"}
+{"id":"garnet-5","group":"garnet","split":"held_out","query":"Garnet PostgreSQL fencing","predicates":[{"key":"revision","valueType":"number","value":2,"operator":"eq"}]}
+{"id":"garnet-6","group":"garnet","split":"held_out","query":"Garnet database: сколько часов сохраняется PostgreSQL WAL?"}
+{"id":"harbor-1","group":"harbor","split":"held_out","query":"REQ-HAR-108"}
+{"id":"harbor-2","group":"harbor","split":"held_out","query":"API gateway service contract version compatibility: what can Harbor add without breaking existing clients?"}
+{"id":"harbor-3","group":"harbor","split":"held_out","query":"Harbor mandatory field major version requirement"}
+{"id":"harbor-4","group":"harbor","split":"held_out","query":"What is the notice period before Harbor API deprecation?"}
+{"id":"harbor-5","group":"harbor","split":"held_out","query":"Harbor additive fields","predicates":[{"key":"audiences","valueType":"list","value":"operations","operator":"contains"},{"key":"domain","valueType":"string","value":"harbor","operator":"eq"}]}
+{"id":"harbor-6","group":"harbor","split":"held_out","query":"Harbor API versioning: какая версия Java SDK поставляется клиентам?"}
+{"id":"iris-1","group":"iris","split":"held_out","query":"REQ-IRI-109"}
+{"id":"iris-2","group":"iris","split":"held_out","query":"Cache service registry source version: где источник истины Iris при cache-aside?"}
+{"id":"iris-3","group":"iris","split":"held_out","query":"Iris invalidation failure source version verification"}
+{"id":"iris-4","group":"iris","split":"held_out","query":"Каков верхний предел TTL кэша Iris?"}
+{"id":"iris-5","group":"iris","split":"held_out","query":"Iris Redis source of truth","predicates":[{"key":"reviewed","valueType":"date","value":"2026-01-15","operator":"eq"}]}
+{"id":"iris-6","group":"iris","split":"held_out","query":"Iris cache: сколько узлов Redis в production cluster?"}
+{"id":"juniper-1","group":"juniper","split":"held_out","query":"REQ-JUN-110"}
+{"id":"juniper-2","group":"juniper","split":"held_out","query":"Как Juniper разделяет административный и прикладной трафик?"}
+{"id":"juniper-3","group":"juniper","split":"held_out","query":"Можно ли администратору Juniper подключаться по SSH мимо bastion? Какое ограничение?"}
+{"id":"juniper-4","group":"juniper","split":"held_out","query":"How many minutes of inactivity end a Juniper session?"}
+{"id":"juniper-5","group":"juniper","split":"held_out","query":"Juniper management plane ACL","predicates":[{"key":"owner","valueType":"string","value":"platform","operator":"eq"},{"key":"domain","valueType":"string","value":"juniper","operator":"eq"}]}
+{"id":"juniper-6","group":"juniper","split":"held_out","query":"Juniper network: где хранится запись bastion session?"}
+{"id":"kestrel-1","group":"kestrel","split":"held_out","query":"REQ-KES-111"}
+{"id":"kestrel-2","group":"kestrel","split":"held_out","query":"Как Kestrel изолирует резервные копии от компрометации primary?"}
+{"id":"kestrel-3","group":"kestrel","split":"held_out","query":"Before allowing service traffic after restore, what checks must Kestrel perform?"}
+{"id":"kestrel-4","group":"kestrel","split":"held_out","query":"Какой целевой RPO резервного копирования Kestrel?"}
+{"id":"kestrel-5","group":"kestrel","split":"held_out","query":"Kestrel immutable backup","predicates":[{"key":"critical","valueType":"boolean","value":true,"operator":"eq"}]}
+{"id":"kestrel-6","group":"kestrel","split":"held_out","query":"Kestrel backup: какой алгоритм сжатия используется для архивов?"}
+{"id":"lumen-1","group":"lumen","split":"held_out","query":"REQ-LUM-112"}
+{"id":"lumen-2","group":"lumen","split":"held_out","query":"Как Lumen делает результат отчёта воспроизводимым?"}
+{"id":"lumen-3","group":"lumen","split":"held_out","query":"Как связать повторно вычисленный отчёт с предыдущим запуском Lumen?"}
+{"id":"lumen-4","group":"lumen","split":"held_out","query":"Minimum time for Lumen lineage retention?"}
+{"id":"lumen-5","group":"lumen","split":"held_out","query":"Lumen dataset transform revision","predicates":[{"key":"revision","valueType":"number","value":2,"operator":"eq"},{"key":"domain","valueType":"string","value":"lumen","operator":"eq"}]}
+{"id":"lumen-6","group":"lumen","split":"held_out","query":"Lumen data lineage: на каком языке написан transform?"}
+{"id":"mosaic-1","group":"mosaic","split":"held_out","query":"REQ-MOS-113"}
+{"id":"mosaic-2","group":"mosaic","split":"held_out","query":"Mosaic: retries exhausted — where does the failed message go?"}
+{"id":"mosaic-3","group":"mosaic","split":"held_out","query":"Mosaic DLQ replay operator approval"}
+{"id":"mosaic-4","group":"mosaic","split":"held_out","query":"Сколько попыток допускается в retry budget Mosaic?"}
+{"id":"mosaic-5","group":"mosaic","split":"held_out","query":"Mosaic dead letter queue","predicates":[{"key":"audiences","valueType":"list","value":"operations","operator":"contains"}]}
+{"id":"mosaic-6","group":"mosaic","split":"held_out","query":"Mosaic queue: сколько дней хранится сообщение в DLQ?"}
+{"id":"nimbus-1","group":"nimbus","split":"held_out","query":"REQ-NIM-114"}
+{"id":"nimbus-2","group":"nimbus","split":"held_out","query":"Where does Nimbus obtain temporary credentials without persisting a password?"}
+{"id":"nimbus-3","group":"nimbus","split":"held_out","query":"Nimbus revoked lease new resource calls restriction"}
+{"id":"nimbus-4","group":"nimbus","split":"held_out","query":"How long is the Nimbus secret lease valid?"}
+{"id":"nimbus-5","group":"nimbus","split":"held_out","query":"Nimbus secret broker credentials","predicates":[{"key":"reviewed","valueType":"date","value":"2026-01-15","operator":"eq"},{"key":"domain","valueType":"string","value":"nimbus","operator":"eq"}]}
+{"id":"nimbus-6","group":"nimbus","split":"held_out","query":"Nimbus secret broker: какой CA используется для TLS?"}
+{"id":"onyx-1","group":"onyx","split":"held_out","query":"REQ-ONY-115"}
+{"id":"onyx-2","group":"onyx","split":"held_out","query":"Search API source evidence digest locator: what does Onyx return as proof?"}
+{"id":"onyx-3","group":"onyx","split":"held_out","query":"Onyx stale source current results exclusion"}
+{"id":"onyx-4","group":"onyx","split":"held_out","query":"Сколько кандидатов допускает Onyx?"}
+{"id":"onyx-5","group":"onyx","split":"held_out","query":"Onyx evidence digest locator","predicates":[{"key":"owner","valueType":"string","value":"platform","operator":"eq"}]}
+{"id":"onyx-6","group":"onyx","split":"held_out","query":"Onyx search: какая размерность embedding vector поддерживается?"}
+{"id":"prairie-1","group":"prairie","split":"held_out","query":"REQ-PRA-116"}
+{"id":"prairie-2","group":"prairie","split":"held_out","query":"Как Prairie разрешает переключение blue-green?"}
+{"id":"prairie-3","group":"prairie","split":"held_out","query":"При откате Prairie автоматически запускается необратимая миграция?"}
+{"id":"prairie-4","group":"prairie","split":"held_out","query":"Initial canary traffic share in Prairie?"}
+{"id":"prairie-5","group":"prairie","split":"held_out","query":"Prairie readiness probe","predicates":[{"key":"critical","valueType":"boolean","value":true,"operator":"eq"},{"key":"domain","valueType":"string","value":"prairie","operator":"eq"}]}
+{"id":"prairie-6","group":"prairie","split":"held_out","query":"Prairie deployment: каков interval readiness probe в секундах?"}
+{"id":"quartz-1","group":"quartz","split":"held_out","query":"REQ-QUA-117"}
+{"id":"quartz-2","group":"quartz","split":"held_out","query":"If normal retention expires, may Quartz purge a record with legal hold?"}
+{"id":"quartz-3","group":"quartz","split":"held_out","query":"Quartz remove legal hold dual approval"}
+{"id":"quartz-4","group":"quartz","split":"held_out","query":"Каков минимальный срок хранения аудита Quartz?"}
+{"id":"quartz-5","group":"quartz","split":"held_out","query":"Quartz legal hold purge","predicates":[{"key":"revision","valueType":"number","value":2,"operator":"eq"}]}
+{"id":"quartz-6","group":"quartz","split":"held_out","query":"Quartz retention: как часто проводится периодический пересмотр legal hold?"}
+{"id":"raven-1","group":"raven","split":"held_out","query":"REQ-RAV-118"}
+{"id":"raven-2","group":"raven","split":"held_out","query":"API gateway service tenant rate limit route: how does Raven isolate quotas?"}
+{"id":"raven-3","group":"raven","split":"held_out","query":"Raven exceeded limit HTTP response Retry-After"}
+{"id":"raven-4","group":"raven","split":"held_out","query":"How many requests fit the Raven tenant burst?"}
+{"id":"raven-5","group":"raven","split":"held_out","query":"Raven token bucket tenant","predicates":[{"key":"audiences","valueType":"list","value":"operations","operator":"contains"},{"key":"domain","valueType":"string","value":"raven","operator":"eq"}]}
+{"id":"raven-6","group":"raven","split":"held_out","query":"Raven rate limiting: какова скорость пополнения token bucket в секунду?"}
+{"id":"spruce-1","group":"spruce","split":"held_out","query":"REQ-SPR-119"}
+{"id":"spruce-2","group":"spruce","split":"held_out","query":"Как Spruce предотвращает несовместимые изменения событий?"}
+{"id":"spruce-3","group":"spruce","split":"held_out","query":"What must run before publishing a breaking event change in Spruce?"}
+{"id":"spruce-4","group":"spruce","split":"held_out","query":"Сколько рабочих дней отведено на review schema Spruce?"}
+{"id":"spruce-5","group":"spruce","split":"held_out","query":"Spruce backward compatibility","predicates":[{"key":"reviewed","valueType":"date","value":"2026-01-15","operator":"eq"}]}
+{"id":"spruce-6","group":"spruce","split":"held_out","query":"Spruce schema registry: какой schema dialect выбран для событий?"}
+{"id":"tundra-1","group":"tundra","split":"held_out","query":"REQ-TUN-120"}
+{"id":"tundra-2","group":"tundra","split":"held_out","query":"Какими идентификаторами Tundra связывает действие и аудит?"}
+{"id":"tundra-3","group":"tundra","split":"held_out","query":"Разрешает ли read-only audit access менять исходное событие Tundra?"}
+{"id":"tundra-4","group":"tundra","split":"held_out","query":"How often does Tundra export audit records?"}
+{"id":"tundra-5","group":"tundra","split":"held_out","query":"Tundra append-only actorId correlationId","predicates":[{"key":"owner","valueType":"string","value":"platform","operator":"eq"},{"key":"domain","valueType":"string","value":"tundra","operator":"eq"}]}
+{"id":"tundra-6","group":"tundra","split":"held_out","query":"Tundra audit export: какая кодировка файла экспорта используется?"}
