@@ -386,3 +386,93 @@ test('D4 exact wire boundary accepted and split without truncating original evid
     assert.equal(published?.generationId,result.generationId);assert.equal(published?.entries.length,2);
   });
 });
+
+async function metadataFixture(f:Fixture){
+  await writeFile(join(f.vault,'a.md'),'---\nversion: 1\ntags: ["approved"]\n---\ncommon alpha [[Target|alias]]\nsecond evidence #inline\n');
+  await writeFile(join(f.vault,'b.md'),'---\nversion: 2\n---\ncommon beta #other [[Target]]\n');
+  f.engine.reconcile();await f.engine.whenIdle();
+  const lease=await f.engine.captureDenseCorpus(['a.md','b.md'],256,context().signal);
+  const rebuilt=await new ApiDenseIndexManager(f.engine,f.store).rebuild(
+    {paths:['a.md','b.md'],config:f.config,space},token,context(),{...indexPort(f),current:lease.current});
+  assert.equal(rebuilt.status,'ok',rebuilt.error??'expected rebuild');
+  const port:ApiRetrievalPort={...f.port,current:lease.current,metadataPaths:lease.metadataPaths};
+  const input=(query:string,mode:'dense'|'hybrid',overrides:Partial<SearchRequest>={}):ApiRetrievalInput=>({
+    request:request(query,mode,overrides),lexicalGenerationId:lease.lexicalGenerationId,
+    evidence:lease.evidence,approval:f.makeApproval('query',query,[])});
+  return {lease,port,input};
+}
+test('D5 authoritative metadata eligibility precedes rank; body evidence, combined scope and typed Properties',async()=>{
+  await fixture(async f=>{
+    const {lease,port,input}=await metadataFixture(f);
+    const before=f.calls();
+    const tag=await search(f,input('common','dense',{metadata:{tag:'#APPROVED'},limit:1}),port);
+    assert.equal(tag.status,'ok');assert.deepEqual(ids(tag),['a.md']);
+    const both=await search(f,input('common','hybrid',{metadata:{tag:'approved',linkTarget:'Target'}}),port);
+    assert.equal(both.executedMode,'hybrid');assert.ok(both.hits.length>0);
+    assert.ok(both.hits.every(h=>h.evidence.sourceId==='a.md'&&lease.evidence.some(e=>
+      e.originalExcerpt===h.evidence.originalExcerpt&&e.sourceId===h.evidence.sourceId)));
+    assert.ok(both.hits.some(h=>h.evidence.originalExcerpt==='common alpha [[Target|alias]]'));
+    const inline=await search(f,input('common','dense',{metadata:{tag:'inline'}}),port);
+    assert.equal(inline.status,'ok');assert.ok(inline.hits.length>0);
+    assert.ok(inline.hits.every(h=>h.evidence.sourceId==='a.md'));
+    const typed=await search(f,input('common','hybrid',{metadata:{linkTarget:'Target'},
+      predicates:[{key:'version',valueType:'number',value:2,operator:'eq'}]}),port);
+    assert.equal(typed.status,'ok');assert.ok(typed.hits.length>0);
+    assert.ok(typed.hits.every(h=>h.evidence.sourceId==='b.md'));
+    for(const overrides of [{metadata:{linkTarget:'Hidden'}},{metadata:{linkTarget:'target'}},{metadata:{linkTarget:'alias'}},
+      {metadata:{tag:'approved'},scope:['b.md']}]){
+      const none=await search(f,input('common','hybrid',overrides),port);
+      assert.equal(none.status,'ok');assert.deepEqual(none.hits,[]);
+      assert.equal(none.legs.lexical.status,'ready');assert.equal(none.legs.dense.candidateCount,0);
+    }
+    assert.deepEqual(f.wireRequests().slice(before).map(r=>r.texts),Array.from({length:8},()=>['common']));
+  });
+});
+test('D5 missing, foreign, duplicate and revoked metadata eligibility fail closed before HTTP',async()=>{
+  await fixture(async f=>{
+    const {lease,port,input}=await metadataFixture(f);
+    const query=input('common','hybrid',{metadata:{tag:'approved'}}),before=f.calls();
+    const otherLease=await f.engine.captureDenseCorpus(['a.md'],256,context().signal);
+    for(const denied of [{...port,metadataPaths:undefined},{...port,metadataPaths:()=>['missing.md']},
+      {...port,metadataPaths:()=>['a.md','a.md']},
+      {...port,metadataPaths:(req:SearchRequest,_id:string,paths:readonly string[])=>lease.metadataPaths(req,hash('foreign'),paths)},
+      {...port,metadataPaths:otherLease.metadataPaths}]){
+      const failed=await search(f,query,denied);
+      assert.equal(failed.executedMode,'none');assert.deepEqual(failed.hits,[]);
+    }
+    const revoked=await search(f,query,{...port,metadataPaths:(req,id,selected)=>{
+      const paths=lease.metadataPaths(req,id,selected);f.engine.changed('a.md');return paths;
+    }});
+    assert.equal(revoked.error,'CANCELLED');assert.equal(f.calls(),before);
+    await f.engine.whenIdle();assert.equal(lease.current(),false);
+  });
+});
+test('D5 metadata-only remains lexical, with original frontmatter anchor; AI revocation during query suppresses hits',async()=>{
+  await fixture(async f=>{
+    const {port,input}=await metadataFixture(f);
+    const before=f.calls();
+    const metadataOnly=input('','dense',{metadata:{tag:'approved'}});
+    assert.equal((await search(f,metadataOnly,port)).error,'CONFIG_INVALID');
+    assert.equal(f.calls(),before);
+    const lexical=await f.engine.search({...metadataOnly.request,requestedMode:'lexical'});
+    assert.equal(lexical.status,'ok');assert.deepEqual(lexical.hits.map(h=>h.originalExcerpt),['tags: ["approved"]']);
+    f.onRequest(()=>f.engine.changed('a.md'));
+    const result=await search(f,input('common','hybrid',{metadata:{tag:'approved'}}),port);
+    assert.equal(result.executedMode,'none');assert.deepEqual(result.hits,[]);
+    assert.equal(f.calls(),before+1);await f.engine.whenIdle();
+  });
+});
+
+test('D5 fenced code remains excluded by lexical metadata and partial sources remain ineligible for dense indexing',async()=>{
+  await fixture(async f=>{
+    await writeFile(join(f.vault,'b.md'),'common beta\n~~~\n#secret [[Hidden]]\n~~~\n');
+    f.engine.reconcile();await f.engine.whenIdle();
+    const before=f.calls();
+    const hidden=await f.engine.search({...request('common','hybrid',{metadata:{tag:'secret',linkTarget:'Hidden'}}),requestedMode:'lexical'});
+    assert.equal(hidden.status,'ok');assert.deepEqual(hidden.hits,[]);
+    await assert.rejects(f.engine.captureDenseCorpus(['b.md'],256,context().signal),/EVIDENCE_INCOMPLETE/);
+    const result=await new ApiDenseIndexManager(f.engine,f.store).rebuild(
+      {paths:['a.md','b.md'],config:f.config,space},token,context(),{...indexPort(f),current:()=>true});
+    assert.equal(result.status,'failed');assert.equal(f.calls(),before);
+  });
+});
