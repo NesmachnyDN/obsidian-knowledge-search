@@ -1,0 +1,8 @@
+# OKS-06A-R1 — bounded evidence consent preview expiration
+
+Base: `c074d1e607ca9e13363113e87ff70b512fa34b52` (06A-H merged and regression passed).
+Authority: AGENTS, SECURITY, SDD, SPEC AC-07/09/10/11, ADR-0015, 05P-B/C2, 06UX and accepted OKS-06A-R contract. Existing shared SearchController preview has no expiration until confirmation.
+
+Use the existing controller's role-specific one-shot preview and revocation fences. A pending preview expires after five minutes, aligned with existing dense consent lifetime; the active request retains its separate configured deadline. A delayed timer must not allow late confirmation; no refresh by confirmation, status polling or rendering. Clear timers and pending preview on consumption, supersession, cancellation, invalidation and disposal. Expiration must clear the corresponding UI and transient password, with typed cancellation, without revoking the other role's current preview or changing lexical results. No new persistence or transport. Shared generation preview follows the same invariant.
+
+Test exact expiry, late timer, tampered expiry, supersession, cross-role independence, explicit cancellation, invalidation/disposal, successful pre-expiry confirmation and zero HTTP/verification for expired attempts. Run packaged isolated no-route synthetic UI fixture plus existing role regressions, typecheck, Node/Python, build/package/licenses, historical and frozen benchmark regression. No model calls, downloads, production Vault or paid APIs; no main or PR #46 changes. Independent exact-head review required before merge. No B-Rerank acceptance.

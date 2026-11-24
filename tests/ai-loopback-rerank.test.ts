@@ -144,7 +144,7 @@ test('verified source-backed evidence survives reorder; grant and fresh source r
   });});
 });
 
-import { SearchController, uiRequest } from '../plugin/src/search/controller';
+import { SearchController, uiRequest, EVIDENCE_PREVIEW_TTL_MS } from '../plugin/src/search/controller';
 import type { ProviderPreference } from '../plugin/src/ai/contracts';
 import type { SearchResponse } from '../plugin/src/standalone/contracts';
 
@@ -235,4 +235,67 @@ test('abandoned verifier budget is bounded; late settlement permits recovery',as
       verifySpan(hit,bytes[hits.findIndex(h=>h.sourceId===hit.sourceId)]!);
     },()=>true);assert.equal(result.length,2);
   },(req,res)=>requestBody(req,body=>reply(res,good(body.model))));
+});
+
+
+test('pending evidence previews expire independently, reject late or altered consent, and release timers',async t=>{
+  let calls=0, verifies=0;
+  await fixture(async cfg=>{
+    const response:SearchResponse={protocolVersion:2,requestId:'ui',requestedMode:'lexical',
+      executedMode:'lexical',status:'ok',indexGenerationId:hash('generation'),hits,
+      capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0};
+    const port={config:()=>cfg,scopeId:()=>scopeId,verify:async()=>{verifies++;}};
+    const c=new SearchController(async()=>{},undefined,undefined,port,port);
+    c.attach({search:async()=>response,status:()=>({status:'ready',generationId:hash('generation'),
+      sources:2,records:2,busy:false,error:null,maintenanceWarning:null}),
+      cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+    t.mock.timers.enable({apis:['Date','setTimeout'],now:1000});
+    try {
+      await c.search(uiRequest(input.query,2));
+      let lifecycleEvents=0,previewEvents=0;
+      c.subscribe(()=>{lifecycleEvents++;});c.subscribeEvidencePreviews(()=>{previewEvents++;});
+      const first=c.prepareRerank();
+      assert.equal(first.expiresUnixMs,1000+EVIDENCE_PREVIEW_TTL_MS);
+      t.mock.timers.tick(1000);
+      const gen=c.prepareGeneration();
+      t.mock.timers.tick(EVIDENCE_PREVIEW_TTL_MS-1001);
+      assert.equal(c.isEvidencePreviewCurrent('reranking',first.sequence),true);
+      assert.equal(c.evidenceOperationStatus('reranking').phase,'permission-required');
+      t.mock.timers.tick(1);
+      assert.deepEqual(c.evidenceOperationStatus('reranking'),{phase:'failed',error:'CANCELLED'});
+      assert.equal(c.isEvidencePreviewCurrent('reranking',first.sequence),false);
+      assert.equal(c.isEvidencePreviewCurrent('generation',gen.sequence),true);
+      assert.deepEqual(c.snapshot().response,response);
+      await assert.rejects(c.rerankConfirmed(first,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+      // The active request deadline has not started; a modified expiry cannot renew consent.
+      const altered=c.prepareRerank();
+      await assert.rejects(c.rerankConfirmed({...altered,expiresUnixMs:altered.expiresUnixMs+1},'synthetic',token),
+        {message:'DISCLOSURE_DENIED'});
+      assert.equal(c.isEvidencePreviewCurrent('reranking',altered.sequence),false);
+      const old=c.prepareRerank();
+      t.mock.timers.tick(1);
+      const replacement=c.prepareRerank();
+      t.mock.timers.tick(EVIDENCE_PREVIEW_TTL_MS-1);
+      assert.equal(c.isEvidencePreviewCurrent('reranking',old.sequence),false);
+      assert.equal(c.isEvidencePreviewCurrent('reranking',replacement.sequence),true);
+      assert.equal(c.evidenceOperationStatus('generation').phase,'failed');
+      // Move wall time without delivering timers: confirmation must still fail closed.
+      t.mock.timers.setTime(replacement.expiresUnixMs);
+      assert.deepEqual(c.evidenceOperationStatus('reranking'),{phase:'failed',error:'CANCELLED'});
+      await assert.rejects(c.rerankConfirmed(replacement,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+      assert.equal(c.snapshot().rerank?.error,'CANCELLED');
+      const cancelled=c.prepareRerank(); c.cancelRerank();
+      const invalidated=c.prepareGeneration();
+      assert.equal(lifecycleEvents,0);assert.ok(previewEvents>0);
+      c.invalidate();assert.equal(lifecycleEvents,1);
+      await assert.rejects(c.rerankConfirmed(cancelled,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+      await assert.rejects(c.generationConfirmed(invalidated,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+      await c.search(uiRequest(input.query,2));
+      const disposed=c.prepareGeneration();c.dispose();
+      t.mock.timers.tick(EVIDENCE_PREVIEW_TTL_MS+1);
+      assert.equal(c.evidenceOperationStatus('generation').phase,'idle');
+      await assert.rejects(c.generationConfirmed(disposed,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+      assert.equal(verifies,0);assert.equal(calls,0);
+    } finally { c.dispose();t.mock.timers.reset(); }
+  },(req,res)=>{calls++;req.resume();reply(res,{},400);});
 });
