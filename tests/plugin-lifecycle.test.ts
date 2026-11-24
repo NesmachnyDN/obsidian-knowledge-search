@@ -368,3 +368,126 @@ test('05B B2: failed process-group termination blocks reload and health recheck 
   }
   assert.throws(() => originalKill(previousPid,0),{code:'ESRCH'});
 });
+
+type DenseLifecyclePort = {
+  active?: Promise<unknown>;
+  close(): Promise<void>;
+  port: { admitStorage(): Promise<void> };
+};
+const denseLifecycle = (plugin: InstanceType<typeof PluginClass>) =>
+  (plugin as unknown as { denseHost?: DenseLifecyclePort }).denseHost;
+function deferredDrain() {
+  let release!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((resolve, fail) => { release = resolve; reject = fail; });
+  return { promise, release, reject };
+}
+function replacementPlugin(f: Awaited<ReturnType<typeof fixture>>) {
+  const p = new PluginClass(f.plugin.app, f.plugin.manifest);
+  Object.assign(p, { app: f.plugin.app, manifest: f.plugin.manifest,
+    saved: structuredClone((f.plugin as unknown as { saved: unknown }).saved) });
+  return p;
+}
+const legacyQuery = { query: 'synthetic', requestedMode: 'lexical' as const, limit: 1 };
+const enableLegacy = (s: ReturnType<typeof defaultSettings>) => {
+  s.ingestion = { ...s.ingestion, enabled: true, interpreter: '/synthetic/python',
+    entry: '/synthetic/advanced_ingest.py', tokenizerSnapshot: '/synthetic/tokenizer' };
+};
+
+test('D6 B-LIFECYCLE-01: detached dense drain survives ingestion toggle and reload; legacy admission waits', async () => {
+  const f = await fixture();
+  const drain = deferredDrain(), entered = deferredDrain();
+  let replacement: InstanceType<typeof PluginClass> | undefined;
+  let toggle: Promise<void> | undefined, search: Promise<unknown> | undefined;
+  try {
+    await f.plugin.onload(); f.layout(); await f.internal.initializing;
+    await f.plugin.standalone!.whenIdle();
+    const dense = denseLifecycle(f.plugin)!;
+    assert.ok(dense);
+    // Hold the actual host close at its active-job drain, simulating a writer
+    // still completing asynchronous publication/cleanup after cancellation.
+    dense.active = drain.promise;
+    const close = dense.close.bind(dense);
+    dense.close = () => { entered.release(); return close(); };
+    toggle = f.plugin.patchSettings(enableLegacy);
+    await entered.promise;
+    assert.equal(denseLifecycle(f.plugin), undefined);
+    f.plugin.onunload();
+    replacement = replacementPlugin(f);
+    await replacement.onload(); f.layout();
+    assert.equal(replacement.settings.ingestion.enabled, true);
+    let calls = 0;
+    // Observe actual production searchAdvanced admission at the manager boundary;
+    // no model, subprocess, or provider is needed.
+    replacement.advancedRetrieval.search = async () => {
+      ++calls; throw new Error('synthetic admission reached');
+    };
+    search = replacement.searchAdvanced(legacyQuery);
+    const outcome = assert.rejects(search, /synthetic admission reached/);
+    await (replacement as unknown as { initializing: Promise<void> }).initializing;
+    await replacement.standalone!.whenIdle();
+    assert.equal(replacement.standalone!.status().status, 'ready');
+    assert.equal(calls, 0, 'legacy manager reached before prior dense writer drained');
+    drain.release();
+    await toggle; await outcome;
+    assert.equal(calls, 1);
+  } finally {
+    drain.release(); await toggle?.catch(() => {}); await search?.catch(() => {});
+    replacement?.onunload(); await f.cleanup();
+  }
+});
+
+test('D6 B-LIFECYCLE-01: reverse transition and reload wait for legacy drain without blocking lexical', async () => {
+  const f = await fixture();
+  const drain = deferredDrain(), entered = deferredDrain();
+  let replacement: InstanceType<typeof PluginClass> | undefined;
+  let toggle: Promise<void> | undefined, admission: Promise<void> | undefined;
+  try {
+    await f.plugin.onload(); f.layout(); await f.internal.initializing;
+    await f.plugin.patchSettings(enableLegacy);
+    assert.equal(denseLifecycle(f.plugin), undefined);
+    const stop = f.plugin.advancedRetrieval.stop.bind(f.plugin.advancedRetrieval);
+    f.plugin.advancedRetrieval.stop = async () => { entered.release(); await drain.promise; await stop(); };
+    toggle = f.plugin.patchSettings(s => { s.ingestion.enabled = false; });
+    await entered.promise;
+    f.plugin.onunload();
+    replacement = replacementPlugin(f);
+    await replacement.onload(); f.layout();
+    await (replacement as unknown as { initializing: Promise<void> }).initializing;
+    await replacement.standalone!.whenIdle();
+    assert.equal(replacement.standalone!.status().status, 'ready');
+    const dense = denseLifecycle(replacement)!;
+    assert.ok(dense);
+    let admitted = false;
+    admission = dense.port.admitStorage().then(() => { admitted = true; });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(admitted, false);
+    drain.release(); await toggle; await admission;
+    assert.equal(admitted, true);
+  } finally {
+    drain.release(); await toggle?.catch(() => {}); await admission?.catch(() => {});
+    replacement?.onunload(); await f.cleanup();
+  }
+});
+
+test('D6 B-LIFECYCLE-01: failed prior storage drain denies replacement while lexical remains ready', async () => {
+  const f = await fixture();
+  let replacement: InstanceType<typeof PluginClass> | undefined;
+  try {
+    await f.plugin.onload(); f.layout(); await f.internal.initializing;
+    const dense = denseLifecycle(f.plugin)!;
+    const close = dense.close.bind(dense);
+    dense.close = async () => { await close(); throw new Error('synthetic failed drain'); };
+    await assert.rejects(f.plugin.patchSettings(enableLegacy), /synthetic failed drain/);
+    f.plugin.onunload();
+    replacement = replacementPlugin(f);
+    await replacement.onload(); f.layout();
+    await (replacement as unknown as { initializing: Promise<void> }).initializing;
+    await replacement.standalone!.whenIdle();
+    assert.equal(replacement.standalone!.status().status, 'ready');
+    let calls = 0;
+    replacement.advancedRetrieval.search = async () => { ++calls; throw new Error('unexpected admission'); };
+    await assert.rejects(replacement.searchAdvanced(legacyQuery), /MODEL_UNAVAILABLE/);
+    assert.equal(calls, 0);
+  } finally { replacement?.onunload(); await f.cleanup(); }
+});
