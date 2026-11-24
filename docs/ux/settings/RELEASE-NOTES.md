@@ -35,6 +35,33 @@ merge before calling the phase complete.
   and hidden values are retained. **An older v5 plugin cannot read v6**
   without restoring a secure pre-upgrade v5 settings backup.
 
+## Language support (OKS-06UX-L10N)
+
+- Settings follow Obsidian's selected interface language: Russian (`ru`)
+  or English (`en`); other locales fall back to English.
+- Translations include Settings headings, native controls, accessible names,
+  AI provider editors and warnings, operational summaries, inline validation
+  messages, and destructive-action confirmation.
+- No new persisted locale field, schema migration, model/provider configuration,
+  permission change, external translation service or content transmission.
+- Changes take effect when the Settings tab is displayed again; Obsidian may
+  require a restart for a language change.
+- RU acceptance uses `scripts/obsidian-settings-ru-smoke.js` inside the isolated
+  no-route host; three Russian Settings screenshots cover 900/760px and 200% zoom.
+- English compatibility retains the existing real-host UX and visual regression
+  scripts; no production Vault or AI provider is required.
+- Native EN → RU → EN acceptance, including Obsidian's own language selector,
+  Relaunch, Basic/Expert, AI labels and application restart, runs using
+  `OKS_06UX_L10N_SWITCH_TEST=1` in the same disposable no-route host.
+- Runtime-state translations are exhaustive against the typed engine, health,
+  ingestion, retrieval and search contracts. Raw diagnostic codes and actual
+  Search UI command names are preserved. RU smoke checks success/degraded
+  summaries; native switching verifies a persisted non-default baseline across
+  restarts. Unsafe or conflicting L10N test modes fail before host startup.
+- The full host smoke re-establishes a verified current search result after
+  Settings acceptance invalidates old UI results, then retains the exact
+  source-file and excerpt-selection checks for command navigation.
+
 ## Explicitly not included
 
 No new model, provider adapter, credential store, AI readiness detection,

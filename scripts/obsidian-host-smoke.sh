@@ -9,6 +9,18 @@ for bin in "$app" "$cli"; do
   test -x "$bin" || { echo "HOST_SMOKE_UNAVAILABLE: Obsidian binary missing" >&2; exit 2; }
 done
 command -v xvfb-run >/dev/null || { echo "HOST_SMOKE_UNAVAILABLE: xvfb-run missing" >&2; exit 2; }
+# L10N modes are independent, basic-only acceptance scenarios. Reject unsafe or
+# conflicting flags before creating a profile or starting any host process.
+if [[ "${OKS_06UX_L10N_SWITCH_TEST:-0}" == 1 || "${OKS_06UX_L10N_RU_TEST:-0}" == 1 ]]; then
+  [[ "${OKS_HOST_NO_ROUTE:-0}" == 1 && -n "${OKS_STANDALONE_PACKAGE_DIR:-}" &&
+     -z "${OKS_STANDALONE_PREVIOUS_PACKAGE_DIR:-}" && -z "${OKS_06UX_VISUAL_DIR:-}" &&
+     "${OKS_AI_RERANK_TEST:-0}" == 0 && "${OKS_ADVANCED_HEALTH_TEST:-0}" == 0 &&
+     "${OKS_ADVANCED_INGESTION_TEST:-0}" == 0 && "${OKS_ADVANCED_RETRIEVAL_TEST:-0}" == 0 &&
+     "${OKS_06UX_TEST:-0}" == 0 ]] ||
+    { echo "HOST_SMOKE_FAILURE: L10N requires isolated verified package and basic-only mode" >&2; exit 2; }
+  [[ "${OKS_06UX_L10N_SWITCH_TEST:-0}" != 1 || "${OKS_06UX_L10N_RU_TEST:-0}" != 1 ]] ||
+    { echo "HOST_SMOKE_FAILURE: L10N scenarios must run separately" >&2; exit 2; }
+fi
 tmp="$(mktemp -d /tmp/oks-native-host-XXXXXXXX)"
 trap 'rm -rf -- "$tmp"' EXIT
 ulimit -c 0
@@ -62,6 +74,15 @@ fi
 export XDG_RUNTIME_DIR="$tmp/runtime" XDG_SESSION_TYPE=x11 ELECTRON_OZONE_PLATFORM_HINT=x11
 mkdir -m 700 "$XDG_RUNTIME_DIR"
 unset WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS
+ru_visual_dir="${OKS_06UX_L10N_RU_VISUAL_DIR:-}"
+if [[ -n "$ru_visual_dir" ]]; then
+  [[ "$ru_visual_dir" = /* && ! -e "$ru_visual_dir" && ! -L "$ru_visual_dir" &&
+    "${OKS_06UX_L10N_RU_TEST:-0}" == 1 && "${OKS_HOST_NO_ROUTE:-0}" == 1 &&
+    -n "${OKS_STANDALONE_PACKAGE_DIR:-}" ]] ||
+    { echo "HOST_SMOKE_FAILURE: RU screenshots require a fresh absolute output directory and isolated packaged test" >&2; exit 2; }
+  mkdir -m 700 "$ru_visual_dir"
+  export OKS_06UX_L10N_RU_VISUAL=1
+fi
 visual_dir="${OKS_06UX_VISUAL_DIR:-}"
 if [[ -n "$visual_dir" ]]; then
   [[ "$visual_dir" = /* && ! -e "$visual_dir" && ! -L "$visual_dir" &&
@@ -140,6 +161,63 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
   initial="$(timeout 8s "$cli" eval "code=JSON.stringify({plugin:!!app.plugins.plugins[\"oks-synthetic-evidence\"],status:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standalone?.status(),error:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standaloneError})")"
   [[ "$initial" == *"\"status\":\"ready\""* && "$initial" == *"\"sources\":2"* ]] ||
     { printf "HOST_SMOKE_FAILURE: native plugin not indexed; result=%s\n" "$initial" >&2; exit 1; }
+  if [[ "${OKS_06UX_L10N_SWITCH_TEST:-0}" == 1 ]]; then
+    language_phase() {
+      local action="$1" result
+      timeout 8s "$cli" eval "code=(globalThis.__oksNativeLanguageAction=\"$action\",true)" >/dev/null
+      result="$(timeout 25s "$cli" eval "code=$(cat "$repo/scripts/obsidian-settings-native-language-smoke.js")")"
+      [[ "$result" == *"OBSIDIAN_NATIVE_LANGUAGE_PASS:"* ]] ||
+        { echo "HOST_SMOKE_FAILURE: native language $action ($result)" >&2; exit 1; }
+      printf "%s\n" "$result"
+    }
+    native_restart() {
+      # First allow Obsidian native visible Relaunch action to apply the locale
+      # and persist it in its isolated application profile.
+      sleep 3
+      local old_p="$p"
+      # Then test durability across a full host process restart using that
+      # same disposable profile. The test controls only the process it launched.
+      if kill -0 "$p" 2>/dev/null; then
+        [[ "$(ps -p "$p" -o args=)" == *"--user-data-dir=$tmp/electron"* ]] ||
+          { echo "HOST_SMOKE_FAILURE: isolated host process identity mismatch" >&2; exit 1; }
+        kill "$p" 2>/dev/null || :
+      fi
+      wait "$p" 2>/dev/null || :
+      if kill -0 "$old_p" 2>/dev/null; then
+        echo "HOST_SMOKE_FAILURE: previous isolated host still alive" >&2; exit 1
+      fi
+      "$app" --no-sandbox --disable-gpu --ozone-platform=x11 --user-data-dir="$tmp/electron" > "$tmp/host-restarted.log" 2>&1 &
+      p=$!
+      sleep 13
+      [[ "$p" != "$old_p" && "$(ps -p "$p" -o args=)" == *"--user-data-dir=$tmp/electron"* ]] ||
+        { echo "HOST_SMOKE_FAILURE: restarted isolated host identity mismatch" >&2; exit 1; }
+      timeout 8s "$cli" version >/dev/null
+      timeout 8s "$cli" plugins:restrict off >/dev/null
+      sleep 3
+    }
+    language_phase seed
+    language_phase verify-en
+    language_phase set-ru
+    sleep 3
+    language_phase verify-ru
+    native_restart
+    language_phase verify-ru
+    language_phase set-en
+    sleep 3
+    language_phase verify-en
+    native_restart
+    language_phase verify-en
+    echo "OBSIDIAN_NATIVE_LANGUAGE_SWITCH_PASS: EN to RU to EN via actual General selector and host restarts"
+    exit 0
+  fi
+  if [[ "${OKS_06UX_L10N_RU_TEST:-0}" == 1 ]]; then
+    # Native host locale must be Russian for this isolated-synthetic test.
+    locale_test="$(timeout 30s "$cli" eval "code=$(cat "$repo/scripts/obsidian-settings-ru-smoke.js")")"
+    [[ "$locale_test" == *"OBSIDIAN_SETTINGS_RU_PASS:"* ]] ||
+      { echo "HOST_SMOKE_FAILURE: Russian Settings locale ($locale_test)" >&2; exit 1; }
+    printf "%s\n" "$locale_test"
+    exit 0
+  fi
   if [[ "${OKS_06UX_VISUAL:-0}" == 1 ]]; then
     visual="$(timeout 85s "$cli" eval "code=$(cat "$repo/scripts/obsidian-settings-visual-smoke.js")")"
     [[ "$visual" == *"OBSIDIAN_SETTINGS_VISUAL_PASS:"* ]] ||
@@ -151,8 +229,7 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
     transition_state() {
       timeout 8s "$cli" eval "code=(async()=>{const p=app.plugins.plugins[\"oks-synthetic-evidence\"];await p.standalone.whenIdle();const r=await p.standalone.search({protocolVersion:2,requestId:\"transition\",query:\"REQ-OKS-SMOKE\",requestedMode:\"lexical\",limit:5});return JSON.stringify({ready:p.standalone.status().status===\"ready\",generation:p.standalone.status().generationId,denseApi:!!p.denseApi,oldWorkerStopped:globalThis.__oksTransitionParser?.stopped===true,basic:r.status===\"ok\"&&r.hits.length===1&&r.hits[0].sourceSha256===\"$first_sha\",disabled:Object.values(p.settings.ai).every(x=>x.state===\"disabled\")&&!p.settings.ingestion.enabled})})()"
     }
-    # D7 -> D8 changes denseApi from false to true. R1 -> R2 retains it,
-    # so its explicit opt-in rollback variant verifies true at every step.
+    # R1 and R2 both retain the D8 API; the older D7/D8 test stays unchanged.
     previous_dense=false
     if [[ "${OKS_R1_R2_TRANSITION_TEST:-0}" == 1 ]]; then previous_dense=true; fi
     old_state="$(transition_state)"
@@ -231,15 +308,12 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
       { echo "HOST_SMOKE_FAILURE: advanced explicit health scenario ($advanced)" >&2; exit 1; }
     printf "%s\n" "$advanced"
   fi
-  # Settings acceptance restores runtime preferences, correctly revoking the prior
-  # search snapshot. Re-establish a real, source-backed controller result before
-  # testing the command; do not bypass the command or its selection assertion.
-  source_ready="$(timeout 8s "$cli" eval "code=(async()=>{const p=app.plugins.plugins[\"oks-synthetic-evidence\"];const r=await p.api.request({apiVersion:1,operation:\"search\",request:{protocolVersion:2,requestId:\"nav-after-settings\",query:\"REQ-OKS-SMOKE\",requestedMode:\"lexical\",limit:5}});const h=p.searchController.snapshot().response?.hits;return JSON.stringify({ok:r.ok,status:r.ok?r.value.status:null,hits:h?.length,source:h?.[0]?.sourceId,excerpt:h?.[0]?.originalExcerpt})})()")"
-  [[ "$source_ready" == *"\"ok\":true"* && "$source_ready" == *"\"status\":\"ok\""* &&
-     "$source_ready" == *"\"hits\":1"* && "$source_ready" == *"\"source\":\"first.md\""* &&
-     "$source_ready" == *"REQ-OKS-SMOKE: local only."* ]] ||
-    { echo "HOST_SMOKE_FAILURE: verified source command precondition ($source_ready)" >&2; exit 1; }
-  echo "OBSIDIAN_SOURCE_COMMAND_PRECONDITION_PASS"
+  # Settings tests legitimately invalidate the prior UI response; establish a fresh
+  # real search result before checking the command exact source navigation.
+  command_source="$(timeout 20s "$cli" eval "code=$(cat "$repo/scripts/obsidian-host-command-source.js")")"
+  [[ "$command_source" == *"OBSIDIAN_HOST_COMMAND_SOURCE_READY:"* ]] ||
+    { echo "HOST_SMOKE_FAILURE: source-command search precondition ($command_source)" >&2; exit 1; }
+  printf "%s\n" "$command_source"
   timeout 8s "$cli" command id=oks-synthetic-evidence:open-first-search-source >/dev/null
   sleep 1
   navigation="$(timeout 8s "$cli" eval "code=JSON.stringify({path:app.workspace.getMostRecentLeaf()?.view?.file?.path,selected:app.workspace.getMostRecentLeaf()?.view?.editor?.getSelection()})")"
@@ -280,6 +354,10 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
   fi
   exit 1
 }
+if [[ -n "$ru_visual_dir" ]]; then
+  cp -a "$tmp/l10n-visual/." "$ru_visual_dir/"
+  (cd "$ru_visual_dir" && sha256sum ./*.png > SHA256SUMS)
+fi
 if [[ -n "$visual_dir" ]]; then
   test -s "$tmp/visual/results.json"
   cp -a "$tmp/visual/." "$visual_dir/"
