@@ -15,6 +15,36 @@ export type RerankApproval = {
 export class EvidenceReranker {
   private readonly transport = new LoopbackRerankTransport();
   private busy = false;
+  // A non-cancellable filesystem syscall may settle late. Admit at most two
+  // outstanding reads, including abandoned ones, across operations.
+  private pendingVerification = 0;
+  private verifyBounded(hit: EvidenceHit, verify: (hit: EvidenceHit) => Promise<void>,
+    context: CallContext): Promise<void> {
+    if (context.signal.aborted) return Promise.reject(new ProviderFailure('CANCELLED'));
+    const remaining = context.deadlineUnixMs - Date.now();
+    if (remaining <= 0) return Promise.reject(new ProviderFailure('TIMEOUT'));
+    if (this.pendingVerification >= 2) return Promise.reject(new ProviderFailure('QUOTA_EXCEEDED'));
+    this.pendingVerification++;
+    return new Promise((resolve,reject) => {
+      let settled=false;
+      const finish=(error?:ProviderFailure):void=>{
+        if(settled)return;
+        settled=true;clearTimeout(timer);context.signal.removeEventListener('abort',cancel);
+        if(error)reject(error);else resolve();
+      };
+      const cancel=()=>finish(new ProviderFailure('CANCELLED'));
+      const timer=setTimeout(()=>finish(new ProviderFailure('TIMEOUT')),remaining);
+      context.signal.addEventListener('abort',cancel,{once:true});
+      // Both success and rejection are observed even after timeout/abort.
+      Promise.resolve().then(()=>{
+        if(context.signal.aborted)throw new ProviderFailure('CANCELLED');
+        return verify(hit);
+      }).then(()=>{this.pendingVerification--;finish();},()=>{
+        this.pendingVerification--;finish(new ProviderFailure('SOURCE_STALE'));
+      });
+      if(context.signal.aborted)cancel();
+    });
+  }
   async run(approval: RerankApproval, token: string, context: CallContext,
     verify: (hit: EvidenceHit) => Promise<void>, current: () => boolean): Promise<readonly RerankedHit[]> {
     if (this.busy) throw new ProviderFailure('QUOTA_EXCEEDED');
@@ -22,6 +52,8 @@ export class EvidenceReranker {
     if (!Array.isArray(approval.candidates) || approval.candidates.length < 1
       || approval.candidates.length > config.limits.maxCandidates) throw new ProviderFailure('LIMIT_EXCEEDED');
     const snapshot = structuredClone(approval);
+    if (!Number.isSafeInteger(context.deadlineUnixMs)) throw new ProviderFailure('CONFIG_INVALID');
+    context = {signal:context.signal,deadlineUnixMs:Math.min(context.deadlineUnixMs,Date.now()+config.limits.timeoutMs)};
     const check = (): void => {
       if (context.signal.aborted || !current()) throw new ProviderFailure('CANCELLED');
       if (!Number.isSafeInteger(context.deadlineUnixMs) || Date.now() >= context.deadlineUnixMs)
@@ -30,8 +62,7 @@ export class EvidenceReranker {
     const verifyAll = async (): Promise<void> => {
       for (const { hit } of snapshot.candidates) {
         check();
-        try { await verify(structuredClone(hit)); }
-        catch { check(); throw new ProviderFailure('SOURCE_STALE'); }
+        await this.verifyBounded(structuredClone(hit),verify,context);
         check();
       }
     };

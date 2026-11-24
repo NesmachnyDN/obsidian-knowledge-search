@@ -184,3 +184,55 @@ test('SearchController: independent config, exact one-shot consent, original lex
     controller.dispose();
   },(req,res)=>{calls++;requestBody(req,body=>{entered();if(calls===1)reply(res,good(body.model));});});
 });
+
+test('verification deadline/cancellation before and after HTTP release admission; late rejections suppressed',async()=>{
+  let calls=0;
+  await fixture(async cfg=>{
+    const reranker=new EvidenceReranker();
+    const verify=async(hit:EvidenceHit)=>{verifySpan(hit,bytes[hits.findIndex(h=>h.sourceId===hit.sourceId)]!);};
+    const defer=()=>{let resolve!:()=>void;let reject!:(error:Error)=>void;
+      const promise=new Promise<void>((r,j)=>{resolve=r;reject=j;});return {promise,resolve,reject};};
+    const short={...cfg,limits:{...cfg.limits,timeoutMs:100}};
+    const stalled=defer();
+    await assert.rejects(reranker.run(approval(short),token,context(),()=>stalled.promise,()=>true),{message:'TIMEOUT'});
+    assert.equal(calls,0);
+    assert.equal((await reranker.run(approval(cfg),token,context(),verify,()=>true)).length,2);
+    stalled.reject(Error('late private failure'));
+    let entered!:()=>void;const entry=new Promise<void>(r=>{entered=r;});
+    const cancelled=defer();const abort=new AbortController();
+    const pending=reranker.run(approval(cfg),token,context(abort.signal),()=>{entered();return cancelled.promise;},()=>true);
+    await entry;abort.abort();await assert.rejects(pending,{message:'CANCELLED'});
+    assert.equal(calls,1);
+    assert.equal((await reranker.run(approval(cfg),token,context(),verify,()=>true)).length,2);
+    cancelled.resolve();
+    let count=0;const post=defer();
+    await assert.rejects(reranker.run(approval(short),token,context(),async hit=>{
+      if(++count>2)return post.promise;await verify(hit);
+    },()=>true),{message:'TIMEOUT'});
+    assert.equal(calls,3);
+    assert.equal((await reranker.run(approval(cfg),token,context(),verify,()=>true)).length,2);
+    post.reject(Error('late after HTTP'));
+    let after!:()=>void;const afterEntry=new Promise<void>(r=>{after=r;});const afterDeferred=defer();
+    const afterAbort=new AbortController();count=0;
+    const afterPending=reranker.run(approval(cfg),token,context(afterAbort.signal),async hit=>{
+      if(++count>2){after();return afterDeferred.promise;}await verify(hit);
+    },()=>true);
+    await afterEntry;afterAbort.abort();await assert.rejects(afterPending,{message:'CANCELLED'});
+    assert.equal((await reranker.run(approval(cfg),token,context(),verify,()=>true)).length,2);
+    afterDeferred.resolve();assert.equal(calls,6);
+  },(req,res)=>{calls++;requestBody(req,body=>reply(res,good(body.model)));});
+});
+test('abandoned verifier budget is bounded; late settlement permits recovery',async()=>{
+  await fixture(async cfg=>{
+    const reranker=new EvidenceReranker();
+    const short={...cfg,limits:{...cfg.limits,timeoutMs:100}};
+    const resolvers:Array<()=>void>=[];
+    const stall=()=>new Promise<void>(r=>resolvers.push(r));
+    for(let i=0;i<2;i++)await assert.rejects(reranker.run(approval(short),token,context(),stall,()=>true),{message:'TIMEOUT'});
+    await assert.rejects(reranker.run(approval(short),token,context(),stall,()=>true),{message:'QUOTA_EXCEEDED'});
+    assert.equal(resolvers.length,2);resolvers.forEach(r=>r());await Promise.resolve();await Promise.resolve();
+    const result=await reranker.run(approval(cfg),token,context(),async hit=>{
+      verifySpan(hit,bytes[hits.findIndex(h=>h.sourceId===hit.sourceId)]!);
+    },()=>true);assert.equal(result.length,2);
+  },(req,res)=>requestBody(req,body=>reply(res,good(body.model))));
+});

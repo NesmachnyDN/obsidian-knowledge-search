@@ -72,7 +72,27 @@ if [[ "${OKS_HOST_NO_ROUTE:-0}" == 1 ]]; then
 fi
 env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolation[@]}" xvfb-run -a -e "$tmp/display.log" -s '-screen 0 1280x800x24' bash -c '
   set -euo pipefail
+  p=""
   mock_pid=""
+  cleanup() {
+    local status=$?
+    trap - EXIT
+    if [[ -n "$p" ]]; then kill "$p" 2>/dev/null || :; fi
+    if [[ -n "$mock_pid" ]]; then kill "$mock_pid" 2>/dev/null || :; fi
+    if [[ -n "$p" ]]; then wait "$p" 2>/dev/null || :; fi
+    if [[ -n "$mock_pid" ]]; then
+      wait "$mock_pid" 2>/dev/null || :
+      if kill -0 "$mock_pid" 2>/dev/null; then
+        echo "HOST_SMOKE_FAILURE: fixture not reaped" >&2; status=1
+      else
+        echo "OBSIDIAN_RERANK_FIXTURE_CLEANUP_PASS"
+      fi
+    fi
+    exit "$status"
+  }
+  trap cleanup EXIT
+  trap "exit 130" INT
+  trap "exit 143" TERM
   if [[ "${OKS_AI_RERANK_TEST:-0}" == 1 ]]; then
     ip link set lo up
     test "$(ip -o link show | wc -l)" -eq 1
@@ -84,7 +104,6 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
   fi
   "$app" --no-sandbox --disable-gpu --user-data-dir="$tmp/electron" > "$tmp/host.log" 2>&1 &
   p=$!
-  trap '\''kill "$p" 2>/dev/null || :; wait "$p" 2>/dev/null || :'\'' EXIT
   sleep 13
   version="$(timeout 8s "$cli" version)" || { echo "HOST_SMOKE_FAILURE: CLI unavailable after isolated host startup" >&2; exit 1; }
   [[ "$version" == *"1.15"* ]] || { echo "HOST_SMOKE_FAILURE: wrong version $version" >&2; exit 1; }
