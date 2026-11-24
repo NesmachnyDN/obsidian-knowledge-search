@@ -1,6 +1,8 @@
 # OKS-05P-D5 — Authoritative metadata eligibility for API retrieval
 
-Base: 36b6e5cddedc1ec0ff4f7564c45f0f9ae67bd33c. Standard bounded PR.
+Base: f8388636b92ba3d4432fa343aa51a5498587c0e1. Standard bounded PR.
+Reconciled with merged security PR #37; original implementation base
+36b6e5cddedc1ec0ff4f7564c45f0f9ae67bd33c. No D5 source changes.
 Authority: AGENTS, SECURITY, SDD, SPEC AC-01/05/06/07/09/10 (partial),
 ARCHITECTURE, ADR-0015, ROADMAP 05P, merged D1-D4 and D4 postmerge regression.
 
