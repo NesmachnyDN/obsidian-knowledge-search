@@ -24,7 +24,7 @@ const textBytes = (text: unknown, max: number): number => {
   return bytes;
 };
 
-type LoopbackPath = '/v1/rerank' | '/v1/chat/completions';
+type LoopbackPath = '/v1/rerank' | '/v1/chat/completions' | '/v1/embeddings';
 export function checkedCandidates(config: ProviderConfig, input: AuthorizedCandidates): string[] {
     if (!Array.isArray(input.passages) || input.passages.length < 1
       || input.passages.length > config.limits.maxCandidates) return fail('LIMIT_EXCEEDED');
@@ -42,7 +42,7 @@ export class LoopbackJsonTransport {
   async send(value: ProviderConfig, path: LoopbackPath, payload: unknown, token: string,
     context: CallContext): Promise<unknown> {
     const config = pilotConfig(value);
-    if (!['/v1/rerank','/v1/chat/completions'].includes(path)) return fail('ENDPOINT_DENIED');
+    if (!['/v1/rerank','/v1/chat/completions','/v1/embeddings'].includes(path)) return fail('ENDPOINT_DENIED');
     if (context.signal.aborted) return fail('CANCELLED');
     if (!Number.isSafeInteger(context.deadlineUnixMs)) return fail('CONFIG_INVALID');
     if (typeof token !== 'string' || !/^[A-Za-z0-9._~+\/=-]{1,512}$/.test(token)) return fail('UNAUTHENTICATED');
@@ -56,6 +56,7 @@ export class LoopbackJsonTransport {
     finally { this.busy = false; }
   }
   private post(origin: string, path: LoopbackPath, body: Buffer, token: string, signal: AbortSignal, timeout: number): Promise<unknown> {
+    const responseLimit = path === '/v1/embeddings' ? 1024 * 1024 : MAX_RESPONSE_BYTES;
     return new Promise((resolve, reject) => {
       // Explicit agent; never use environment proxy/global agent or follow redirects.
       const agent = new Agent({ keepAlive: false });
@@ -88,13 +89,13 @@ export class LoopbackJsonTransport {
           const length = res.headers['content-length'];
           if (!/^application\/json(?:\s*;|$)/i.test(res.headers['content-type'] ?? '')
             || res.headers['content-encoding'] && res.headers['content-encoding'] !== 'identity'
-            || length !== undefined && (!/^\d+$/.test(length) || Number(length) > MAX_RESPONSE_BYTES)) {
+            || length !== undefined && (!/^\d+$/.test(length) || Number(length) > responseLimit)) {
             finish(new ProviderFailure('INVALID_RESPONSE')); res.destroy(); return;
           }
           const chunks: Buffer[] = []; let size = 0;
           res.on('data', (chunk: Buffer) => {
             size += chunk.length;
-            if (size > MAX_RESPONSE_BYTES) { finish(new ProviderFailure('LIMIT_EXCEEDED')); res.destroy(); }
+            if (size > responseLimit) { finish(new ProviderFailure('LIMIT_EXCEEDED')); res.destroy(); }
             else chunks.push(chunk);
           });
           res.on('aborted', () => finish(new ProviderFailure('NETWORK')));

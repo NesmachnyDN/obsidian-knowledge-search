@@ -43,13 +43,14 @@ export class VerifiedEvidenceOperation {
       if(context.signal.aborted)cancel();
     });
   }
-  async run<T>(role: 'reranking' | 'generation', approval: EvidenceApproval, context: CallContext,
+  async run<T>(role: 'reranking' | 'generation' | 'embedding', approval: EvidenceApproval, context: CallContext,
     verify: (hit: EvidenceHit) => Promise<void>, current: () => boolean,
-    invoke: (config: ProviderConfig, input: import('./contracts').AuthorizedCandidates, context: CallContext) => Promise<T>): Promise<{result:T; evidence:readonly EvidenceHit[]}> {
+    invoke: (config: ProviderConfig, input: import('./contracts').AuthorizedCandidates, context: CallContext) => Promise<T>, queryOnly = false): Promise<{result:T; evidence:readonly EvidenceHit[]}> {
     if (this.busy) throw new ProviderFailure('QUOTA_EXCEEDED');
     const config = pilotConfig(approval.config);
-    if (!Array.isArray(approval.candidates) || approval.candidates.length < 1
-      || approval.candidates.length > config.limits.maxCandidates) throw new ProviderFailure('LIMIT_EXCEEDED');
+    if (!Array.isArray(approval.candidates) || (queryOnly
+      ? role !== 'embedding' || approval.candidates.length !== 0 || approval.grant.sources.length !== 0
+      : approval.candidates.length < 1) || approval.candidates.length > config.limits.maxCandidates) throw new ProviderFailure('LIMIT_EXCEEDED');
     const snapshot = structuredClone(approval);
     if (!Number.isSafeInteger(context.deadlineUnixMs)) throw new ProviderFailure('CONFIG_INVALID');
     context = {signal:context.signal,deadlineUnixMs:Math.min(context.deadlineUnixMs,Date.now()+config.limits.timeoutMs)};
