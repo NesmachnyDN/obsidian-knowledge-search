@@ -10,11 +10,11 @@ export type IngestionConfig = {
   tessdataPath: string; artifactsPath: string; pdfMode: 'text' | 'ocr' | 'structured' | 'structured-ocr';
 };
 export type SearchSettings = {
-  version: 5; ai: ProviderPreferences; enabled: boolean; paused: boolean; topK: number; propertiesEnabled: boolean;
+  version: 6; presentationMode: 'basic' | 'expert'; ai: ProviderPreferences; enabled: boolean; paused: boolean; topK: number; propertiesEnabled: boolean;
   advanced: AdvancedConfig; ingestion: IngestionConfig; probe: ProbeConfig;
 };
 export const defaultSettings = (): SearchSettings => ({
-  version: 5, ai: defaultProviderPreferences(), enabled: true, paused: false, topK: 10, propertiesEnabled: false,
+  version: 6, presentationMode: 'basic', ai: defaultProviderPreferences(), enabled: true, paused: false, topK: 10, propertiesEnabled: false,
   advanced: { enabled: false, profile: 'none', interpreter: '', entry: '' },
   ingestion: { enabled: false, interpreter: '', entry: '', tokenizerSnapshot: '',
     tessdataPath: '', artifactsPath: '', pdfMode: 'text' },
@@ -62,8 +62,10 @@ export function parseSettings(v: unknown): SearchSettings {
     if (!probe(old)) throw new StandaloneError('SETTINGS_INVALID');
     return { ...defaultSettings(), probe: { ...old } };
   }
-  if (!isRecord(v) || ![2,3,4,5].includes(v.version as number)
-      || !keys(v, ['version','enabled','paused','topK','propertiesEnabled','advanced','ingestion','probe','ai'])
+  if (!isRecord(v) || ![2,3,4,5,6].includes(v.version as number)
+      || !keys(v, ['version','presentationMode','enabled','paused','topK','propertiesEnabled','advanced','ingestion','probe','ai'])
+      || (v.version === 6 && !['basic','expert'].includes(String(v.presentationMode)))
+      || (v.version !== 6 && v.presentationMode !== undefined)
       || typeof v.enabled !== 'boolean' || typeof v.paused !== 'boolean' || typeof v.propertiesEnabled !== 'boolean'
       || !Number.isInteger(v.topK) || Number(v.topK) < 1 || Number(v.topK) > BOUNDS.limit || !probe(v.probe))
     throw new StandaloneError('SETTINGS_INVALID');
@@ -78,9 +80,10 @@ export function parseSettings(v: unknown): SearchSettings {
       interpreter:v.advanced.interpreter, entry:v.advanced.entry };
   }
   const ingest = (v.version as number) < 4 ? defaultSettings().ingestion : v.ingestion;
-  if (!ingestion(ingest) || ((v.version as number) < 4 && v.ingestion !== undefined) || (v.version !== 5 && v.ai !== undefined))
+  if (!ingestion(ingest) || ((v.version as number) < 4 && v.ingestion !== undefined) || ((v.version as number) < 5 && v.ai !== undefined))
     throw new StandaloneError('SETTINGS_INVALID');
-  return { version:5, ai: v.version === 5 ? parseProviderPreferences(v.ai) : defaultProviderPreferences(), enabled:v.enabled, paused:v.paused, topK:v.topK as number,
+  return { version:6, presentationMode:v.version === 6 ? v.presentationMode as 'basic'|'expert' : 'basic',
+    ai: (v.version as number) >= 5 ? parseProviderPreferences(v.ai) : defaultProviderPreferences(), enabled:v.enabled, paused:v.paused, topK:v.topK as number,
     propertiesEnabled:v.propertiesEnabled, advanced:active,
     ingestion: { ...ingest }, probe: { ...v.probe } };
 }

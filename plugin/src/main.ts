@@ -140,7 +140,8 @@ export default class SyntheticEvidencePlugin extends Plugin {
       () => this.advancedIngestion.snapshot(), () => this.ingestAdvancedActiveFile(),
       () => this.advancedRetrieval.snapshot(), () => this.indexAdvancedActiveFile(),
       () => this.openAdvancedSearch(), () => this.cancelAdvancedWork(),
-      () => this.indexAdvancedActiveFile(true)));
+      () => this.indexAdvancedActiveFile(true), () => this.searchController.status(),
+      () => this.searchController.snapshot().response ?? undefined));
     this.addCommand({ id:'ingest-active-advanced-source', name:'Ingest active Vault document (Advanced opt-in)',
       callback: () => { void this.ingestAdvancedActiveFile().catch(error =>
         new Notice('OKS Advanced: '+(error instanceof IngestError?error.code:'ADVANCED_UNAVAILABLE'))); } });
@@ -209,6 +210,15 @@ export default class SyntheticEvidencePlugin extends Plugin {
       if (this.purgeInFlight) await this.purgeInFlight.catch(() => {});
       if (this.unloaded) return;
       const settings = parseSettings(change(this.settings));
+      if (JSON.stringify(settings) === JSON.stringify(this.settings)) return;
+      // A view preference never revokes live requests, grants or index state.
+      const {presentationMode: _oldMode, ...beforeRuntime} = this.settings;
+      const {presentationMode: _newMode, ...afterRuntime} = settings;
+      if (JSON.stringify(beforeRuntime) === JSON.stringify(afterRuntime)) {
+        await this.saveData(settings);
+        if (!this.unloaded) this.settings = settings;
+        return;
+      }
       this.denseSettingsChanging = true;
       try {
         this.denseMachine.invalidate();
