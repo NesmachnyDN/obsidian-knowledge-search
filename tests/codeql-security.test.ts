@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
-import { mkdtemp, mkdir, readFile, rm, writeFile, symlink, link, chmod } from 'node:fs/promises';
+import fs from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile, symlink, link, chmod, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { strictFile } from '../plugin/src/advanced/storage';
@@ -89,4 +90,65 @@ test('CodeQL #6: dedicated worker ignores foreign-origin and foreign-source mess
   scope.onmessage!({ origin: '', source: null, data: { id: 3 } });
   assert.equal(sent.length, 1, 'creator-origin messages still reach the protocol validator');
   assert.deepEqual(JSON.parse(JSON.stringify(sent[0])), { id: 3, error: 'PARSER_PROTOCOL_ERROR' });
+});
+
+test('W1: missing or replaced Vault root produces typed identity failure', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'oks-sec-root-'));
+  const vault = join(base, 'vault'), moved = join(base, 'moved'), foreign = join(base, 'foreign');
+  try {
+    await mkdir(vault); await mkdir(foreign);
+    await writeFile(join(vault, 'note.md'), 'safe');
+    await writeFile(join(foreign, 'note.md'), 'foreign');
+    const reader = await BoundedVaultReader.open(vault, () => ['note.md']);
+    await rename(vault, moved);
+    await assert.rejects(reader.read('note.md'), { code: 'VAULT_IDENTITY_CHANGED' });
+    await assert.rejects(reader.list(), { code: 'VAULT_IDENTITY_CHANGED' });
+    await symlink(foreign, vault);
+    await assert.rejects(reader.read('note.md'), { code: 'VAULT_IDENTITY_CHANGED' });
+    await assert.rejects(reader.versionHints(['note.md']), { code: 'VAULT_IDENTITY_CHANGED' });
+    await rm(vault);
+    await mkdir(vault);
+    await assert.rejects(reader.read('note.md'), { code: 'VAULT_IDENTITY_CHANGED' });
+  } finally { await rm(base, { recursive: true, force: true }); }
+});
+test('W1: filesystem failure after root open closes root and rejects source', async t => {
+  const vault = await mkdtemp(join(tmpdir(), 'oks-sec-root-failure-'));
+  const reader = await BoundedVaultReader.open(vault, () => ['note.md']);
+  const original = fs.open;
+  let openedRoot: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    const mock = t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      if (String(args[0]).endsWith('/note.md')) throw new Error('synthetic I/O failure');
+      const handle = await original(...args);
+      if (args[0] === vault) openedRoot = handle;
+      return handle;
+    });
+    try {
+      await assert.rejects(reader.read('note.md'), { code: 'SOURCE_REJECTED' });
+      assert.ok(openedRoot);
+      assert.equal(openedRoot.fd, -1);
+    } finally { mock.mock.restore(); }
+  } finally { await rm(vault, { recursive: true, force: true }); }
+});
+
+test('W1: root open and descriptor-stat failures are typed and close any opened root', async t => {
+  const vault = await mkdtemp(join(tmpdir(), 'oks-sec-root-io-'));
+  const reader = await BoundedVaultReader.open(vault, () => ['note.md']);
+  const original = fs.open;
+  let opened: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    for (const operation of ['open', 'stat']) {
+      const mock = t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+        if (args[0] !== vault) return original(...args);
+        if (operation === 'open') throw new Error('synthetic root open failure');
+        opened = await original(...args);
+        t.mock.method(opened, 'stat', async () => { throw new Error('synthetic root stat failure'); });
+        return opened;
+      });
+      try {
+        await assert.rejects(reader.read('note.md'), { code: 'VAULT_IDENTITY_CHANGED' });
+        if (operation === 'stat') { assert.ok(opened); assert.equal(opened.fd, -1); }
+      } finally { mock.mock.restore(); }
+    }
+  } finally { await rm(vault, { recursive: true, force: true }); }
 });

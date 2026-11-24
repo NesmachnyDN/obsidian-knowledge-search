@@ -22,16 +22,21 @@ export class BoundedVaultReader implements SourceProvider {
   static async open(root: string, enumerate: () => string[]): Promise<BoundedVaultReader> {
     if (!isAbsolute(root)) throw new StandaloneError('UNSUPPORTED_FILESYSTEM');
     const absolute = resolve(root);
-    const info = await lstat(absolute);
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new StandaloneError('UNSUPPORTED_FILESYSTEM');
-    const canonical = await realpath(absolute);
-    if (canonical !== absolute) throw new StandaloneError('UNSUPPORTED_FILESYSTEM');
-    return new BoundedVaultReader(absolute, info.dev, info.ino, enumerate);
+    try {
+      const info = await lstat(absolute);
+      if (!info.isDirectory() || info.isSymbolicLink()) throw new StandaloneError('UNSUPPORTED_FILESYSTEM');
+      const canonical = await realpath(absolute);
+      if (canonical !== absolute) throw new StandaloneError('UNSUPPORTED_FILESYSTEM');
+      return new BoundedVaultReader(absolute, info.dev, info.ino, enumerate);
+    } catch { throw new StandaloneError('UNSUPPORTED_FILESYSTEM'); }
   }
   private async rootCheck(): Promise<void> {
-    const info = await lstat(this.root);
-    if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== this.device || info.ino !== this.inode)
-      throw new StandaloneError('VAULT_IDENTITY_CHANGED');
+    try {
+      const info = await lstat(this.root);
+      if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== this.device || info.ino !== this.inode
+          || await realpath(this.root) !== this.root)
+        throw new StandaloneError('VAULT_IDENTITY_CHANGED');
+    } catch { throw new StandaloneError('VAULT_IDENTITY_CHANGED'); }
   }
   async list(): Promise<string[]> {
     await this.rootCheck();
@@ -78,16 +83,21 @@ export class BoundedVaultReader implements SourceProvider {
     const parts = relative.split('/');
     // Linux descriptor-anchored walk forbids redirecting an ancestor via symlink.
     const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
-    let directory = await open(this.root, directoryFlags);
+    let directory: Awaited<ReturnType<typeof open>> | undefined;
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
-      const rootInfo = await directory.stat();
-      if (!rootInfo.isDirectory() || rootInfo.dev !== this.device || rootInfo.ino !== this.inode)
-        throw new StandaloneError('VAULT_IDENTITY_CHANGED');
+      try {
+        directory = await open(this.root, directoryFlags);
+        const rootInfo = await directory.stat();
+        if (!rootInfo.isDirectory() || rootInfo.dev !== this.device || rootInfo.ino !== this.inode)
+          throw new StandaloneError('VAULT_IDENTITY_CHANGED');
+        await this.rootCheck();
+      } catch { throw new StandaloneError('VAULT_IDENTITY_CHANGED'); }
       for (const part of parts.slice(0, -1)) {
         const child = await open('/proc/self/fd/' + directory.fd + '/' + part, directoryFlags);
-        await directory.close();
+        const previous = directory;
         directory = child;
+        await previous.close();
       }
       handle = await open('/proc/self/fd/' + directory.fd + '/' + parts[parts.length - 1]!,
         constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -115,10 +125,10 @@ export class BoundedVaultReader implements SourceProvider {
       if (cause instanceof StandaloneError) throw cause;
       // ENOTDIR/ELOOP from descriptor traversal is an explicit denied source,
       // never an untyped filesystem error or a fallback to pathname reading.
+      await this.rootCheck();
       throw new StandaloneError('SOURCE_REJECTED');
     } finally {
-      await handle?.close();
-      await directory.close();
+      try { await handle?.close(); } finally { await directory?.close(); }
     }
   }
 }
