@@ -50,6 +50,12 @@ merge before calling the phase complete.
   no-route host; three Russian Settings screenshots cover 900/760px and 200% zoom.
 - English compatibility retains the existing real-host UX and visual regression
   scripts; no production Vault or AI provider is required.
+- Native EN → RU → EN acceptance, including Obsidian's own language selector,
+  Relaunch, Basic/Expert, AI labels and application restart, runs using
+  `OKS_06UX_L10N_SWITCH_TEST=1` in the same disposable no-route host.
+- The full host smoke re-establishes a verified current search result after
+  Settings acceptance invalidates old UI results, then retains the exact
+  source-file and excerpt-selection checks for command navigation.
 
 ## Explicitly not included
 

@@ -149,6 +149,50 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
   initial="$(timeout 8s "$cli" eval "code=JSON.stringify({plugin:!!app.plugins.plugins[\"oks-synthetic-evidence\"],status:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standalone?.status(),error:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standaloneError})")"
   [[ "$initial" == *"\"status\":\"ready\""* && "$initial" == *"\"sources\":2"* ]] ||
     { printf "HOST_SMOKE_FAILURE: native plugin not indexed; result=%s\n" "$initial" >&2; exit 1; }
+  if [[ "${OKS_06UX_L10N_SWITCH_TEST:-0}" == 1 ]]; then
+    [[ "${OKS_HOST_NO_ROUTE:-0}" == 1 && -n "${OKS_STANDALONE_PACKAGE_DIR:-}" ]] ||
+      { echo "HOST_SMOKE_FAILURE: native locale switching requires isolated packaged host" >&2; exit 2; }
+    language_phase() {
+      local action="$1" result
+      timeout 8s "$cli" eval "code=(globalThis.__oksNativeLanguageAction=\"$action\",true)" >/dev/null
+      result="$(timeout 25s "$cli" eval "code=$(cat "$repo/scripts/obsidian-settings-native-language-smoke.js")")"
+      [[ "$result" == *"OBSIDIAN_NATIVE_LANGUAGE_PASS:"* ]] ||
+        { echo "HOST_SMOKE_FAILURE: native language $action ($result)" >&2; exit 1; }
+      printf "%s\n" "$result"
+    }
+    native_restart() {
+      # First allow Obsidian native visible Relaunch action to apply the locale
+      # and persist it in its isolated application profile.
+      sleep 3
+      # Then test durability across a full host process restart using that
+      # same disposable profile. The test controls only the process it launched.
+      if kill -0 "$p" 2>/dev/null; then
+        [[ "$(ps -p "$p" -o args=)" == *"--user-data-dir=$tmp/electron"* ]] ||
+          { echo "HOST_SMOKE_FAILURE: isolated host process identity mismatch" >&2; exit 1; }
+        kill "$p" 2>/dev/null || :
+      fi
+      wait "$p" 2>/dev/null || :
+      "$app" --no-sandbox --disable-gpu --ozone-platform=x11 --user-data-dir="$tmp/electron" > "$tmp/host-restarted.log" 2>&1 &
+      p=$!
+      sleep 13
+      timeout 8s "$cli" version >/dev/null
+      timeout 8s "$cli" plugins:restrict off >/dev/null
+      sleep 3
+    }
+    language_phase verify-en
+    language_phase set-ru
+    sleep 3
+    language_phase verify-ru
+    native_restart
+    language_phase verify-ru
+    language_phase set-en
+    sleep 3
+    language_phase verify-en
+    native_restart
+    language_phase verify-en
+    echo "OBSIDIAN_NATIVE_LANGUAGE_SWITCH_PASS: EN to RU to EN via actual General selector and host restarts"
+    exit 0
+  fi
   if [[ "${OKS_06UX_L10N_RU_TEST:-0}" == 1 ]]; then
     # Native host locale must be Russian for this isolated-synthetic test.
     locale_test="$(timeout 30s "$cli" eval "code=$(cat "$repo/scripts/obsidian-settings-ru-smoke.js")")"
@@ -244,6 +288,12 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
       { echo "HOST_SMOKE_FAILURE: advanced explicit health scenario ($advanced)" >&2; exit 1; }
     printf "%s\n" "$advanced"
   fi
+  # Settings tests legitimately invalidate the prior UI response; establish a fresh
+  # real search result before checking the command exact source navigation.
+  command_source="$(timeout 20s "$cli" eval "code=$(cat "$repo/scripts/obsidian-host-command-source.js")")"
+  [[ "$command_source" == *"OBSIDIAN_HOST_COMMAND_SOURCE_READY:"* ]] ||
+    { echo "HOST_SMOKE_FAILURE: source-command search precondition ($command_source)" >&2; exit 1; }
+  printf "%s\n" "$command_source"
   timeout 8s "$cli" command id=oks-synthetic-evidence:open-first-search-source >/dev/null
   sleep 1
   navigation="$(timeout 8s "$cli" eval "code=JSON.stringify({path:app.workspace.getMostRecentLeaf()?.view?.file?.path,selected:app.workspace.getMostRecentLeaf()?.view?.editor?.getSelection()})")"

@@ -38,6 +38,23 @@ LANG=ru_RU.UTF-8 LANGUAGE=ru_RU:ru LC_ALL=ru_RU.UTF-8 \
   bash scripts/obsidian-host-smoke.sh
 ```
 
+A separate end-to-end locale-switch gate uses the **native Obsidian General
+→ Language selector**, actual Electron input events and its visible Relaunch
+action, then restarts only the disposable test process to validate persistence:
+
+```sh
+LANG=en_US.UTF-8 LANGUAGE=en_US:en LC_ALL=en_US.UTF-8 \
+  OKS_06UX_L10N_SWITCH_TEST=1 OKS_HOST_NO_ROUTE=1 \
+  OKS_STANDALONE_PACKAGE_DIR="$PWD/build/standalone-package" \
+  bash scripts/obsidian-host-smoke.sh
+```
+
+It verifies EN → RU → EN, Basic and Expert headings, independently rendered AI
+connection editors and accessible labels, unchanged saved settings and index
+generation, and the locale after a full application restart. The harness does
+not stub `getLanguage()`; it operates only inside a synthetic Vault and an
+isolated, no-route Electron profile.
+
 The RU harness uses only an isolated generated Vault and a network-isolated
 session. It asserts Russian controls, accessible labels, AI connection draft
 validation, independent offline search, unchanged settings and index generation,
