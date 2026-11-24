@@ -1,7 +1,6 @@
-import { readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { hash } from '../../plugin/src/standalone/contracts';
-import { loadInputs, loadJudgments } from './corpus';
+import { loadInputs, loadJudgments, loadCandidates } from './corpus';
 import { capture } from './capture';
 import { fixtureTrials } from './fixture';
 import { summarize } from './report';
@@ -18,14 +17,14 @@ async function run() {
       // Explicit stdout export; never overwrite frozen artifacts automatically.
       process.stdout.write(payload);return null;
     }
-    const frozen=await readFile('benchmarks/rerank/corpus/candidates.jsonl','utf8');
+    const frozen=await loadCandidates(inputs.candidateSha256);
     assert.equal(payload,frozen,'FROZEN_CANDIDATES_CHANGED');
     const trials=await fixtureTrials(captured,host);
     // Reference labels are loaded only once every capture/provider trial is over.
     return {candidates,candidateSha256:hash(payload),trials,captured};
   });
   if(!result)return;
-  const judgments=await loadJudgments(inputs.sources,inputs.queries);
+  const judgments=await loadJudgments(inputs.sources,inputs.queries,inputs.judgmentSha256);
   const {baseline,fixture}=summarize(result.captured,judgments,result.trials);
   const counts=result.candidates.map(q=>q.candidates.length);
   console.log(JSON.stringify({schema:'oks-06a-harness-v1',status:'synthetic-fixture-only',

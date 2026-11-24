@@ -4,12 +4,14 @@ Status: implementation candidate; independent SDD review pending. Contract: [OKS
 
 ## Corpus and freeze
 
-The JSONL source bundle contains 60 invented Markdown notes: 20 independent architecture families with an accepted and rejected alternative each, plus 20 unrelated technical distractor notes. 120 authored query/label pairs, split by whole family (5 tuning families/30 queries, 15 held-out families/90 queries), with 15 held-out exact-ID and 15 unanswerable queries. Categories: exact identifier, design decision, requirement, table value, typed Property intersection, negative. English, Russian and mixed technical wording. Direct evidence grade 2; supporting grade 1; absent grade 0. Sources, request inputs and judgments are separate files, with source-byte and file digests. Retrieval/provider code never receives judgments. The authored labels must be independently reviewed before any held-out model execution. These short synthetic notes do not constitute independent human labels or representative production traffic; queries within a family are correlated.
+Corpus v2 contains 80 invented Markdown notes: 20 architecture families with accepted, rejected and review/operational notes, plus 20 cross-domain technical distractors. The 120 queries remain split by family (30 tuning/90 held-out), including 15 held-out exact-ID and 15 unanswerable queries. Categories: exact identifier, design decision, requirement, table value, typed Property intersection, negative. English, Russian and mixed technical wording. Grade 2 denotes direct normative or directly answering evidence; grade 1 corroborates or supports but is not the authoritative answer; grade 0 denotes irrelevant evidence (including references that merely repeat a requirement ID). Unlisted spans are nonrelevant. Sources, request inputs and judgments are separate files. Retrieval/provider code never receives judgments. Labels require independent review before any held-out model execution.
 
-Before freeze, a model-free candidate-count preflight found no full Top-50 list. Twenty distractor notes were added to exercise broader retrieval and one negative query was made an unknown identifier to exercise no-call behavior. No model outputs or relevance scores were consulted for those changes. The final source/query/judgment files are frozen; do not modify them after seeing held-out scores. Historical corpus/v1 is unchanged.
+The initial H candidate (c536fe3f28984a00562b5728537cf3c200b3a3be) had no full Top-50 held-out query, all held-out exact IDs were singletons, and Properties/line positions were overly homogeneous. In response to independent review B-CORPUS-01, before any real model execution, v2 adds domain-specific review evidence, explicit rejected/traceability collisions, more diverse layouts and natural RU/EN question formulations, and five typed Property forms (boolean, number, list contains, date and string, some combined with domain). Relevance grades are re-judged by semantic content and authority, not physical line template; review observations can corroborate but are not normative. Model-free candidate-count preflight verified list syntax and that slash/hyphen token semantics did not unintentionally make answerable queries empty. No real-model scores, outputs or acceptance margins were used or changed. Prior H v1 is recoverable from its original Git commit; historical benchmarks/corpus/v1 is unchanged.
 
-- Corpus manifest SHA-256: `90d1fca4be775b6c08771289e1fb82519649b0d7663c1d79bb4513ffebbd568d`
-- Candidate manifest SHA-256: `321c8bb3f936a3eefe592deac50927b211691858a913dda652c9ff5b71c0ece9`
+- Corpus manifest SHA-256: `f912dcbe66fc85bd86fc2c20ea296fe275fc9749928e1412e3f604c8a7fd2b08`
+- Candidate manifest SHA-256: `86a3cc7bc9f6a0d272a568ab320bfae8fbbf1fa94b552f8d7a58c6e5f1e751a6`
+
+All four artifact digests, including candidate JSONL, are pinned in the single v2 manifest snapshot. To address B-SEC-01/02, all reads use an anchored Linux descriptor walk, O_NOFOLLOW/O_NONBLOCK, regular single-link fstat checks, actual 2 MiB read cap, pre/post identity and timestamp checks and digest verification. Manifest/judgment digests are retained from the initial read rather than reopening the manifest after the trials. Test-only paths use the same reader. Negative tests cover symlinks (including ancestors), directory, FIFO, hard link, oversized input, growth during read, replacement and digest mismatch. This mitigates the concrete race without alert suppression; the committed corpus/manifest remains the trusted review input, not an authenticated external dataset.
 
 The candidate manifest deduplicates immutable source spans by SHA-256 of source identity, source digest and complete locator. Each query records the exact input digest and ordered IDs (one-based position = original rank). Catalog entries retain source/excerpt digests and full original locator. Actual per-run generation identity is pinned in memory but excluded from the portable manifest because the isolated root identity changes across runs. Candidate manifest equality is byte-for-byte, not approximate. Labels are validated by exact source digest and physical line.
 
@@ -33,11 +35,11 @@ The fixture uses two deliberately non-model ranking profiles (original order and
 
 | Check | Result |
 |---|---|
-| Frozen candidate capture and independent limit=20 parity | 120/120, 275 unique spans |
-| Candidate coverage | 42 queries >=20, one full 50, one empty; no padding |
+| Frozen candidate capture and independent limit=20 parity | 120/120, 587 unique spans |
+| Candidate coverage | 75 queries >=20, 30 full 50; held-out 56 >=20, 24 full 50 (22 answerable); one empty; no padding |
 | Fixture | 60 successful authenticated operations, 12 no-candidate outcomes, no model calls |
 | TypeScript typecheck | PASS |
-| Node regression | 326 PASS / 4 SKIP / 0 FAIL |
+| Node regression | 327 PASS / 4 SKIP / 0 FAIL |
 | Python regression | 133 PASS / 5 SKIP / 0 FAIL |
 | License verification, production build and package | PASS; package 17 PASS |
 | Historical standalone benchmark | PASS; tracked historical result restored unchanged |
@@ -46,10 +48,10 @@ Author lexical baseline (positive queries only, K=10, both N=20 and 50):
 
 | Split | nDCG | MRR | Recall | Precision | Exact direct hits |
 |---|---:|---:|---:|---:|---:|
-| Tuning | 0.9134 | 0.9400 | 0.9600 | 0.1360 | 5/5 |
-| Held-out | 0.8938 | 0.9086 | 0.9200 | 0.1253 | 15/15 |
+| Tuning | 0.8847 | 0.9333 | 0.9000 | 0.1400 | 5/5 |
+| Held-out | 0.7874 | 0.8514 | 0.8602 | 0.1440 | 15/15 |
 
-Candidate recall ceiling held-out 0.98; negatives with lexical hits 4/5 tuning and 15/15 held-out. These are model-free author measurements, not reranker evaluation/acceptance. Only one full-50 query and correlated family labels limit inference about high-K workloads. No changes to relevance labels or acceptance margins after these scores. Node/Python optional integration skips are not evidence of real model support.
+Held-out candidate recall ceiling: 0.9158 at N=20 and 0.9433 at N=50. All 15 held-out exact-ID queries now have competing candidates (nine with 4, six with 13); the latter can actually lose a direct hit at K=10. All 20 typed-Property cases have candidates. These are model-free author measurements, not model acceptance. Coverage assertions protect the new frozen corpus from regression; they are not new model-selection margins. Remaining limitations: compact synthetic documents, correlated query families, common author, heterogeneous but still constructed layouts, nine exact-ID lists shorter than K=10, no population-level representativeness. Neither the independent corpus adequacy review nor model acceptance is self-certified. Node/Python optional integration skips are not evidence of model support.
 
 ## Remaining gates
 

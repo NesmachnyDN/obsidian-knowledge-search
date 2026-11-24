@@ -1,33 +1,27 @@
-import { readFile, lstat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readArtifact } from './artifact';
 import { hash, validPath, validateRequest, PROTOCOL, BOUNDS } from '../../plugin/src/standalone/contracts';
 import type { CorpusSource, QueryInput, Judgment } from './types';
 
 const ROOT = 'benchmarks/rerank/corpus';
 const FILES = ['sources.jsonl', 'requests.jsonl', 'judgments.jsonl'] as const;
 type File = typeof FILES[number];
-type Manifest = { schema: string; counts: { sources: number; tuning: number; held_out: number }; files: Record<File, string> };
-async function bounded(name: string): Promise<Buffer> {
-  const path = join(ROOT, name);
-  const st = await lstat(path);
-  if (!st.isFile() || st.isSymbolicLink() || st.size > 1024 * 1024) throw Error('CORPUS_FILE_INVALID');
-  return readFile(path);
-}
-async function manifest(): Promise<Manifest> {
-  const m = JSON.parse((await bounded('manifest.json')).toString()) as Manifest;
-  if (m.schema !== 'oks-06a-corpus-v1' || m.counts.sources !== 60 ||
+type Manifest = { schema: string; counts: { sources: number; tuning: number; held_out: number }; files: Record<File | 'candidates.jsonl', string> };
+async function manifest() {
+  const raw = await readArtifact(ROOT, 'manifest.json');
+  const m = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw)) as Manifest;
+  if (m.schema !== 'oks-06a-corpus-v2' || m.counts.sources !== 80 ||
       m.counts.tuning !== 30 || m.counts.held_out !== 90 ||
-      Object.keys(m.files).sort().join() !== [...FILES].sort().join()) throw Error('CORPUS_MANIFEST_INVALID');
-  return m;
+      Object.keys(m.files).sort().join() !== [...FILES, 'candidates.jsonl'].sort().join() ||
+      Object.values(m.files).some(d => !/^[a-f0-9]{64}$/.test(d))) throw Error('CORPUS_MANIFEST_INVALID');
+  return { manifest: m, manifestSha256: hash(raw) };
 }
 async function rows<T>(file: File, m: Manifest): Promise<T[]> {
-  const raw = await bounded(file);
-  if (hash(raw) !== m.files[file]) throw Error('CORPUS_DIGEST_MISMATCH');
+  const raw = await readArtifact(ROOT, file, m.files[file]);
   return new TextDecoder('utf-8', { fatal: true }).decode(raw).trimEnd().split('\n').map(line => JSON.parse(line) as T);
 }
 /** Deliberately never reads judgments during retrieval/provider execution. */
 export async function loadInputs() {
-  const m = await manifest();
+  const { manifest: m, manifestSha256 } = await manifest();
   const sources = await rows<CorpusSource>('sources.jsonl', m);
   const queries = await rows<QueryInput>('requests.jsonl', m);
   if (sources.length !== m.counts.sources || new Set(sources.map(s => s.path)).size !== sources.length ||
@@ -44,7 +38,7 @@ export async function loadInputs() {
   if (queries.length !== 120 || queries.filter(q => q.split === 'tuning').length !== 30 ||
       groups.size !== 20 || [...groups.keys()].some(g => queries.filter(q => q.group === g).length !== 6))
     throw Error('CORPUS_SPLIT_INVALID');
-  return { sources, queries, manifestSha256: hash(await bounded('manifest.json')) };
+  return { sources, queries, manifestSha256, candidateSha256: m.files['candidates.jsonl'], judgmentSha256: m.files['judgments.jsonl'] };
 }
 export function requestFor(q: QueryInput, limit: 20 | 50) {
   return { protocolVersion: PROTOCOL, requestId: q.id, query: q.query,
@@ -52,9 +46,14 @@ export function requestFor(q: QueryInput, limit: 20 | 50) {
     ...(q.scope ? { scope: q.scope } : {}), ...(q.predicates ? { predicates: q.predicates } : {}),
     ...(q.metadata ? { metadata: q.metadata } : {}) };
 }
+/** Candidate bytes are verified before any fixture operation. */
+export async function loadCandidates(expectedDigest: string): Promise<string> {
+  return new TextDecoder('utf-8', { fatal: true }).decode(await readArtifact(ROOT, 'candidates.jsonl', expectedDigest));
+}
 /** Called only by evaluation AFTER retrieval and all fixture trials have settled. */
-export async function loadJudgments(sources: CorpusSource[], queries: QueryInput[]) {
-  const labels = await rows<Judgment>('judgments.jsonl', await manifest());
+export async function loadJudgments(sources: CorpusSource[], queries: QueryInput[], expectedDigest: string) {
+  const raw = await readArtifact(ROOT, 'judgments.jsonl', expectedDigest);
+  const labels = new TextDecoder('utf-8', { fatal: true }).decode(raw).trimEnd().split('\n').map(line => JSON.parse(line) as Judgment);
   const byPath = new Map(sources.map(s => [s.path, s]));
   const queryIds = new Set(queries.map(q => q.id));
   if (labels.length !== queries.length || new Set(labels.map(j => j.id)).size !== labels.length)
