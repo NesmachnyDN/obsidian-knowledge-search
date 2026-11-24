@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm, symlink, mkdir, link, open, rename, appendFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { mkdtemp, writeFile, rm, symlink, mkdir, link, open, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -59,19 +60,28 @@ test('frozen artifacts reject symlinks, nonregular files, oversized bytes, diges
     await assert.rejects(readArtifact(root,'manifest.json'),/CORPUS_FILE_INVALID/);
     await symlink(root,join(root,'alias'));
     await assert.rejects(readArtifact(join(root,'alias'),'sources.jsonl'));
-    const old=await open(path,'r');
+    const stage=join(root,'replacement-stage');
+    const growing=await open(stage,constants.O_CREAT|constants.O_EXCL|constants.O_RDWR|constants.O_NOFOLLOW,0o600);
     try {
-      await rename(path,join(root,'replaced'));
-      await writeFile(path,'replacement');
-      await assert.rejects(readOpenedArtifact(old,path),/CORPUS_FILE_CHANGED/);
-    } finally {await old.close();}
-    const growing=await open(path,'r');
-    try {
+      const replacement=Buffer.from('replacement');
+      await growing.writeFile(replacement);
+      const old=await open(path,constants.O_RDONLY|constants.O_NOFOLLOW);
+      try {
+        // Retain the old inode so the reader detects a changed pathname, not an unlinked file.
+        await rename(path,join(root,'replaced'));
+        await rename(stage,path);
+        await assert.rejects(readOpenedArtifact(old,path),/CORPUS_FILE_CHANGED/);
+      } finally {await old.close();}
       const read=growing.read.bind(growing);
       let first=true;
-      // Deterministically grow the actual file after fstat and before the first read.
+      // Grow the same opened inode after fstat and before the first read; never reopen by name.
       Object.defineProperty(growing,'read',{value:async(buffer:Buffer,offset:number,length:number,position:number)=>{
-        if(first){first=false;await appendFile(path,Buffer.alloc(2*1024*1024));}
+        if(first){
+          first=false;
+          const growth=Buffer.alloc(2*1024*1024);
+          const {bytesWritten}=await growing.write(growth,0,growth.length,replacement.length);
+          assert.equal(bytesWritten,growth.length);
+        }
         return read(buffer,offset,length,position);
       }});
       await assert.rejects(readOpenedArtifact(growing,path),/CORPUS_FILE_LIMIT/);
