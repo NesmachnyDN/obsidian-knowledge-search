@@ -111,3 +111,24 @@ test('D7 expiry and provider failures never paint lexical success; asynchronous 
     assert.equal(f.counts().navRevocations,before+1);
   }finally{f.controller.dispose();}
 });
+
+test('UX-AC06: dense operation metadata is bounded, truthful and owner-independent without evidence',async()=>{
+  const f=fixture(),owner=Symbol(),other=Symbol(),pending=deferred<ApiRetrievalResult>();
+  try{
+    assert.deepEqual(f.controller.operationStatus(),{phase:'idle',error:null});
+    const work=f.controller.prepare(owner,req);
+    assert.deepEqual(f.controller.operationStatus(),{phase:'busy',error:null});
+    await work;
+    assert.deepEqual(f.controller.operationStatus(),{phase:'permission-required',error:null});
+    assert.equal(f.controller.snapshot(other).phase,'idle');
+    f.host.confirm=()=>pending.promise;
+    const running=f.controller.confirm(owner,'fixture-preview','synthetic','fixture');
+    assert.deepEqual(f.controller.operationStatus(),{phase:'busy',error:null});
+    pending.resolve(result);await running;
+    assert.deepEqual(f.controller.operationStatus(),{phase:'complete',error:null});
+    f.host.confirm=async()=>({...result,status:'failed',executedMode:'none',error:'RATE_LIMITED',hits:[]});
+    await f.controller.prepare(owner,req);await f.controller.confirm(owner,'fixture-preview','synthetic','fixture');
+    assert.deepEqual(f.controller.operationStatus(),{phase:'failed',error:'RATE_LIMITED'});
+    f.controller.invalidate();assert.deepEqual(f.controller.operationStatus(),{phase:'idle',error:null});
+  }finally{f.controller.dispose();}
+});

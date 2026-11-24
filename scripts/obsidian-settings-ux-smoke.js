@@ -13,6 +13,7 @@
   assert(p.settings.presentationMode === 'basic', 'DEFAULT_BASIC');
   assert(Object.values(p.settings.ai).every(pref => pref.state === 'disabled'), 'AI_DEFAULT_OFF');
   assert(!p.settings.ingestion.enabled && !p.settings.advanced.enabled, 'BACKENDS_DEFAULT_OFF');
+  const initialSettings = structuredClone(p.settings);
   const generation = p.standalone.status().generationId, engine = p.standalone;
   const req = {protocolVersion:2,requestId:'ux-synthetic',query:'REQ-OKS-SMOKE',
     requestedMode:'lexical',limit:5};
@@ -43,6 +44,8 @@
     assert(el, 'MISSING_SELECT'); el.value=value;
     el.dispatchEvent(new doc.defaultView.Event('change',{bubbles:true})); return el;
   };
+  const visible = el => !!el && el.getClientRects().length > 0 &&
+    doc.defaultView.getComputedStyle(el).display !== 'none';
   const section = label => [...root().querySelectorAll('section')]
     .find(el=>el.getAttribute('aria-label')===label);
   assert(row('Settings view') && section('Overview') && section('Search & scope') &&
@@ -80,24 +83,27 @@
   press(row('Processing setup'), 'Configure documents');
   const docToggle = row('Enable local document ingestion after Save').querySelector('.checkbox-container');
   assert(docToggle, 'INGESTION_DRAFT_TOGGLE');
-  assert(row('PDF processing mode').hidden, 'PDF_HIDDEN_WHEN_OFF');
+  assert(!visible(row('PDF processing mode')) && !visible(row('Trusted local Python interpreter')) &&
+    !visible(row('Local OCR language assets')) && !visible(row('Pinned structured extraction artifacts')),
+    'PDF_HIDDEN_WHEN_OFF');
   docToggle.click();
-  assert(!row('PDF processing mode').hidden && row('Local OCR language assets').hidden &&
-    row('Pinned structured extraction artifacts').hidden, 'TEXT_ONLY_FIELDS');
+  assert(visible(row('PDF processing mode')) && !visible(row('Local OCR language assets')) &&
+    !visible(row('Pinned structured extraction artifacts')), 'TEXT_ONLY_FIELDS');
   choose(row('PDF processing mode'), 'ocr');
-  assert(!row('Local OCR language assets').hidden && row('Pinned structured extraction artifacts').hidden,
+  assert(visible(row('Local OCR language assets')) && !visible(row('Pinned structured extraction artifacts')),
     'OCR_ONLY_FIELDS');
   choose(row('PDF processing mode'), 'structured');
-  assert(row('Local OCR language assets').hidden && !row('Pinned structured extraction artifacts').hidden,
+  assert(!visible(row('Local OCR language assets')) && visible(row('Pinned structured extraction artifacts')),
     'STRUCTURED_ONLY_FIELDS');
   choose(row('PDF processing mode'), 'structured-ocr');
-  assert(!row('Local OCR language assets').hidden && !row('Pinned structured extraction artifacts').hidden,
+  assert(visible(row('Local OCR language assets')) && visible(row('Pinned structured extraction artifacts')),
     'STRUCTURED_OCR_FIELDS');
   press(row('Document setup draft'), 'Save setup');
   await new Promise(r=>setTimeout(r,80));
   assert(!p.settings.ingestion.enabled &&
     section('Documents').textContent.includes('absolute trusted local path'), 'INVALID_INGESTION_ATOMIC');
   press(row('Document setup draft'), 'Cancel');
+  assert(doc.activeElement?.dataset.oksFocus === 'documents', 'DOCUMENT_CANCEL_FOCUS');
   assert(!p.settings.ingestion.enabled && p.standalone===engine, 'CANCEL_INGESTION');
   // Independent role cards, invalid endpoint/model and no leak from role draft.
   const card = role => [...root().querySelectorAll('.oks-settings-role')]
@@ -105,7 +111,13 @@
       embedding:'Semantic search',reranking:'Improve result ranking',generation:'Evidence-based answers'}[role]));
   const cardRow = (role,name) => row(name,card(role));
   assert(card('embedding') && card('reranking') && card('generation'), 'ROLE_CARDS');
+  const opener = cardRow('embedding','Connection').querySelector('button');
+  assert(!visible(cardRow('embedding','API origin')), 'DISABLED_EDITOR_NOT_RENDERED');
   press(cardRow('embedding','Connection'), 'Configure');
+  assert(opener.getAttribute('aria-expanded') === 'true' &&
+    !!(opener.compareDocumentPosition(cardRow('embedding','Connection type')) &
+      doc.defaultView.Node.DOCUMENT_POSITION_FOLLOWING), 'DISCLOSURE_DOM_ORDER');
+  assert(visible(cardRow('embedding','API origin')), 'OPEN_EDITOR_RENDERED');
   edit(cardRow('embedding','API origin'), 'http://localhost:8765');
   edit(cardRow('embedding','Model ID'), 'synthetic-embedding');
   edit(cardRow('embedding','Model revision'), 'v1');
@@ -118,6 +130,7 @@
   assert(p.settings.ai.reranking.state === 'disabled' &&
     p.settings.ai.generation.state === 'disabled', 'AI_ROLE_INDEPENDENCE');
   assert(card('embedding').textContent.includes('not verified'), 'AI_NOT_READY');
+  assert(doc.activeElement?.dataset.oksFocus === 'ai-embedding', 'AI_SAVE_FOCUS');
   assert(await offline(), 'BASIC_AFTER_CONFIG');
   press(cardRow('reranking','Connection'), 'Configure');
   choose(cardRow('reranking','Connection type'), 'cloud');
@@ -128,6 +141,7 @@
   assert(p.settings.ai.reranking.state === 'disabled', 'UNSAVED_CLOUD_NO_ENABLE');
   press(cardRow('reranking','Draft preferences'), 'Cancel draft');
   assert(p.settings.ai.reranking.state === 'disabled', 'CLOUD_CANCELLED');
+  assert(doc.activeElement?.dataset.oksFocus === 'ai-reranking', 'AI_CANCEL_FOCUS');
   // Expert mode must not revoke search, index generation, grants, or providers.
   choose(row('Settings view'), 'expert');
   await wait(()=>p.settings.presentationMode==='expert','EXPERT_SWITCH');
@@ -136,6 +150,16 @@
   assert(p.settings.ai.embedding.state==='configured' && section('Advanced diagnostics'),
     'EXPERT_RETAINS_CAPABILITIES');
   assert(row('Backend setup') && row('Probe setup'), 'EXPERT_SECTIONS');
+  press(row('Backend setup'), 'Configure local backend');
+  assert(!visible(row('Backend profile')) && !visible(row('Trusted absolute Python executable')),
+    'BACKEND_DISABLED_HIDES_PATHS');
+  press(row('Backend draft'),'Cancel');
+  assert(doc.activeElement?.dataset.oksFocus === 'backend', 'BACKEND_CANCEL_FOCUS');
+  press(row('Probe setup'), 'Configure probe');
+  assert(!visible(row('Trusted Python executable')) && !visible(row('Trusted synthetic probe entry')),
+    'PROBE_DISABLED_HIDES_PATHS');
+  press(row('Probe draft'),'Cancel');
+  assert(doc.activeElement?.dataset.oksFocus === 'probe', 'PROBE_CANCEL_FOCUS');
   assert(await offline(), 'BASIC_IN_EXPERT');
   choose(row('Settings view'),'basic');
   await wait(()=>p.settings.presentationMode==='basic','BASIC_ROUNDTRIP');
@@ -155,6 +179,9 @@
   assert(root().textContent.includes('sources:') && root().textContent.includes('not an estimate'),
     'HONEST_INDEX_STATUS');
   const beforeReloadMode = p.settings.presentationMode;
+  // Leave subsequent optional-role fixture tests the exact clean starting configuration.
+  await p.updateSettings(initialSettings);
+  assert(Object.values(p.settings.ai).every(pref => pref.state === 'disabled'), 'FIXTURE_RESTORE');
   app.setting.close();
   return 'OBSIDIAN_SETTINGS_UX_PASS: clean Basic, task sections, draft/invalid save, failed save ' +
     'preservation, conditional OCR/structured paths, independent AI roles, cloud boundary, Basic/Expert ' +

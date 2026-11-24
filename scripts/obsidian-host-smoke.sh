@@ -58,6 +58,19 @@ if [[ "${OKS_ADVANCED_HEALTH_TEST:-0}" == 1 ]]; then
   export OKS_ADVANCED_PYTHON="/usr/bin/python3.12"
   export OKS_ADVANCED_ENTRY="$repo/engine/persistent.py"
 fi
+# Xvfb is an X11 display; do not inherit a Wayland/DBus desktop session.
+export XDG_RUNTIME_DIR="$tmp/runtime" XDG_SESSION_TYPE=x11 ELECTRON_OZONE_PLATFORM_HINT=x11
+mkdir -m 700 "$XDG_RUNTIME_DIR"
+unset WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS
+visual_dir="${OKS_06UX_VISUAL_DIR:-}"
+if [[ -n "$visual_dir" ]]; then
+  [[ "$visual_dir" = /* && ! -e "$visual_dir" && ! -L "$visual_dir" &&
+     "${OKS_06UX_TEST:-0}" == 1 && "${OKS_HOST_NO_ROUTE:-0}" == 1 &&
+     -n "${OKS_STANDALONE_PACKAGE_DIR:-}" && -z "$previous_package_dir" ]] ||
+    { echo "HOST_SMOKE_FAILURE: visual acceptance requires new absolute evidence directory, verified package and no-route UX test" >&2; exit 2; }
+  mkdir -m 700 "$visual_dir" "$tmp/visual"
+  export OKS_06UX_VISUAL=1
+fi
 export tmp app cli repo package_dir previous_package_dir
 python3 - <<'PY'
 import json,os,time
@@ -115,7 +128,7 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
     for _ in {1..50}; do test ! -f "$tmp/rerank-ready" || break; sleep .1; done
     test -f "$tmp/rerank-ready"
   fi
-  "$app" --no-sandbox --disable-gpu --user-data-dir="$tmp/electron" > "$tmp/host.log" 2>&1 &
+  "$app" --no-sandbox --disable-gpu --ozone-platform=x11 --user-data-dir="$tmp/electron" > "$tmp/host.log" 2>&1 &
   p=$!
   sleep 13
   version="$(timeout 8s "$cli" version)" || { echo "HOST_SMOKE_FAILURE: CLI unavailable after isolated host startup" >&2; exit 1; }
@@ -127,6 +140,12 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
   initial="$(timeout 8s "$cli" eval "code=JSON.stringify({plugin:!!app.plugins.plugins[\"oks-synthetic-evidence\"],status:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standalone?.status(),error:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standaloneError})")"
   [[ "$initial" == *"\"status\":\"ready\""* && "$initial" == *"\"sources\":2"* ]] ||
     { printf "HOST_SMOKE_FAILURE: native plugin not indexed; result=%s\n" "$initial" >&2; exit 1; }
+  if [[ "${OKS_06UX_VISUAL:-0}" == 1 ]]; then
+    visual="$(timeout 85s "$cli" eval "code=$(cat "$repo/scripts/obsidian-settings-visual-smoke.js")")"
+    [[ "$visual" == *"OBSIDIAN_SETTINGS_VISUAL_PASS:"* ]] ||
+      { echo "HOST_SMOKE_FAILURE: real Settings visual acceptance ($visual)" >&2; exit 1; }
+    printf "%s\n" "$visual"
+  fi
   if [[ -n "$previous_package_dir" ]]; then
     # Test only the disposable profile: D7 -> D8 -> D7 -> D8.
     transition_state() {
@@ -187,7 +206,6 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
     [[ "$settings_ux" == *"OBSIDIAN_SETTINGS_UX_PASS:"* ]] || {
       echo "HOST_SMOKE_FAILURE: OKS-06UX actual Settings acceptance ($settings_ux)" >&2; exit 1; }
     printf "%s\n" "$settings_ux"
-    # Pixel screenshots require a separate visibly rendered acceptance session.
   fi
   if [[ "${OKS_AI_RERANK_TEST:-0}" == 1 ]]; then
     rerank="$(timeout 30s "$cli" eval "code=$(cat "$repo/scripts/obsidian-rerank-smoke.js")")"
@@ -244,8 +262,16 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
   else
     echo 'HOST_SMOKE_FAILURE: isolated Obsidian scenario failed or timed out; no host pass claimed' >&2
   fi
+  if [[ -n "$visual_dir" && -d "$tmp/visual" ]]; then
+    cp -a "$tmp/visual/." "$visual_dir/"
+  fi
   exit 1
 }
+if [[ -n "$visual_dir" ]]; then
+  test -s "$tmp/visual/results.json"
+  cp -a "$tmp/visual/." "$visual_dir/"
+  (cd "$visual_dir" && sha256sum ./*.png results.json > SHA256SUMS)
+fi
 test "$(sha256sum "$tmp/vault/second.md" | cut -d' ' -f1)" = "$fixture_sha" ||
   { echo "HOST_SMOKE_FAILURE: read-only source mutated" >&2; exit 1; }
 test ! -e "$tmp/vault/.obsidian/plugins/oks-synthetic-evidence/index" ||

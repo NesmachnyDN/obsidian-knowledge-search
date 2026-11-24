@@ -6,6 +6,7 @@
   const wait=async(fn,code)=>{const deadline=Date.now()+7000;while(!fn()){
     assert(Date.now()<deadline,code);await sleep(30);}};
   const old=p.settings;
+  const operation=()=>p.denseUi.operationStatus();
   const root=()=>app.workspace.getLeavesOfType('oks-standalone-search')[0]?.view.contentEl;
   const el=selector=>{const item=root()?.querySelector(selector);assert(item,'ELEMENT_'+selector);return item;};
   const click=selector=>el(selector).click();
@@ -17,6 +18,7 @@
     const before=count();click(kind==='rebuild'?'.oks-dense-rebuild':'.oks-dense-prepare');
     await wait(()=>!!root().querySelector('.oks-dense-confirm'),'PREVIEW');
     assert(count()===before,'NO_HTTP_BEFORE_CONSENT');
+    assert(operation().phase==='permission-required','SETTINGS_PERMISSION');
     assert(el('.oks-dense-confirm').disabled,'DEFAULT_DENY');
     assert(el('.oks-dense-path-preview').textContent==='dense-a.md\ndense-b.md','EXACT_CORPUS');
     assert(el('.oks-dense-space-preview').textContent.includes('"dimension": 2'),'SPACE');
@@ -30,6 +32,7 @@
     const check=el('.oks-dense-confirm-check');check.checked=true;check.dispatchEvent(new Event('change',{bubbles:true}));
     const button=el('.oks-dense-confirm');assert(!button.disabled,'CONSENT');
     button.click();assert(!root().querySelector('.oks-dense-token'),'TOKEN_REMOVED');
+    assert(operation().phase==='busy','SETTINGS_BUSY');
     return button;
   };
   const run=async(token='fixture-success',kind='search')=>{
@@ -55,6 +58,7 @@
     const replay=approve('fixture-success');replay.click();
     await wait(()=>message().includes('rebuild: ok'),'REBUILD');
     assert(count()===initial+1,'ONE_BATCH_ONCE');
+    assert(operation().phase==='complete'&&operation().error===null,'SETTINGS_COMPLETE');
     await run();await wait(()=>message().includes('executed dense')&&message().endsWith('ok'),'DENSE');
     assert(resultCount()===2&&el('.oks-dense-results li').textContent.includes('alpha'),'RANK');
     click('.oks-dense-open');
@@ -66,6 +70,7 @@
     for(const [token,code] of [['fixture-rate','RATE_LIMITED'],['fixture-invalid','INVALID_RESPONSE'],['fixture-deny','UNAUTHENTICATED'],['fixture-delay','TIMEOUT']]){
       await run(token);await wait(()=>message().includes(code),'ERROR_'+code);
       assert(message().includes('executed none')&&resultCount()===0,'NO_FALLBACK_'+code);
+      assert(operation().phase==='failed'&&operation().error===code,'SETTINGS_ERROR_'+code);
     }
     await prepare();const preCancel=count();set('.oks-query','REQ-OKS-DENSE ');assert(!root().querySelector('.oks-dense-token')&&count()===preCancel,'INPUT_REVOCATION');
     set('.oks-query','REQ-OKS-DENSE');
