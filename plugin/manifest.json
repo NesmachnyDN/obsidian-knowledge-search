@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "minAppVersion": "1.15.1",
   "description": "Offline local Markdown lexical search, typed Properties filters and exact source navigation.",
-  "author": "OKS contributors",
+  "author": "Dmitry Nesmachny",
+  "authorUrl": "https://github.com/NesmachnyDN",
   "isDesktopOnly": true
 }
