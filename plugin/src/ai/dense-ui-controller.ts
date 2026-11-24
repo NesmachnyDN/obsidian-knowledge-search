@@ -1,5 +1,5 @@
 import { ProviderFailure, type ProviderFailureCode } from './contracts';
-import type { ApiDenseHost, DensePreview, DenseRequest } from './dense-host';
+import type { ApiDenseHost, DensePreview, DenseRequest, MachineFence } from './dense-host';
 import type { DenseIndexResult } from './dense-index-manager';
 import type { ApiRetrievalResult } from './dense-retrieval';
 import type { EvidenceHit } from '../standalone/contracts';
@@ -31,6 +31,18 @@ export class DenseUiController {
   snapshot(owner:symbol):State {
     return this.owner===owner?structuredClone(this.state):{phase:'idle'};
   }
+  /** Only bounded metadata is copied for machine status polling. */
+  metadata(owner:symbol):{phase:State['phase'];error?:ProviderFailureCode|null;
+    executedMode?:ApiRetrievalResult['executedMode'];legs?:ApiRetrievalResult['legs']} {
+    if(this.owner!==owner)return {phase:'idle'};
+    const state=this.state;
+    if(state.phase==='complete'&&'hits' in state.result)return {phase:state.phase,error:state.result.error,
+      executedMode:state.result.executedMode,legs:structuredClone(state.result.legs)};
+    if(state.phase==='error')return {phase:state.phase,error:state.error??'NOT_READY'};
+    return {phase:state.phase};
+  }
+  occupied():boolean {return this.owner!==undefined;}
+  owns(owner:symbol):boolean {return this.owner===owner;}
   private emit():void {for(const listener of this.listeners)listener();}
   private clearTimer():void {if(this.timer!==undefined)clearTimeout(this.timer);this.timer=undefined;}
   invalidate():void {
@@ -50,7 +62,7 @@ export class DenseUiController {
     return !this.disposed&&this.owner===owner&&this.revision===revision
       &&this.host===host&&this.port.host()===host;
   }
-  async prepare(owner:symbol,request:DenseRequest):Promise<void> {
+  async prepare(owner:symbol,request:DenseRequest,fence?:MachineFence):Promise<void> {
     if(this.disposed)return;
     this.invalidate();
     const revision=this.revision,host=this.port.host();
@@ -58,7 +70,7 @@ export class DenseUiController {
     if(!host){this.state={phase:'error',error:'NOT_READY'};this.emit();return;}
     this.host=host;this.state={phase:'preparing'};this.emit();
     try {
-      const preview=await host.prepare(structuredClone(request));
+      const preview=await host.prepare(structuredClone(request),fence);
       if(!this.current(owner,revision,host))return;
       if(preview.expiresUnixMs<=Date.now())throw new ProviderFailure('CANCELLED');
       this.state={phase:'preview',preview:structuredClone(preview)};

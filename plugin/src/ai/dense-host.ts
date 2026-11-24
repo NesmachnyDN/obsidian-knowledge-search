@@ -19,6 +19,7 @@ export type DenseRequest = { paths: readonly string[]; space: EmbeddingSpace } &
   ({kind:'rebuild'} | {kind:'search';request:SearchRequest&{requestedMode:'dense'|'hybrid'}});
 export type DensePreview = { nonce:string; scopeId:string; lexicalGenerationId:string;
   expiresUnixMs:number; config:ProviderConfig; operation:DenseRequest; evidence:readonly EvidenceHit[] };
+export type MachineFence = {digest:string;expiresUnixMs:number};
 type Classification = 'synthetic'|'public';
 type Binding = { preview:DensePreview; lease:SelectedCorpus; abort:AbortController; current():boolean };
 type HostPort = { config():ProviderPreference; enabled():boolean; allowedPath(path:string):boolean; admitStorage():Promise<void> };
@@ -55,10 +56,12 @@ export class ApiDenseHost {
     if(config.state!=='configured')return fail('CONFIG_INVALID');
     return pilotConfig(config);
   }
-  async prepare(input:DenseRequest):Promise<DensePreview> {
+  async prepare(input:DenseRequest,fence?:MachineFence):Promise<DensePreview> {
     if(this.active)return fail('QUOTA_EXCEEDED');
     this.invalidate();
     const config=this.config();
+    if(fence&&(configDigest('embedding',config)!==fence.digest||fence.expiresUnixMs<=this.now()))
+      return fail('CANCELLED');
     if(!isRecord(input)||!['rebuild','search'].includes(input.kind)
       ||Object.keys(input).some(key=>!['kind','paths','space',...(input.kind==='search'?['request']:[])].includes(key))
       ||!Array.isArray(input.paths)||!input.paths.length||input.paths.length>BOUNDS.sources
@@ -72,7 +75,7 @@ export class ApiDenseHost {
         ||operation.request.requestedMode==='dense'&&operation.request.matchMode==='literal')
         return fail('CONFIG_INVALID');
     }else if(operation.kind!=='rebuild')return fail('CONFIG_INVALID');
-    const revision=this.revision,abort=new AbortController(),expiresUnixMs=this.now()+300000;
+    const revision=this.revision,abort=new AbortController(),expiresUnixMs=Math.min(this.now()+300000,fence?.expiresUnixMs??Infinity);
     this.abort=abort;
     const digest=configDigest('embedding',config);
     let revoked=false;
@@ -96,6 +99,43 @@ export class ApiDenseHost {
     this.active=job;
     try{return await job;}
     finally{if(this.active===job)this.active=undefined;}
+  }
+  /** Reuse the authoritative corpus and store verification at deferred result delivery.
+   * No new disclosure, provider operation or independent source parser. */
+  async verifyMachineResult(operation:Extract<DenseRequest,{kind:'search'}>,fence:MachineFence,
+    result:ApiRetrievalResult,signal:AbortSignal):Promise<()=>boolean> {
+    if(this.active||!this.store)return fail('NOT_READY');
+    const revision=this.revision,store=this.store,abort=new AbortController();
+    const cancel=()=>abort.abort();
+    signal.addEventListener('abort',cancel,{once:true});
+    if(signal.aborted)cancel();
+    const current=()=>!this.disposed&&!abort.signal.aborted&&revision===this.revision
+      &&this.now()<fence.expiresUnixMs&&this.store===store
+      &&configDigest('embedding',this.config())===fence.digest
+      &&operation.paths.every(path=>this.port.allowedPath(path));
+    const check=()=>{if(!current())fail('SOURCE_STALE');};
+    this.abort=abort;
+    const job=(async()=>{
+      check();
+      const config=this.config(),spaceId=embeddingSpaceId(config,operation.space);
+      const lease=await this.engine.captureDenseCorpus(operation.paths,MAX_API_VECTORS,abort.signal);
+      check();
+      if(!lease.current()||lease.rootId!==this.rootId||lease.lexicalGenerationId!==result.lexicalGenerationId)
+        return fail('SOURCE_STALE');
+      const snapshot=await store.snapshotApi(spaceId,lease.lexicalGenerationId,abort.signal);
+      check();
+      if(!snapshot||snapshot.generationId!==result.indexGenerationId||!lease.current()
+        ||!store.isApiSnapshotCurrent(snapshot))return fail('SOURCE_STALE');
+      return ()=>current()&&!signal.aborted&&lease.current()&&store.isApiSnapshotCurrent(snapshot);
+    })();
+    this.active=job;
+    try{const verify=await job;if(!verify())return fail('SOURCE_STALE');return verify;}
+    catch{return fail('SOURCE_STALE');}
+    finally{
+      signal.removeEventListener('abort',cancel);
+      if(this.active===job)this.active=undefined;
+      if(this.abort===abort)this.abort=undefined;
+    }
   }
   async confirm(preview:DensePreview,classification:Classification,token:string):Promise<DenseIndexResult|ApiRetrievalResult> {
     if(this.active)return fail('QUOTA_EXCEEDED');

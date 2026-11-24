@@ -6,6 +6,7 @@ import { textElement } from './render';
 import { renderRerankConfirmation } from '../ai/rerank-confirm';
 import { ProviderFailure } from '../ai/contracts';
 import { mountDensePanel } from '../ai/dense-ui';
+import type { DenseMachine } from '../ai/dense-machine';
 import type { DenseUiController } from '../ai/dense-ui-controller';
 
 export const SEARCH_VIEW = 'oks-standalone-search';
@@ -17,7 +18,7 @@ export class SearchView extends ItemView {
   constructor(leaf: WorkspaceLeaf, private readonly controller: SearchController,
     private readonly settings: () => SearchSettings,
     private readonly control: (action: 'pause' | 'cancel' | 'resume' | 'rebuild') => Promise<void>,
-    private readonly denseUi?: DenseUiController) { super(leaf); }
+    private readonly denseUi?: DenseUiController, private readonly denseMachine?: DenseMachine) { super(leaf); }
   getViewType(): string { return SEARCH_VIEW; }
   getDisplayText(): string { return 'OKS Standalone search'; }
   async onOpen(): Promise<void> {
@@ -118,7 +119,7 @@ export class SearchView extends ItemView {
       button('Cancel '+role,prefix+'-cancel',()=>{clear();cancel();});
       return {message,rows,clear};
     };
-    if(this.denseUi)this.densePanel=mountDensePanel(root,this.denseUi,()=>this.settings().ai.embedding,request);
+    if(this.denseUi)this.densePanel=mountDensePanel(root,this.denseUi,()=>this.settings().ai.embedding,request,this.denseMachine);
     const rerankPanel=makeEvidencePanel('rerank');
     const generationPanel=makeEvidencePanel('generation');
     const renderStatus = (): void => {

@@ -44,3 +44,30 @@ The Settings tab exposes confirmed, disabled-only derived-index cleanup even aft
 ## Optional Advanced health-only transport (OKS-05B candidate)
 
 A schema-v3 settings record enables the separately provisioned `local-stdio` transport only with explicit boolean opt-in and absolute trusted `interpreter` and `entry` paths. The default package remains Obsidian plus three Standalone assets, with no Python startup. `status` and metadata-only `diagnostics` additionally expose `advancedTransport: {profile,status,error,transportOnly:true}`. These do **not** confer dense/hybrid execution, PDF/OCR support or a canonical cross-runtime evidence contract. Dense/hybrid continue to return `CAPABILITY_UNAVAILABLE` and `executedMode: none`. The health channel uses existing Python v2 fixed-shape nonce-correlated health frames, not the search API protocol. Full Advanced integration remains in OKS-05C–05E.
+
+## Separate consent-bound machine API (OKS-05P-D8 candidate)
+
+The optional local embedding pilot exposes a separate `plugin.denseApi` object, version 1. The original `plugin.api` v1 is unchanged. Submit only stages one exact request for human review; no provider call, grant, credentials, classification or confirmation is accepted from a machine caller. This is a trusted in-process interface, **not** an isolation boundary against arbitrary already-trusted Obsidian plugin/eval code.
+
+| Operation | Exact envelope in addition to `apiVersion:1` | Result |
+|---|---|---|
+| submit | operation, request (native v2), space (exact declared EmbeddingSpace) | Opaque operationId and fixed expiry |
+| status | operation, operationId | Metadata only: phase, modes, expiry, typed error, per-leg status/counts |
+| result | operation, operationId | One detached native API retrieval result after authoritative corpus and generation re-verification |
+| cancel | operation, operationId | Revokes the operation; no result |
+| rebuild | operation only | UNSUPPORTED_OPERATION |
+
+Use `obsidian eval` on an explicitly configured, isolated synthetic Vault. Example (the model identity and dimension must match the declared provider and verified active index):
+
+```sh
+obsidian eval 'code=(async()=>JSON.stringify(await app.plugins.plugins["oks-synthetic-evidence"].denseApi.request({apiVersion:1,operation:"submit",request:{protocolVersion:2,requestId:"machine-1",query:"REQ-OKS-DENSE",requestedMode:"hybrid",matchMode:"terms",scope:["dense-a.md","dense-b.md"],limit:5},space:{model:"synthetic-embedding",revision:"fixture-v1",dimension:2,normalization:"unit-l2",serializationId:"utf8-verbatim-v1",queryInstructionId:"identity-v1",documentInstructionId:"identity-v1"}})))()'
+```
+
+Open the Standalone search ItemView and select **Review pending machine API request**. Inspect the exact D7 preview, select permitted classification, enter the one-operation local token and explicitly confirm. The operation capability is not displayed there. The machine caller retains the opaque ID from submit and uses the same CLI eval bridge, substituting its ID:
+
+```sh
+obsidian eval 'code=(async()=>JSON.stringify(await app.plugins.plugins["oks-synthetic-evidence"].denseApi.request({apiVersion:1,operation:"status",operationId:"REPLACE_WITH_SUBMIT_ID"})))()'
+obsidian eval 'code=(async()=>JSON.stringify(await app.plugins.plugins["oks-synthetic-evidence"].denseApi.request({apiVersion:1,operation:"result",operationId:"REPLACE_WITH_SUBMIT_ID"})))()'
+```
+
+The envelope is `{apiVersion:1,ok:true,value:...}` or `{apiVersion:1,ok:false,error:CODE}`. Inspect result status, requested/executed modes and legs; there is no silent lexical fallback. Exact unique nonempty Markdown scope is required, with existing query/Top-K/typed predicate limits and a 16 KiB encoded input budget. One operation occupies the slot for at most five minutes, including preview and result read. Manual dense actions may supersede it; cancellation, source/configuration changes, view close, lifecycle invalidation and expiry revoke delivery. Successful delivery consumes the result. Result contents and capability IDs are sensitive: do not include them in public logs. No result history or new index, no machine rebuild, navigation, reranking or generation. Already returned evidence cannot be revoked, and a filesystem mutation after final verification cannot be excluded atomically without filesystem snapshots or locking. This candidate is not a Gate B acceptance claim.

@@ -1,3 +1,4 @@
+import { DenseMachine } from './ai/dense-machine';
 import { DenseUiController } from './ai/dense-ui-controller';
 import { ApiDenseHost } from './ai/dense-host';
 import { AdvancedHealthBridge } from './advanced/health';
@@ -69,6 +70,12 @@ export default class SyntheticEvidencePlugin extends Plugin {
       await this.navigator.open(hit);
     },
   });
+  private readonly denseMachine = new DenseMachine(this.denseUi,{
+    host:()=>this.unloaded||this.denseSettingsChanging||!this.settings.enabled||this.settings.paused
+      ||this.settings.ingestion.enabled?undefined:this.denseHost,
+    preference:()=>this.settings.ai.embedding,
+  });
+  readonly denseApi=Object.freeze({apiVersion:1 as const,request:(input:unknown)=>this.denseMachine.request(input)});
   private rootId?: string;
   private initializing?: Promise<void>;
   private layoutReady = false;
@@ -116,9 +123,9 @@ export default class SyntheticEvidencePlugin extends Plugin {
     try { this.settings = parseSettings(saved); }
     catch { this.settings = { ...defaultSettings(), enabled: false }; this.standaloneError = 'SETTINGS_INVALID'; }
     this.searchController.configure(this.settings.enabled, this.settings.paused, this.standaloneError);
-    this.searchController.subscribe(() => this.denseUi.invalidate());
+    this.searchController.subscribe(() => {this.denseMachine.invalidate();this.denseUi.invalidate();});
     this.registerView(SEARCH_VIEW, leaf => new SearchView(leaf, this.searchController,
-      () => this.settings, action => this.controlSearch(action), this.denseUi));
+      () => this.settings, action => this.controlSearch(action), this.denseUi, this.denseMachine));
     this.addCommand({ id: 'open-standalone-search', name: 'Open Standalone search', callback: () => { void this.openSearch(); } });
     this.addCommand({ id: 'open-first-search-source', name: 'Verify and open first search source', callback: () => { void this.searchController.open(0); } });
     for (const action of ['pause','resume','cancel','rebuild'] as const)
@@ -204,10 +211,12 @@ export default class SyntheticEvidencePlugin extends Plugin {
       const settings = parseSettings(change(this.settings));
       this.denseSettingsChanging = true;
       try {
+        this.denseMachine.invalidate();
         this.denseUi.invalidate();
         this.denseHost?.invalidate();
         await this.saveData(settings);
         if (this.unloaded) return;
+        this.denseMachine.invalidate();
         this.denseUi.invalidate();
         this.denseHost?.invalidate();
         const before = this.settings;
@@ -518,6 +527,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     });
   }
   private stopDenseHost(): Promise<void> {
+    this.denseMachine.invalidate();
     this.denseUi.invalidate();
     const host = this.denseHost;
     if (!host) return Promise.resolve();
@@ -558,6 +568,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     this.resultModal = undefined;
     void this.controller?.unload();
     this.lifecycleRevision++;
+    this.denseMachine.dispose();
     this.denseUi.dispose();
     this.searchController.dispose();
     this.app.workspace.detachLeavesOfType(SEARCH_VIEW);
