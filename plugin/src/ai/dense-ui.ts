@@ -3,6 +3,7 @@ import { parseSearch } from '../search/controller';
 import { BOUNDS, validPath, type SearchRequest } from '../standalone/contracts';
 import { ProviderFailure, type ProviderPreference } from './contracts';
 import type { DenseRequest } from './dense-host';
+import type { DenseMachine } from './dense-machine';
 import type { DenseUiController } from './dense-ui-controller';
 import { pilotConfig } from './loopback-json';
 import { servedAlias } from './loopback-rerank';
@@ -30,7 +31,7 @@ export function denseUiRequest(kind:'rebuild'|'search', rawPaths:string, dimensi
 
 /** Separate, explicitly selected API search; the ordinary lexical submit stays unchanged. */
 export function mountDensePanel(root:HTMLElement, controller:DenseUiController,
-  preference:()=>ProviderPreference, search:()=>SearchRequest):{dispose():void} {
+  preference:()=>ProviderPreference, search:()=>SearchRequest,machine?:DenseMachine):{dispose():void} {
   const owner=Symbol('dense-view'),doc=root.ownerDocument;
   let disposed=false;
   const panel=textElement(doc,'section','','oks-dense-panel');root.appendChild(panel);
@@ -58,7 +59,7 @@ export function mountDensePanel(root:HTMLElement, controller:DenseUiController,
   const cancel=()=>controller.cancel(owner);
   const error=(e:unknown)=>{if(!disposed)message.textContent='API dense: '+(e instanceof ProviderFailure?e.code:'CONFIG_INVALID');};
   const prepare=(kind:'rebuild'|'search')=>{
-    cancel();
+    machine?.invalidate();cancel();
     try{
       const request=denseUiRequest(kind,paths.value,Number(dimension.value),preference(),
         mode.value as 'dense'|'hybrid',kind==='search'?search():undefined);
@@ -67,16 +68,21 @@ export function mountDensePanel(root:HTMLElement, controller:DenseUiController,
   };
   add(panel,'button','Prepare explicit dense index rebuild','oks-dense-rebuild').onclick=()=>{if(!disposed)prepare('rebuild');};
   add(panel,'button','Prepare selected API search','oks-dense-prepare').onclick=()=>{if(!disposed)prepare('search');};
-  add(panel,'button','Cancel API operation','oks-dense-cancel').onclick=()=>{if(!disposed)cancel();};
+  const review=machine?add(panel,'button','Review pending machine API request','oks-dense-machine-review'):undefined;
+  if(review)review.onclick=()=>{if(!disposed&&machine?.pending())void machine.review(owner);};
+  add(panel,'button','Cancel API operation','oks-dense-cancel').onclick=()=>{if(!disposed){machine?.invalidate();cancel();}};
   paths.oninput=dimension.oninput=mode.onchange=()=>{if(!disposed)cancel();};
   const render=()=>{
     if(disposed)return;
     clear();
-    const state=controller.snapshot(owner);
+    const state=controller.snapshot(owner),machineOwned=machine?.owns(owner)??false;
+    if(review)review.disabled=!machine?.pending();
     message.textContent='API dense: '+(state.phase==='error'?state.error:state.phase);
-    if(state.phase==='idle')message.textContent='API dense: not verified; configure local embedding provider and select corpus.';
+    if(state.phase==='idle')message.textContent=machine?.pending()?'Machine request pending human review; no data sent.':
+      'API dense: not verified; configure local embedding provider and select corpus.';
     if(state.phase==='preview'){
       const p=state.preview;
+      if(machineOwned)add(previewArea,'p','Machine-initiated request. Review the exact operation before authorizing; results are delivered only to its caller.');
       add(previewArea,'h4',p.operation.kind==='rebuild'?'Approve one index rebuild':'Approve one '+p.operation.request.requestedMode+' search');
       add(previewArea,'p','Endpoint: '+p.config.origin+'/v1/embeddings | Model: '+servedAlias(p.config));
       add(previewArea,'p','Only a trusted local server under your control, with no remote forwarding. Synthetic or public data only. Expires: '+new Date(p.expiresUnixMs).toISOString());
@@ -112,6 +118,7 @@ export function mountDensePanel(root:HTMLElement, controller:DenseUiController,
         message.textContent='API search: requested '+result.requestedMode+' | executed '+result.executedMode+
           ' | dense '+result.legs.dense.status+' ('+result.legs.dense.candidateCount+') | lexical '+
           result.legs.lexical.status+' ('+result.legs.lexical.candidateCount+') | '+(result.error??result.status);
+        if(machineOwned){add(rows,'li','Machine result must be read via the freshness-checked machine API.');return;}
         result.hits.forEach((ranked,index)=>{
           const hit=ranked.evidence,row=add(rows,'li','');
           add(row,'pre',hit.originalExcerpt);
@@ -124,6 +131,6 @@ export function mountDensePanel(root:HTMLElement, controller:DenseUiController,
         (result.status==='ok'?' | generation '+result.generationId+' (provider readiness not established)':'');
     }
   };
-  const unsubscribe=controller.subscribe(render);render();
-  return {dispose(){disposed=true;unsubscribe();cancel();clear();panel.remove();}};
+  const unsubscribe=machine?machine.subscribe(render):controller.subscribe(render);render();
+  return {dispose(){disposed=true;unsubscribe();machine?.cancelView(owner);cancel();clear();panel.remove();}};
 }

@@ -77,6 +77,65 @@
     await prepare();const beforeCancel=count();approve('fixture-delay');
     await wait(()=>count()>beforeCancel,'HTTP_STARTED');click('.oks-dense-cancel');await sleep(1500);
     assert(resultCount()===0&&!message().includes('executed hybrid'),'CANCEL_LATE_RESULT');
+    // Actual CLI eval calls the production machine API; human confirmation is
+    // simulated only by driving the same real ItemView controls as D7.
+    const machine=(operation,fields={})=>p.denseApi.request({apiVersion:1,operation,...fields});
+    const request={protocolVersion:2,requestId:'machine-fixture',query:'REQ-OKS-DENSE',
+      requestedMode:'hybrid',matchMode:'terms',scope:['dense-a.md','dense-b.md'],limit:1,
+      metadata:{tag:'fixture-a',linkTarget:'target'}};
+    const space={...cfg.identity,dimension:2,normalization:'unit-l2',serializationId:'utf8-verbatim-v1',
+      queryInstructionId:'identity-v1',documentInstructionId:'identity-v1'};
+    const stage=async()=>{
+      const staged=await machine('submit',{request,space});assert(staged.ok,'MACHINE_SUBMIT');
+      return staged.value.operationId;
+    };
+    const read=(operation,operationId)=>machine(operation,{operationId});
+    const review=async()=>{
+      click('.oks-dense-machine-review');
+      await wait(()=>!!root().querySelector('.oks-dense-confirm'),'MACHINE_PREVIEW');
+      assert(el('.oks-dense-query-preview').textContent===request.query
+        &&el('.oks-dense-path-preview').textContent===request.scope.join('\n'),'MACHINE_EXACT');
+      assert(el('.oks-dense-preview').textContent.includes('Machine-initiated')
+        &&el('.oks-dense-confirm').disabled,'MACHINE_EXPLICIT');
+    };
+    const beforeMachine=count(),id=await stage();
+    const metadata=await read('status',id);
+    assert(metadata.ok&&metadata.value.phase==='pending'&&!JSON.stringify(metadata).includes('dense-a.md')
+      &&!JSON.stringify(metadata).includes(request.query)&&!JSON.stringify(metadata).includes(id),'MACHINE_STATUS');
+    assert(!(await machine('submit',{request,space})).ok
+      &&!(await read('status','aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')).ok
+      &&!(await read('result',id)).ok
+      &&!(await machine('submit',{request,space,token:'fixture-success'})).ok
+      &&count()===beforeMachine,'MACHINE_NO_EGRESS');
+    await review();assert(count()===beforeMachine,'MACHINE_PREVIEW_NO_EGRESS');
+    approve('fixture-success');
+    await wait(()=>message().includes('executed hybrid')&&message().endsWith('ok'),'MACHINE_COMPLETE');
+    const response=await read('result',id);
+    assert(response.ok&&response.value.status==='ok'&&response.value.executedMode==='hybrid'
+      &&response.value.hits.length===1&&response.value.hits[0].evidence.sourceId==='dense-a.md'
+      &&count()===beforeMachine+1,'MACHINE_VERIFIED_RESULT');
+    assert(!(await read('result',id)).ok,'MACHINE_REPLAY');
+    const cancelId=await stage();await review();
+    assert((await read('cancel',cancelId)).ok&&!root().querySelector('.oks-dense-token')
+      &&!(await read('result',cancelId)).ok&&count()===beforeMachine+1,'MACHINE_CANCEL');
+    const errorId=await stage();await review();approve('fixture-rate');
+    await wait(()=>message().includes('RATE_LIMITED'),'MACHINE_RATE');
+    const denied=await read('result',errorId);
+    assert(denied.ok&&denied.value.error==='RATE_LIMITED'&&denied.value.executedMode==='none'
+      &&denied.value.hits.length===0,'MACHINE_NO_FALLBACK');
+    const staleId=await stage();await review();approve('fixture-success');
+    await wait(()=>message().includes('executed hybrid')&&message().endsWith('ok'),'MACHINE_STALE_READY');
+    // Mutate a non-hit source through the disposable filesystem without waiting
+    // for Obsidian events; delivery must fail even if an event has not arrived.
+    const fs=require('node:fs'),path=require('node:path').join(app.vault.adapter.getBasePath(),'dense-b.md');
+    const original=fs.readFileSync(path,'utf8'),beforeStale=count();
+    fs.writeFileSync(path,original+'\nSynthetic mutation.\n');
+    const stale=await read('result',staleId);
+    assert(!stale.ok&&['INVALID_OPERATION','SOURCE_STALE'].includes(stale.error)
+      &&count()===beforeStale,'MACHINE_NON_HIT_STALE');
+    await app.vault.modify(b,original);await sleep(350);await p.standalone.whenIdle();
+    await prepare('rebuild');approve('fixture-success');
+    await wait(()=>message().includes('rebuild: ok'),'MACHINE_RESTORE_INDEX');
     await prepare();const beforeMutation=count();approve('fixture-delay');
     await wait(()=>count()>beforeMutation,'MUTATION_HTTP_STARTED');
     await app.vault.modify(a,'REQ-OKS-DENSE: changed\n');await sleep(1500);await p.standalone.whenIdle();
@@ -85,7 +144,7 @@
     await wait(()=>p.searchController.snapshot().phase==='results','LEXICAL_INDEPENDENCE');
     assert(p.searchController.snapshot().response.executedMode==='lexical','LEXICAL_MODE');
     assert(!JSON.stringify(p.settings).includes('fixture-success'),'TOKEN_NOT_PERSISTED');
-    return 'OBSIDIAN_DENSE_FIXTURE_PASS: actual UI explicit one-shot consent exact corpus/space no pre-consent HTTP rebuild dense hybrid metadata navigation errors cancellation freshness lexical independence; synthetic only';
+    return 'OBSIDIAN_DENSE_FIXTURE_PASS: actual UI explicit one-shot consent exact corpus/space no pre-consent HTTP rebuild dense hybrid metadata navigation errors cancellation freshness lexical independence; D8 CLI machine staged consent, ownership, one-shot fresh result, cancellation, typed error, non-hit stale rejection; synthetic only';
   }finally{
     await app.vault.delete(a);await app.vault.delete(b);await p.updateSettings(old);
     await sleep(250);await p.standalone.whenIdle();await p.openSearch();
