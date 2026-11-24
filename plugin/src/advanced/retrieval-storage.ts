@@ -27,7 +27,11 @@ export type RetrievalGeneration={
   schemaVersion:1;rootId:string;model:ModelIdentity;generationId:string;entries:IndexedSource[];
 };
 type ActiveGeneration=RetrievalGeneration|ApiDenseGeneration;
-const activeEpochs=new Map<string,{epoch:symbol;name:string|null}>();
+// One lifecycle per private store path. Only bounded source identities are
+// shared; immutable generations remain instance-local and epoch-checked.
+type Lifecycle={epoch:symbol;name:string|null;revision:number;blocked:boolean;
+  sources:Set<string>;revoked:Set<string>};
+const lifecycles=new Map<string,Lifecycle>();
 const activeWriters=new Set<string>();
 type Pointer={schemaVersion:1;rootId:string;filename:string;sha256:string};
 const cmp=(a:string,b:string):number=>a<b?-1:a>b?1:0;
@@ -71,8 +75,7 @@ export class AdvancedRetrievalStore {
   private generation:ActiveGeneration|null=null;
   private epoch=Symbol();
   private committedName:string|null=null;
-  private revocation=0;
-  private apiRevoked=false;
+  private lifecycle!:Lifecycle;
   private poisoned=false;
   private constructor(private readonly root:TrustedVaultRoot,path:string){this.path=path;}
   static async open(root:TrustedVaultRoot,pluginId:string):Promise<AdvancedRetrievalStore>{
@@ -83,9 +86,17 @@ export class AdvancedRetrievalStore {
     activeWriters.add(path);
     try {
       await store.load();
-      const previous=activeEpochs.get(path);
-      store.epoch=previous?.name===store.committedName?previous.epoch:Symbol();
-      activeEpochs.set(path,{epoch:store.epoch,name:store.committedName});
+      const previous=lifecycles.get(path);
+      const state=previous??{epoch:Symbol(),name:store.committedName,revision:0,
+        blocked:false,sources:new Set<string>(),revoked:new Set<string>()};
+      // An ambiguous pointer rename may have succeeded; never clear an
+      // uncertain/revoked generation merely by reopening the store.
+      if(state.name!==store.committedName){
+        state.epoch=Symbol();state.name=store.committedName;
+      }
+      state.sources=new Set(store.generation?.entries.map(e=>e.sourcePath)??[]);
+      store.lifecycle=state;store.epoch=state.epoch;
+      lifecycles.set(path,state);
       return store;
     } catch (error) { if(error instanceof IngestError)invalid(); throw error; }
     finally { activeWriters.delete(path); }
@@ -116,6 +127,7 @@ export class AdvancedRetrievalStore {
     const names=await readdir(dir);
     if(names.length>12||names.some(x=>x!==CURRENT&&!genPattern.test(x)&&!stagePattern.test(x)))invalid();
     if(!names.includes(CURRENT)){
+      this.checkKnownPointer(null);
       await this.discardUnpublished(names,dir);
       return;
     }
@@ -127,16 +139,29 @@ export class AdvancedRetrievalStore {
     if(sha(bytes)!==ptr.sha256)invalid();
     const value=parseCanonical(bytes);
     validateActive(value,this.root.id);
+    this.checkKnownPointer(ptr.filename);
     await this.discardUnpublished(names.filter(n=>n!==CURRENT&&n!==ptr.filename),dir);
     this.generation=value;this.committedName=ptr.filename;
     });
   }
+  private checkKnownPointer(name:string|null):void {
+    const state=lifecycles.get(this.path);
+    if(state&&!state.blocked&&state.name!==name)invalid();
+  }
   private assertCurrent():void {
-    if(this.poisoned||activeEpochs.get(this.path)?.epoch!==this.epoch)invalid();
+    if(this.poisoned||this.lifecycle.epoch!==this.epoch)invalid();
+  }
+  private visibleLegacy():RetrievalGeneration|null{
+    if(this.lifecycle.blocked||this.generation?.schemaVersion!==1)return null;
+    if(!this.lifecycle.revoked.size)return this.generation;
+    const {generationId:_,...base}=this.generation;
+    const filtered={...base,entries:base.entries.filter(e=>!this.lifecycle.revoked.has(e.sourcePath))};
+    return {...filtered,generationId:generationDigest(filtered)};
   }
   snapshot():RetrievalGeneration|null{
     this.assertCurrent();
-    return this.generation?.schemaVersion===1?structuredClone(this.generation):null;
+    const value=this.visibleLegacy();
+    return value?structuredClone(value):null;
   }
   private async verifyApi(g:ApiDenseGeneration,signal?:AbortSignal):Promise<void> {
     let path='',source:Awaited<ReturnType<typeof readSource>>|undefined;
@@ -155,41 +180,31 @@ export class AdvancedRetrievalStore {
   /** A recovered API generation is never exposed without original source verification. */
   async snapshotApi(spaceId:string,lexicalGenerationId:string):Promise<ApiDenseGeneration|null>{
     this.assertCurrent();
-    if(this.generation?.schemaVersion!==2||this.apiRevoked)return null;
-    const value=this.generation,revision=this.revocation;
+    const state=this.lifecycle;
+    if(this.generation?.schemaVersion!==2||state.blocked||state.revoked.size)return null;
+    const value=this.generation,revision=state.revision;
     if(value.spaceId!==spaceId||value.lexicalGenerationId!==lexicalGenerationId)invalid();
-    await this.verifyApi(value);
     await withPrivateDerivedDirectory(this.path,this.root.path,async dir=>this.verifyPointer(dir));
+    await this.verifyApi(value);
     this.assertCurrent();
-    if(this.revocation!==revision||this.generation!==value||this.apiRevoked)invalid();
+    if(state.revision!==revision||this.generation!==value||state.blocked||state.revoked.size)invalid();
     return structuredClone(value);
   }
   revoke(path:string):void{
-    this.assertCurrent();this.revocation++;
-    if(this.generation?.schemaVersion===2){
-      if(this.generation.entries.some(e=>e.sourcePath===path||e.sourcePath.startsWith(path+'/'))){
-        this.apiRevoked=true;
-        this.epoch=Symbol();activeEpochs.set(this.path,{epoch:this.epoch,name:this.committedName});
-      }
-      return;
-    }
-    if(!this.generation||!this.generation.entries.some(e=>e.sourcePath===path
-      ||e.sourcePath.startsWith(path+'/')))return;
-    // Visibility is revoked synchronously on the event path. The newly derived
-    // in-memory manifest binds remaining vectors; cold restarts always reverify
-    // all participating 05C source versions before any query can advertise ready.
-    const entries=this.generation.entries.filter(x=>x.sourcePath!==path
-      &&!x.sourcePath.startsWith(path+'/'));
-    const base={schemaVersion:1 as const,rootId:this.root.id,model:this.generation.model,entries};
-    this.generation={...base,generationId:generationDigest(base)};
+    // Even an instance with an obsolete snapshot can deliver a source event.
+    // Never let an event be lost while the first generation is being built.
+    const state=this.lifecycle;
+    state.revision++;
+    for(const source of state.sources)
+      if(source===path||source.startsWith(path+'/'))state.revoked.add(source);
   }
   async publish(entry:IndexedSource,model:ModelIdentity,check:()=>Promise<void>,signal:AbortSignal,
     rebuild=false):Promise<RetrievalGeneration>{
     this.assertCurrent();
     verifyIdentity(model);
     const old=this.generation;
-    if(old&&!rebuild&&(old.schemaVersion!==1||canonical(old.model)!==canonical(model)))invalid();
-    const entries=[...(rebuild?[]:old?.schemaVersion===1?old.entries:[]).filter(x=>x.sourcePath!==entry.sourcePath),entry]
+    if(!rebuild&&(this.lifecycle.blocked||old&&(old.schemaVersion!==1||canonical(old.model)!==canonical(model))))invalid();
+    const entries=[...(rebuild?[]:this.visibleLegacy()?.entries??[]).filter(x=>x.sourcePath!==entry.sourcePath),entry]
       .sort((a,b)=>cmp(a.sourcePath,b.sourcePath));
     const base={schemaVersion:1 as const,rootId:this.root.id,model,entries};
     const next:RetrievalGeneration={...base,generationId:generationDigest(base)};
@@ -198,7 +213,7 @@ export class AdvancedRetrievalStore {
   async publishApi(generation:ApiDenseGeneration,check:()=>Promise<void>,signal:AbortSignal):Promise<ApiDenseGeneration>{
     const next=readBuiltApiDenseGeneration(generation);
     validateApiDenseGeneration(next,this.root.id);
-    return this.commit(next,async()=>{await this.verifyApi(next,signal);await check();},signal);
+    return this.commit(next,async()=>{await check();await this.verifyApi(next,signal);},signal);
   }
   private async verifyPointer(dir:string):Promise<void>{
     if(this.committedName===null){if((await readdir(dir)).includes(CURRENT))invalid();return;}
@@ -210,11 +225,11 @@ export class AdvancedRetrievalStore {
     this.assertCurrent();
     if(activeWriters.has(this.path))invalid();
     activeWriters.add(this.path);
-    const revision=this.revocation;
+    const state=this.lifecycle,revision=state.revision;
     try {
       const next=structuredClone(value);
       validateActive(next,this.root.id);
-      return await withPrivateDerivedDirectory(this.path,this.root.path,async dir=>{
+      const result=await withPrivateDerivedDirectory(this.path,this.root.path,async dir=>{
     const names=await readdir(dir);
     if(names.length>12||names.some(x=>x!==CURRENT&&!genPattern.test(x)&&!stagePattern.test(x)))invalid();
     if(this.committedName===null){
@@ -230,7 +245,7 @@ export class AdvancedRetrievalStore {
       await check();
       await this.verifyPointer(dir);
       this.assertCurrent();
-      if(signal.aborted||this.revocation!==revision)throw new ModelError('MODEL_CANCELLED');
+      if(signal.aborted||state.revision!==revision)throw new ModelError('MODEL_CANCELLED');
     };
     await guard();
     let pointerStage:string|null=null;
@@ -254,20 +269,24 @@ export class AdvancedRetrievalStore {
       pointerStage=join(dir,'.stage-'+randomUUID());
       await persist(pointerStage,Buffer.from(canonical(pointer),'utf8'));
       await guard();
+      // The pointer rename is asynchronous. Suppress every reader until
+      // publication, durability and final freshness are confirmed.
+      state.blocked=true;
       try{await rename(pointerStage,join(dir,CURRENT));pointerStage=null;}
       catch{this.poisoned=true;invalid();}
-      // New version is now the only visible in-memory generation.
-      const wasCurrent=activeEpochs.get(this.path)?.epoch===this.epoch;
-      this.generation=next;this.committedName=name;this.apiRevoked=false;
-      this.epoch=Symbol();activeEpochs.set(this.path,{epoch:this.epoch,name});
-      if(!wasCurrent||this.revocation!==revision){this.apiRevoked=true;this.poisoned=true;invalid();}
+      this.generation=next;this.committedName=name;
+      this.epoch=Symbol();state.epoch=this.epoch;state.name=name;
+      state.sources=new Set(next.entries.map(e=>e.sourcePath));
+      if(signal.aborted||state.revision!==revision){this.poisoned=true;invalid();}
       try{await syncDirectory(dir);}
       catch{this.poisoned=true;invalid();}
+      if(next.schemaVersion===2)await this.verifyApi(next,signal);
       await this.discardUnpublished((await readdir(dir)).filter(n=>n!==CURRENT&&n!==name),dir);
-      if(signal.aborted||this.revocation!==revision){this.apiRevoked=true;this.poisoned=true;invalid();}
+      if(next.schemaVersion===2)await this.verifyApi(next,signal);
+      if(signal.aborted||state.revision!==revision){this.poisoned=true;invalid();}
       return structuredClone(next);
     }catch(error){
-      if(this.committedName===name&&this.generation===next)this.poisoned=true;
+      if(this.committedName===name&&this.generation===next){this.poisoned=true;state.blocked=true;}
       // A pre-CURRENT cancellation must not accumulate unbounded pointer
       // stages and eventually poison cold recovery. Remove only our newly
       // created, authenticated stage files; ambiguous CURRENT stays poisoned.
@@ -291,7 +310,13 @@ export class AdvancedRetrievalStore {
       throw new ModelError('INDEX_PUBLICATION_UNCERTAIN');
     }
        });
+      // Keep the new generation unavailable until all asynchronous directory
+      // operations, including descriptor close, have completed.
+      if(signal.aborted||state.revision!==revision){this.poisoned=true;invalid();}
+      state.revoked.clear();state.blocked=false;
+      return result;
     } catch (error) {
+      if(state.blocked)this.poisoned=true;
       if(error instanceof IngestError){this.poisoned=true;invalid();}
       throw error;
     } finally { activeWriters.delete(this.path); }

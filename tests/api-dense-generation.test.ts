@@ -8,6 +8,7 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {mkdtemp,mkdir,readFile,writeFile,rm,readdir} from 'node:fs/promises';
 import {readFileSync} from 'node:fs';
+import {createRequire} from 'node:module';
 import {AdvancedRetrievalStore,type IndexedSource} from '../plugin/src/advanced/retrieval-storage';
 import {trustedVaultRoot} from '../plugin/src/advanced/source';
 import {CHUNK_TOKENIZER_FINGERPRINT,type ModelIdentity} from '../plugin/src/advanced/model-protocol';
@@ -147,11 +148,140 @@ test('D2 stale source, revoke, concurrent writer and forged pointer fail closed'
     store.revoke('a.md');assert.equal(await store.snapshotApi(g.spaceId,lexicalId),null);
     await writeFile(join(vault,'a.md'),'changed');
     const recovered=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
-    await assert.rejects(recovered.snapshotApi(g.spaceId,lexicalId));
+    assert.equal(await recovered.snapshotApi(g.spaceId,lexicalId),null);
     await assert.rejects(recovered.publishApi(g,async()=>{},sig()));
     await writeFile(join(vault,'a.md'),raw);
+    await recovered.publishApi(g,async()=>{},sig());
+    assert.deepEqual(await recovered.snapshotApi(g.spaceId,lexicalId),g);
     await writeFile(join(recovered.path,'CURRENT'),'{}\n',{mode:0o600});
     await assert.rejects(recovered.snapshotApi(g.spaceId,lexicalId));
     await assert.rejects(recovered.publishApi(g,async()=>{},sig()));
+  });
+});
+
+test('D2 B1: sibling event during final guard cancels first publication even without byte changes',async()=>{
+  await temporary(async(vault,root)=>{
+    const store=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+    const sibling=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+    const g=(await generation(root.id)).value;
+    let checks=0;
+    await assert.rejects(store.publishApi(g,async()=>{
+      if(++checks===3)sibling.revoke('a.md');
+    },sig()),{message:'MODEL_CANCELLED'});
+    assert.equal(checks,3);
+    assert.deepEqual(await readdir(store.path),[]);
+    assert.equal(await store.snapshotApi(g.spaceId,lexicalId),null);
+    await store.publishApi(g,async()=>{},sig());
+    assert.deepEqual(await store.snapshotApi(g.spaceId,lexicalId),g);
+  });
+});
+test('D2 B1: final caller check mutating source without event cannot publish or replace CURRENT',async()=>{
+  await temporary(async(vault,root)=>{
+    const store=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+    const g=(await generation(root.id)).value;
+    let checks=0;
+    await assert.rejects(store.publishApi(g,async()=>{
+      if(++checks===3)await writeFile(join(vault,'a.md'),'changed');
+    },sig()));
+    assert.equal(checks,3);
+    assert.deepEqual(await readdir(store.path),[]);
+    await writeFile(join(vault,'a.md'),raw);
+    await store.publishApi(g,async()=>{},sig());
+    const previous=await readFile(join(store.path,'CURRENT'));
+    const replacement=(await generation(root.id)).value;
+    checks=0;
+    await assert.rejects(store.publishApi(replacement,async()=>{
+      if(++checks===3)await writeFile(join(vault,'a.md'),'changed again');
+    },sig()));
+    assert.equal(checks,3);
+    assert.deepEqual(await readFile(join(store.path,'CURRENT')),previous);
+    assert.equal((await readdir(store.path)).length,2);
+    await assert.rejects(store.snapshotApi(g.spaceId,lexicalId));
+  });
+});
+
+test('D2 B1: sibling event during replacement preserves CURRENT and suppresses affected old generation',async()=>{
+  await temporary(async(vault,root)=>{
+    const store=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+    const first=(await generation(root.id)).value;
+    await store.publishApi(first,async()=>{},sig());
+    const sibling=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+    const prior=await readFile(join(store.path,'CURRENT'));
+    const next=(await generation(root.id)).value;
+    let checks=0;
+    await assert.rejects(store.publishApi(next,async()=>{
+      if(++checks===3)sibling.revoke('a.md');
+    },sig()),{message:'MODEL_CANCELLED'});
+    assert.equal(checks,3);
+    assert.deepEqual(await readFile(join(store.path,'CURRENT')),prior);
+    assert.equal((await readdir(store.path)).length,2);
+    assert.equal(await store.snapshotApi(first.spaceId,lexicalId),null);
+    assert.equal(await sibling.snapshotApi(first.spaceId,lexicalId),null);
+    await store.publishApi(next,async()=>{},sig());
+    assert.deepEqual(await store.snapshotApi(next.spaceId,lexicalId),next);
+  });
+});
+test('D2 B2: API revocation survives same-process reopen before bytes change and obsolete-instance events',async()=>{
+  await temporary(async(vault,root)=>{
+    const store=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+    const g=(await generation(root.id)).value;
+    await store.publishApi(g,async()=>{},sig());
+    const sibling=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+    store.revoke('a.md');
+    assert.equal(await store.snapshotApi(g.spaceId,lexicalId),null);
+    assert.equal(await sibling.snapshotApi(g.spaceId,lexicalId),null);
+    const reopened=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+    assert.equal(await reopened.snapshotApi(g.spaceId,lexicalId),null);
+    await reopened.publishApi(g,async()=>{},sig());
+    assert.deepEqual(await reopened.snapshotApi(g.spaceId,lexicalId),g);
+    sibling.revoke('b.md');
+    assert.equal(await reopened.snapshotApi(g.spaceId,lexicalId),null);
+  });
+});
+test('D2 B3: legacy shared revocation filters all instances, reopen and incremental publication',async()=>{
+  await temporary(async(vault,root)=>{
+    const store=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+    await store.publish(legacyEntry,legacy,async()=>{},sig());
+    await store.publish({...legacyEntry,sourcePath:'folder/b.md'},legacy,async()=>{},sig());
+    const sibling=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+    store.revoke('folder');
+    const visible=store.snapshot();
+    assert.deepEqual(visible?.entries.map(e=>e.sourcePath),['legacy.md']);
+    assert.deepEqual(sibling.snapshot(),visible);
+    const reopened=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+    assert.deepEqual(reopened.snapshot(),visible);
+    await reopened.publish({...legacyEntry,sourcePath:'new.md'},legacy,async()=>{},sig());
+    assert.deepEqual(reopened.snapshot()?.entries.map(e=>e.sourcePath),['legacy.md','new.md']);
+    assert.throws(()=>sibling.snapshot());
+  });
+});
+
+test('D2 B1/B2: event at CURRENT rename leaves publication uncertain and reopened index unavailable',async(t)=>{
+  await temporary(async(vault,root)=>{
+    const store=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+    const first=(await generation(root.id)).value;
+    await store.publishApi(first,async()=>{},sig());
+    const sibling=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+    const next=(await generation(root.id)).value;
+    // Intercept only the actual rename completion, not production logic.
+    const fs=createRequire(join(process.cwd(),'package.json'))('node:fs/promises') as typeof import('node:fs/promises');
+    const renameOriginal=fs.rename;
+    let injected=false;
+    t.mock.method(fs,'rename',async(from:Parameters<typeof fs.rename>[0],to:Parameters<typeof fs.rename>[1])=>{
+      await renameOriginal(from,to);
+      if(!injected&&String(to).endsWith('/CURRENT')){
+        injected=true;
+        assert.equal(await sibling.snapshotApi(first.spaceId,lexicalId),null);
+        sibling.revoke('a.md');
+      }
+    });
+    await assert.rejects(store.publishApi(next,async()=>{},sig()));
+    assert.ok(injected);
+    assert.throws(()=>store.snapshot());
+    const reopened=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+    assert.equal(await reopened.snapshotApi(next.spaceId,lexicalId),null);
+    await reopened.publishApi(next,async()=>{},sig());
+    assert.deepEqual(await reopened.snapshotApi(next.spaceId,lexicalId),next);
+    assert.equal((await readdir(reopened.path)).length,2);
   });
 });
