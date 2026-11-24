@@ -1,0 +1,13 @@
+{
+  "schema": "oks-06a-corpus-v1",
+  "counts": {
+    "sources": 60,
+    "tuning": 30,
+    "held_out": 90
+  },
+  "files": {
+    "sources.jsonl": "4d0c33998f1c9450d62378691ca8db5baf57bcdbbb8dc45c6509e5a0753ecd31",
+    "requests.jsonl": "6ecda8b15ed1e95ed306555ca229a0dd76b3a17d8f1ab74e05d5b3cec60c4db0",
+    "judgments.jsonl": "6d2b6ffbb44bc76910e140bb9f0849f6a2d8bebf817caab716a15d09fdc90de2"
+  }
+}
