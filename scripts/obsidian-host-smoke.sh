@@ -63,12 +63,25 @@ assert_contains() {
   fi
 }
 host_isolation=()
+if [[ "${OKS_AI_RERANK_TEST:-0}" == 1 && "${OKS_HOST_NO_ROUTE:-0}" != 1 ]]; then
+  echo 'HOST_SMOKE_FAILURE: rerank fixture requires isolated no-route namespace' >&2; exit 2
+fi
 if [[ "${OKS_HOST_NO_ROUTE:-0}" == 1 ]]; then
   command -v unshare >/dev/null || { echo "HOST_SMOKE_UNAVAILABLE: unshare missing" >&2; exit 2; }
   host_isolation=(unshare -Urn --)
 fi
 env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolation[@]}" xvfb-run -a -e "$tmp/display.log" -s '-screen 0 1280x800x24' bash -c '
   set -euo pipefail
+  mock_pid=""
+  if [[ "${OKS_AI_RERANK_TEST:-0}" == 1 ]]; then
+    ip link set lo up
+    test "$(ip -o link show | wc -l)" -eq 1
+    test -z "$(ip route show default)"
+    python3 "$repo/scripts/obsidian-rerank-fixture.py" "$tmp/rerank-ready" &
+    mock_pid=$!
+    for _ in {1..50}; do test ! -f "$tmp/rerank-ready" || break; sleep .1; done
+    test -f "$tmp/rerank-ready"
+  fi
   "$app" --no-sandbox --disable-gpu --user-data-dir="$tmp/electron" > "$tmp/host.log" 2>&1 &
   p=$!
   trap '\''kill "$p" 2>/dev/null || :; wait "$p" 2>/dev/null || :'\'' EXIT
@@ -106,6 +119,12 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
   [[ "$ui" == *"OBSIDIAN_UI_SMOKE_PASS:"* ]] ||
     { echo "HOST_SMOKE_FAILURE: extended UI scenarios ($ui)" >&2; exit 1; }
   printf "%s\n" "$ui"
+  if [[ "${OKS_AI_RERANK_TEST:-0}" == 1 ]]; then
+    rerank="$(timeout 30s "$cli" eval "code=$(cat "$repo/scripts/obsidian-rerank-smoke.js")")"
+    [[ "$rerank" == *"OBSIDIAN_RERANK_FIXTURE_PASS:"* ]] || {
+      echo "HOST_SMOKE_FAILURE: isolated rerank UI fixture ($rerank)" >&2; exit 1; }
+    printf "%s\n" "$rerank"
+  fi
   if [[ "${OKS_ADVANCED_HEALTH_TEST:-0}" == 1 ]]; then
     advanced="$(timeout 25s "$cli" eval "code=$(cat "$repo/scripts/obsidian-advanced-smoke.js")")"
     [[ "$advanced" == *"OBSIDIAN_ADVANCED_HEALTH_PASS:"* ]] ||

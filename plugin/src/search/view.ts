@@ -3,6 +3,8 @@ import { propertyInput, uiRequest, type SearchController } from './controller';
 import type { SearchSettings } from './settings';
 import { diagnostics } from './status';
 import { textElement } from './render';
+import { renderRerankConfirmation } from '../ai/rerank-confirm';
+import { ProviderFailure } from '../ai/contracts';
 
 export const SEARCH_VIEW = 'oks-standalone-search';
 export class SearchView extends ItemView {
@@ -85,6 +87,22 @@ export class SearchView extends ItemView {
     });
     const message = add('p', '', 'oks-message'); message.setAttribute('aria-live', 'polite');
     const results = add('ol', '', 'oks-results');
+    const rerankMessage=add('p','','oks-rerank-message'); rerankMessage.setAttribute('aria-live','polite');
+    const confirmation=add('section','','oks-rerank-preview');
+    const rerankRows=add('ol','','oks-rerank-results');
+    const clearConfirmation=()=>{const token=confirmation.querySelector<HTMLInputElement>('.oks-rerank-token');
+      if(token) token.value=''; confirmation.replaceChildren();};
+    const rerankError=(error:unknown)=>{rerankMessage.textContent='Local rerank: '+(error instanceof ProviderFailure?error.code:'NOT_READY');};
+    button('Prepare local rerank','oks-rerank-prepare',()=>{
+      clearConfirmation();
+      try {
+        const preview=this.controller.prepareRerank();
+        renderRerankConfirmation(confirmation,preview,(classification,token)=>{
+          if(!this.disposed) void this.controller.rerankConfirmed(preview,classification,token).catch(rerankError);
+        },()=>this.controller.cancelRerank());
+      } catch(error) { clearConfirmation();rerankError(error); }
+    });
+    button('Cancel rerank','oks-rerank-cancel',()=>{clearConfirmation();this.controller.cancelRerank();});
     const renderStatus = (): void => {
       if (this.disposed) return;
       const s = this.controller.status();
@@ -96,6 +114,15 @@ export class SearchView extends ItemView {
     const render = (): void => {
       if (this.disposed) return;
       renderStatus(); const state = this.controller.snapshot(); message.textContent = state.message; results.replaceChildren();
+      clearConfirmation();rerankRows.replaceChildren();
+      rerankMessage.textContent=state.rerank?'Local rerank: '+(state.rerank.error??state.rerank.phase):'Local rerank: not run';
+      state.rerank?.hits.forEach(hit=>{
+        const row=textElement(doc,'li','');row.appendChild(textElement(doc,'pre',hit.evidence.originalExcerpt));
+        row.appendChild(textElement(doc,'span','Rerank score: '+hit.rerankScore));
+        const index=state.response?.hits.findIndex(candidate=>JSON.stringify(candidate)===JSON.stringify(hit.evidence))??-1;
+        const open=textElement(doc,'button',hit.evidence.sourceId+' — verify and open','oks-rerank-open');
+        open.onclick=()=>{if(!this.disposed)void this.controller.open(index,hit.evidence);};row.appendChild(open);rerankRows.appendChild(row);
+      });
       state.response?.hits.forEach((hit, index) => {
         const row = textElement(doc, 'li', '');
         row.appendChild(textElement(doc, 'pre', hit.originalExcerpt));
@@ -109,9 +136,11 @@ export class SearchView extends ItemView {
     render(); input.focus();
   }
   private cleanup(): void {
-    this.disposed = true; this.unsubscribe?.(); this.unsubscribe = undefined;
+    this.disposed = true; this.unsubscribe?.(); this.unsubscribe = undefined; this.controller.cancelRerank();
     if (this.timer !== undefined) this.contentEl.ownerDocument.defaultView!.clearInterval(this.timer);
-    this.timer = undefined; this.contentEl.replaceChildren();
+    this.timer = undefined;
+    const token=this.contentEl.querySelector<HTMLInputElement>('.oks-rerank-token');if(token)token.value='';
+    this.contentEl.replaceChildren();
   }
   async onClose(): Promise<void> { this.cleanup(); }
 }

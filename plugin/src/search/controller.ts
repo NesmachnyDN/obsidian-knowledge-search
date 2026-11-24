@@ -1,3 +1,8 @@
+import { EvidenceReranker, type RerankedHit } from '../ai/rerank-evidence';
+import { pilotConfig } from '../ai/loopback-rerank';
+import { configDigest } from '../ai/disclosure';
+import { ProviderFailure, type ProviderConfig, type ProviderPreference, type ProviderFailureCode } from '../ai/contracts';
+import { hash, isDigest } from '../standalone/contracts';
 import type { AdvancedHealth } from '../advanced/health';
 import type { IngestionStatus } from '../advanced/manager';
 import { isRecord, StandaloneError, validateRequest, validProperty, BOUNDS,
@@ -39,7 +44,12 @@ export function propertyInput(key: string, valueType: string, operator: string, 
   return predicate as Predicate;
 }
 type Engine = Pick<StandaloneEngine, 'search' | 'status' | 'cancel' | 'resume' | 'rebuild'>;
-export type UiState = { phase: 'idle' | 'searching' | 'results' | 'error'; message: string; response: SearchResponse | null };
+export type RerankPreview = { revision: number; config: ProviderConfig; scopeId: string; query: string; hits: EvidenceHit[] };
+export type RerankState = { phase: 'running' | 'results' | 'error'; error: ProviderFailureCode | null; hits: readonly RerankedHit[] };
+export type RerankPort = {
+  config(): ProviderPreference; scopeId(): string | undefined; verify(hit: EvidenceHit): Promise<void>;
+};
+export type UiState = { rerank?: RerankState; phase: 'idle' | 'searching' | 'results' | 'error'; message: string; response: SearchResponse | null };
 export class SearchController {
   private engine?: Engine;
   private enabled = true;
@@ -47,13 +57,18 @@ export class SearchController {
   private error: string | null = null;
   private disposed = false;
   private revision = 0;
+  private lastQuery = '';
+  private prepared?: RerankPreview;
+  private rerankAbort?: AbortController;
+  private readonly reranker = new EvidenceReranker();
   private active = false;
   private pending?: { request: SearchRequest; revision: number; resolve: (v: ApiResult<SearchResponse>) => void };
   private listeners = new Set<() => void>();
   private state: UiState = { phase: 'idle', message: 'Enter a query to search original Markdown.', response: null };
   constructor(private readonly navigate: (hit: EvidenceHit) => Promise<void>,
     private readonly advancedStatus?: () => AdvancedHealth,
-    private readonly ingestionStatus?: () => IngestionStatus) {}
+    private readonly ingestionStatus?: () => IngestionStatus,
+    private readonly rerankPort?: RerankPort) {}
   attach(engine: Engine): void { if (!this.disposed) { this.engine = engine; this.error = null; this.emit(); } }
   configure(enabled: boolean, paused: boolean, error: string | null = null): void {
     this.enabled = enabled; this.paused = paused; this.error = safeCode(error); this.invalidate();
@@ -68,7 +83,7 @@ export class SearchController {
   }
   private emit(): void { for (const listener of this.listeners) listener(); }
   invalidate(): void {
-    this.revision++;
+    this.revision++; this.revokeRerank(); this.lastQuery = '';
     this.pending?.resolve(failure('SUPERSEDED')); this.pending = undefined;
     this.state = { phase: 'idle', message: 'Results cleared; search to verify current sources.', response: null }; this.emit();
   }
@@ -81,6 +96,7 @@ export class SearchController {
     if (this.disposed || !this.enabled) return failure('DISABLED');
     if (!this.engine) return failure(this.error ?? 'INDEX_UNAVAILABLE');
     const revision = ++this.revision;
+    this.revokeRerank(); this.lastQuery = '';
     this.pending?.resolve(failure('SUPERSEDED'));
     this.state = { phase: 'searching', message: 'Verifying original sources…', response: null }; this.emit();
     return new Promise(resolve => {
@@ -100,12 +116,79 @@ export class SearchController {
     this.active = false;
     if (job.revision !== this.revision || this.disposed) result = failure('SUPERSEDED');
     else {
+      this.lastQuery = result.ok && result.value.status === 'ok' && result.value.executedMode === 'lexical' ? job.request.query : '';
       this.state = !result.ok ? { phase: 'error', message: result.error, response: null }
         : { phase: result.value.status === 'failed' ? 'error' : 'results', response: structuredClone(result.value),
           message: result.value.error ? safeCode(result.value.error)! : result.value.hits.length ? 'Verified at search time; checked again on open.' : 'No matching evidence.' };
       this.emit();
     }
     job.resolve(result); void this.pump();
+  }
+  /** Preview the exact locally verified candidate set; no network until the user confirms. */
+  prepareRerank(): RerankPreview {
+    this.prepared = undefined;
+    const pref = this.rerankPort?.config();
+    if (!pref || pref.state === 'disabled') throw new ProviderFailure('DISABLED');
+    if (pref.state !== 'configured') throw new ProviderFailure('CONFIG_INVALID');
+    const config = pilotConfig(pref);
+    const scopeId = this.rerankPort?.scopeId();
+    const response = this.state.response;
+    if (this.disposed || !this.enabled || this.paused || this.rerankAbort || !isDigest(scopeId)
+      || !this.lastQuery.trim() || !response || response.status !== 'ok'
+      || response.executedMode !== 'lexical' || !response.hits.length
+      || this.engine?.status().generationId !== response.indexGenerationId)
+      throw new ProviderFailure('NOT_READY');
+    if (response.hits.length > config.limits.maxCandidates
+      || Buffer.byteLength(this.lastQuery) + response.hits.reduce((n, hit) => n + Buffer.byteLength(hit.originalExcerpt), 0)
+        > config.limits.maxInputBytes) throw new ProviderFailure('LIMIT_EXCEEDED');
+    this.prepared = structuredClone({revision:this.revision,config,scopeId,query:this.lastQuery,hits:response.hits});
+    return structuredClone(this.prepared);
+  }
+  private revokeRerank(): void {
+    this.prepared = undefined;
+    this.rerankAbort?.abort();
+  }
+  cancelRerank(): void {
+    this.revokeRerank();
+    if (this.state.rerank) {
+      this.state = {...this.state,rerank:{phase:'error',error:'CANCELLED',hits:[]}}; this.emit();
+    }
+  }
+  async rerankConfirmed(preview: RerankPreview, classification: 'synthetic' | 'public', token: string): Promise<void> {
+    const approved = this.prepared; this.prepared = undefined; // consume once, even on failure
+    if (!approved || !this.rerankPort || this.rerankAbort || !['synthetic','public'].includes(classification)
+      || JSON.stringify(approved) !== JSON.stringify(preview)) throw new ProviderFailure('DISCLOSURE_DENIED');
+    const port = this.rerankPort;
+    const current = (): boolean => {
+      const config = port.config();
+      return !this.disposed && this.enabled && !this.paused && this.revision === approved.revision
+        && port.scopeId() === approved.scopeId && config.state === 'configured'
+        && configDigest('reranking',config) === configDigest('reranking',approved.config)
+        && this.engine?.status().generationId === this.state.response?.indexGenerationId
+        && this.state.response?.indexGenerationId === approved.hits[0]?.indexGenerationId;
+    };
+    if (!current()) throw new ProviderFailure('CANCELLED');
+    const abort = new AbortController(); this.rerankAbort = abort;
+    const deadlineUnixMs = Date.now() + approved.config.limits.timeoutMs;
+    this.state = {...this.state,rerank:{phase:'running',error:null,hits:[]}}; this.emit();
+    try {
+      const hits = await this.reranker.run({
+        config:approved.config,scopeId:approved.scopeId,query:{text:approved.query,classification},
+        candidates:approved.hits.map(hit=>({hit,classification})),
+        grant:{version:1,role:'reranking',configDigest:configDigest('reranking',approved.config),
+          scopeId:approved.scopeId,expiresUnixMs:deadlineUnixMs,queryDigest:hash(approved.query),
+          queryClassification:classification,sources:approved.hits.map(hit=>({sourceId:hit.sourceId,
+            sourceSha256:hit.sourceSha256,excerptDigest:hash(hit.originalExcerpt),classification}))},
+      },token,{signal:abort.signal,deadlineUnixMs},hit=>port.verify(hit),current);
+      if (current() && !abort.signal.aborted) {
+        this.state = {...this.state,rerank:{phase:'results',error:null,hits}}; this.emit();
+      }
+    } catch (error) {
+      if (this.revision === approved.revision && !this.disposed) {
+        this.state = {...this.state,rerank:{phase:'error',error:error instanceof ProviderFailure?error.code:'NOT_READY',hits:[]}};
+        this.emit();
+      }
+    } finally { if (this.rerankAbort === abort) this.rerankAbort = undefined; }
   }
   async open(index: number, expected?: EvidenceHit): Promise<ApiResult<null>> {
     const hit = this.state.response?.hits[index];
