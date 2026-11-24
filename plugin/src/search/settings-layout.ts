@@ -76,7 +76,7 @@ export function restoreSettingsFocus(root: HTMLElement, key: string): void {
 }
 
 export function settingsDisclosure(parent: HTMLElement, openEditors: Set<string>,
-  key: string, title: string, openLabel: string, onOpen: () => void):
+  key: string, title: string, openLabel: string, onOpen: () => void, onClose?: () => void):
   { form: HTMLElement; open: () => void } {
   // The opener must precede the form in DOM order. Native Tab enters it next.
   const row = new Setting(parent).setName(t(title));
@@ -85,7 +85,7 @@ export function settingsDisclosure(parent: HTMLElement, openEditors: Set<string>
   let opener: HTMLButtonElement;
   const setOpen = (open: boolean): void => {
     if (open) { openEditors.add(key); onOpen(); }
-    else openEditors.delete(key);
+    else { openEditors.delete(key); onClose?.(); }
     form.hidden = !open;
     opener.setAttribute('aria-expanded', String(open));
     opener.textContent = t(open ? 'Close editor' : openLabel);

@@ -38,6 +38,7 @@ export class SearchSettingsTab extends PluginSettingTab {
   private probeInput?: ProbeConfig;
   private readonly aiInputs: AiDrafts = {};
   private readonly openEditors = new Set<string>();
+  private releaseProviderChecks?: () => void;
 
   constructor(app: App, plugin: Plugin, private readonly current: () => SearchSettings,
     private readonly patchSettings: (change: (s: SearchSettings) => void) => Promise<void>,
@@ -52,7 +53,15 @@ export class SearchSettingsTab extends PluginSettingTab {
     private readonly rebuildActive?: () => Promise<void>,
     private readonly searchStatus?: () => SearchStatus,
     private readonly lastBasic?: () => BasicResponse | undefined,
-    private readonly aiOperationStatus?: OperationStatusReader) { super(app, plugin); }
+    private readonly aiOperationStatus?: OperationStatusReader) {
+    super(app, plugin);
+    plugin.register(() => this.hide());
+  }
+
+  hide(): void {
+    this.releaseProviderChecks?.();
+    this.releaseProviderChecks = undefined;
+  }
 
   private async commit(change: (s: SearchSettings) => void, error: HTMLElement): Promise<boolean> {
     try {
@@ -408,6 +417,7 @@ export class SearchSettingsTab extends PluginSettingTab {
   }
 
   display(focusKey?: string): void {
+    this.hide();
     const root = this.containerEl;
     root.replaceChildren();
     applySettingsLayout(root, true);
@@ -427,8 +437,8 @@ export class SearchSettingsTab extends PluginSettingTab {
     this.showOverview(root);
     this.showSearch(root);
     const ai = heading(root, 'AI capabilities (optional)');
-    ai.createEl('p', { text: t('Configure each task independently. Preferences are not readiness or permission to disclose content. Credentials are never entered or saved here.') });
-    renderProviderSettings(ai, this.app, this.current().ai, this.aiInputs, this.openEditors, expert,
+    ai.createEl('p', { text: t('Configure each task independently. Preferences are not readiness or permission to disclose content. Connection-check credentials are temporary and never saved.') });
+    this.releaseProviderChecks = renderProviderSettings(ai, this.app, this.current().ai, this.aiInputs, this.openEditors, expert,
       (role, preference) => this.patchSettings(settings => { settings.ai[role] = preference; }),
       focusKey => this.display(focusKey), this.aiOperationStatus);
     this.showDocuments(root);

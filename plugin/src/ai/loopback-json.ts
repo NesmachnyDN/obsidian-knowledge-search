@@ -4,6 +4,13 @@ import { ProviderFailure, type CallContext, type ProviderConfig, type Authorized
 
 const MAX_WIRE_BYTES = 128 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
+// One in-flight HTTP operation per canonical origin and role endpoint, shared
+// by Search, Settings and replacement plugin instances during reload.
+// The key contains no model inputs or credentials and is removed on settlement.
+const activeKey = Symbol.for('oks.loopback.active-requests.v1');
+const host = globalThis as typeof globalThis & { [activeKey]?: Set<string> };
+const activeRequests = host[activeKey] ??= new Set<string>();
+
 const fail = (code: ConstructorParameters<typeof ProviderFailure>[0]): never => { throw new ProviderFailure(code); };
 /** Only the local HTTP pilot. HTTPS/cloud need a separate authenticated endpoint policy. */
 export function pilotConfig(value: ProviderConfig): ProviderConfig {
@@ -52,13 +59,14 @@ export class LoopbackJsonTransport {
     if (context.signal.aborted) return fail('CANCELLED');
     if (!Number.isSafeInteger(context.deadlineUnixMs)) return fail('CONFIG_INVALID');
     if (typeof token !== 'string' || !/^[A-Za-z0-9._~+\/=-]{1,512}$/.test(token)) return fail('UNAUTHENTICATED');
-    if (this.busy) return fail('QUOTA_EXCEEDED');
+    const key = config.origin + path;
+    if (this.busy || activeRequests.has(key)) return fail('QUOTA_EXCEEDED');
     const body = checkedJsonBody(payload);
     const timeout = Math.min(config.limits.timeoutMs, context.deadlineUnixMs - Date.now());
     if (timeout <= 0) return fail('TIMEOUT');
-    this.busy = true;
+    this.busy = true; activeRequests.add(key);
     try { return await this.post(config.origin, path, body, token, context.signal, timeout); }
-    finally { this.busy = false; }
+    finally { this.busy = false; activeRequests.delete(key); }
   }
   private post(origin: string, path: LoopbackPath, body: Buffer, token: string, signal: AbortSignal, timeout: number): Promise<unknown> {
     const responseLimit = path === '/v1/embeddings' ? 1024 * 1024 : MAX_RESPONSE_BYTES;

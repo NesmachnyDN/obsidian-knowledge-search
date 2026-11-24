@@ -1,4 +1,4 @@
-// RU UI acceptance in a disposable Obsidian host only. No providers or real Vault.
+// RU UI acceptance in a disposable Obsidian host; fixed synthetic loopback check only.
 (async () => {
   const fail = code => { throw new Error('L10N_RU_' + code); };
   const assert = (condition, code) => { if (!condition) fail(code); };
@@ -54,6 +54,42 @@
     assert(row('Базовый адрес API', embedding) && row('Идентификатор модели', embedding) &&
       row('Ревизия модели', embedding), 'AI_FIELDS');
     assert(embedding.textContent.includes('Локальным считается только адрес'), 'LOCAL_WARNING');
+    assert(row('Проверка подключения',embedding).querySelector('button').textContent==='Проверка',
+      'CHECK_RU_BUTTON');
+    let checkEvidence = 'not-run';
+    if (process.env.OKS_HOST_NO_ROUTE === '1') {
+      const http=require('node:http');
+      let calls=0;
+      const server=http.createServer((req,res)=>{
+        const chunks=[];
+        req.on('data',x=>chunks.push(x));
+        req.on('end',()=>{
+          calls++;
+          const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          const ok=req.url==='/v1/embeddings' && req.headers.authorization==='Bearer synthetic-check-token' &&
+            body.model==='synthetic-check@v1' && body.input[0]==='OKS connection check';
+          res.writeHead(ok?200:400,{'content-type':'application/json'});
+          res.end(JSON.stringify(ok?{model:body.model,data:[{object:'embedding',index:0,embedding:[1,0,0]}]}:{}));
+        });
+      });
+      await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
+      try {
+        input(row('Базовый адрес API',embedding),'http://127.0.0.1:'+server.address().port);
+        input(row('Идентификатор модели',embedding),'synthetic-check');
+        input(row('Ревизия модели',embedding),'v1');
+        input(row('Ожидаемая размерность эмбеддинга',embedding),'3');
+        input(row('Bearer-токен для одной проверки',embedding),'synthetic-check-token');
+        press(row('Проверка подключения',embedding),'Проверка');
+        const result=embedding.querySelector('[data-oks-connection-check]');
+        await wait(()=>result.textContent.includes('Проверка выполнена успешно'),'CHECK_RU_SUCCESS');
+        assert(calls===1 && row('Bearer-токен для одной проверки',embedding).querySelector('input').value==='' &&
+          p.settings.ai.embedding.state==='disabled','CHECK_RU_NO_SAVE');
+        checkEvidence='localized-embedding-success-no-save';
+      } finally {
+        server.closeAllConnections();
+        await new Promise(resolve=>server.close(resolve));
+      }
+    }
     input(row('Базовый адрес API', embedding), 'http://localhost:8765');
     input(row('Идентификатор модели', embedding), 'synthetic-model');
     input(row('Ревизия модели', embedding), 'v1');
@@ -161,7 +197,7 @@
     await controller.whenIdle();
     assert(JSON.stringify(p.settings) === JSON.stringify(original) && controller.status().status === 'ready',
       'RESTORED_SETTINGS_AND_READY');
-    return 'OBSIDIAN_SETTINGS_RU_PASS: localized headings, editor, buttons, validation, a11y, provider isolation, stable ids, offline search, success/degraded summaries, restored preferences, screenshots=' + images;
+    return 'OBSIDIAN_SETTINGS_RU_PASS: localized headings, editor, buttons, validation, a11y, provider isolation, stable ids, offline search, success/degraded summaries, restored preferences, screenshots=' + images + '; connectionChecks=' + checkEvidence;
   } finally {
     app.setting.close();
   }

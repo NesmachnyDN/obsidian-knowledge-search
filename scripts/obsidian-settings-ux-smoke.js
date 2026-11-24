@@ -1,4 +1,4 @@
-// Real Obsidian Settings acceptance, synthetic Vault only. No APIs/egress are invoked.
+// Real Obsidian Settings acceptance, synthetic Vault and loopback-only test API.
 (async () => {
   const p = app.plugins.plugins['oks-synthetic-evidence'];
   const assert = (condition, label) => { if (!condition) throw new Error('UX_ACCEPTANCE_' + label); };
@@ -28,7 +28,7 @@
   app.setting.open(); await new Promise(r => setTimeout(r,350));
   app.setting.openTabById(p.manifest.id); await new Promise(r => setTimeout(r,350));
   const root = () => app.setting.activeTab.containerEl;
-  const doc = root().ownerDocument;
+  let doc = root().ownerDocument;
   const row = (name,area=root()) => [...area.querySelectorAll('.setting-item')]
     .find(el => el.querySelector('.setting-item-name')?.textContent?.trim() === name);
   const press = (target,name) => {
@@ -124,6 +124,122 @@
       embedding:'Semantic search',reranking:'Improve result ranking',generation:'Evidence-based answers'}[role]));
   const cardRow = (role,name) => row(name,card(role));
   assert(card('embedding') && card('reranking') && card('generation'), 'ROLE_CARDS');
+  let checkEvidence = 'not-run';
+  // Actual native editor connection checks: only run with the no-route host gate.
+  if (process.env.OKS_HOST_NO_ROUTE === '1') {
+    const http = require('node:http');
+    let calls = 0, cancelled = 0;
+    const server = http.createServer((req, res) => {
+      const chunks = [];
+      req.on('data', x => chunks.push(x));
+      req.on('end', () => {
+        calls++;
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        const finish = (code, value) => {
+          res.writeHead(code, {'content-type':'application/json'});
+          res.end(JSON.stringify(value));
+        };
+        if (req.headers.authorization === 'Bearer synthetic-check-slow') {
+          const timer = setTimeout(() => finish(200, {model:'synthetic-check@v1',
+            data:[{object:'embedding',index:0,embedding:[1,0,0]}]}), 1000);
+          res.on('close', () => { clearTimeout(timer); cancelled++; });
+          return;
+        }
+        if (req.headers.authorization !== 'Bearer synthetic-check-token') return finish(401,{});
+        if (body.model !== 'synthetic-check@v1') return finish(400,{});
+        if (req.url === '/v1/embeddings' && JSON.stringify(body.input) === JSON.stringify(['OKS connection check']))
+          return finish(200,{model:body.model,data:[{object:'embedding',index:0,embedding:[1,0,0]}]});
+        if (req.url === '/v1/chat/completions' &&
+            JSON.parse(body.messages[1].content).passages[0].text === 'The color is blue.')
+          return finish(200,{model:body.model,usage:{completion_tokens:8},choices:[{index:0,finish_reason:'stop',
+            message:{role:'assistant',content:JSON.stringify({claims:[{kind:'quotation',text:'blue',citationIds:[0]}]})}}]});
+        return finish(400,{});
+      });
+    });
+    await new Promise((resolve,reject) => { server.once('error',reject); server.listen(0,'127.0.0.1',resolve); });
+    try {
+      const checkOrigin = 'http://127.0.0.1:' + server.address().port;
+      const baseline = JSON.stringify(p.settings);
+      const status = role => card(role).querySelector('[data-oks-connection-check]');
+      const fill = role => {
+        edit(cardRow(role,'API origin'),checkOrigin);
+        edit(cardRow(role,'Model ID'),'synthetic-check');
+        edit(cardRow(role,'Model revision'),'v1');
+      };
+      const check = role => press(cardRow(role,'Connection check'),'Check');
+      const credential = (role, value) => edit(cardRow(role,'One-check bearer token'),value);
+      press(cardRow('embedding','Connection'),'Configure'); fill('embedding');
+      edit(cardRow('embedding','Expected embedding dimension'),'3');
+      assert(calls===0,'CHECK_NO_AUTO_IO');
+      const tokenEl=credential('embedding','synthetic-check-token');
+      assert(tokenEl.type==='password','CHECK_MASKED_TOKEN');
+      const first=check('embedding');
+      assert(first.disabled,'CHECK_BUSY');
+      first.click();
+      await wait(()=>status('embedding').textContent.includes('Check passed'),'CHECK_EMBEDDING_SUCCESS');
+      assert(calls===1 && tokenEl.value==='' && status('embedding').textContent.includes('dimension: 3'),
+        'CHECK_ONE_REQUEST_AND_CLEAR_TOKEN');
+      credential('embedding','synthetic-wrong');check('embedding');
+      await wait(()=>status('embedding').textContent.includes('UNAUTHENTICATED'),'CHECK_TYPED_AUTH_FAILURE');
+      assert(calls===2 && tokenEl.value==='','CHECK_FAILED_TOKEN_CLEARED');
+      credential('embedding','synthetic-check-slow');check('embedding');
+      await wait(()=>calls===3,'CHECK_SLOW_REQUEST');
+      press(cardRow('embedding','Connection'),'Close editor');
+      await wait(()=>cancelled===1,'CHECK_CLOSE_ABORTS');
+      assert(status('embedding').textContent==='' && tokenEl.value==='','CHECK_CLOSE_FENCE');
+      press(cardRow('embedding','Connection'),'Configure');
+      credential('embedding','synthetic-check-slow');check('embedding');
+      await wait(()=>calls===4,'CHECK_EDIT_REQUEST');
+      edit(cardRow('embedding','Model revision'),'v2');
+      await wait(()=>cancelled===2,'CHECK_EDIT_ABORTS');
+      assert(status('embedding').textContent==='' && tokenEl.value==='','CHECK_EDIT_FENCE');
+      edit(cardRow('embedding','Model revision'),'v1');
+      edit(cardRow('embedding','API origin'),'https://127.0.0.1:8765');
+      assert(cardRow('embedding','Connection check').querySelector('button').disabled &&
+        !visible(cardRow('embedding','One-check bearer token')) &&
+        cardRow('embedding','Connection check').textContent.includes('not supported'),'CHECK_UNSUPPORTED_LOCAL_ORIGIN');
+      choose(cardRow('embedding','Connection type'),'cloud');
+      assert(cardRow('embedding','Connection check').querySelector('button').disabled &&
+        !visible(cardRow('embedding','One-check bearer token')) && calls===4,'CHECK_CLOUD_BLOCKED');
+      press(cardRow('embedding','Draft preferences'),'Cancel draft');
+      press(cardRow('reranking','Connection'),'Configure');
+      assert(cardRow('reranking','Connection check').querySelector('button').disabled &&
+        cardRow('reranking','Connection check').textContent.includes('actual runtime profile'),'CHECK_RERANK_BLOCKED');
+      press(cardRow('reranking','Draft preferences'),'Cancel draft');
+      press(cardRow('generation','Connection'),'Configure');fill('generation');
+      credential('generation','synthetic-check-token');check('generation');
+      await wait(()=>status('generation').textContent.includes('Check passed'),'CHECK_GENERATION_SUCCESS');
+      assert(calls===5 && JSON.stringify(p.settings)===baseline && p.standalone===engine &&
+        p.standalone.status().generationId===generation,'CHECK_NO_SAVE_INDEX_OR_GRANT');
+      credential('generation','synthetic-check-slow');check('generation');
+      await wait(()=>calls===6,'CHECK_HIDE_REQUEST');
+      app.setting.close();
+      await wait(()=>cancelled===3,'CHECK_HIDE_ABORTS');
+      app.setting.open(); await new Promise(r=>setTimeout(r,300));
+      app.setting.openTabById(p.manifest.id); await new Promise(r=>setTimeout(r,300));
+      doc = root().ownerDocument;
+      assert(!status('generation').textContent && JSON.stringify(p.settings)===baseline,'CHECK_HIDE_FENCE');
+      // Save a synthetic generation assignment, then disable that active role while
+      // its Check request is actually in flight. Only the explicit Save/Disable
+      // operations may mutate preferences, never the Check.
+      press(cardRow('generation','Draft preferences'),'Save connection');
+      await wait(()=>p.settings.ai.generation.state==='configured','CHECK_DISABLE_PREP_SAVE');
+      await wait(()=>cardRow('generation','Connection').querySelector('button').textContent==='Configure','CHECK_DISABLE_PREP_EDITOR');
+      press(cardRow('generation','Connection'),'Configure');
+      const disablingStatus=status('generation');
+      const disablingToken=credential('generation','synthetic-check-slow');
+      check('generation');await wait(()=>calls===7,'CHECK_DISABLE_REQUEST');
+      press(cardRow('generation','Draft preferences'),'Disable role');
+      await wait(()=>cancelled===4 && p.settings.ai.generation.state==='disabled','CHECK_DISABLE_ABORTS');
+      assert(disablingStatus.textContent==='' && disablingToken.value==='' &&
+        JSON.stringify(p.settings)===baseline && p.standalone===engine &&
+        p.standalone.status().generationId===generation,'CHECK_DISABLE_FENCE');
+      checkEvidence='embedding-generation-auth-duplicate-close-edit-hide-disable-no-save-no-index';
+    } finally {
+      server.closeAllConnections();
+      await new Promise(resolve=>server.close(resolve));
+    }
+  }
   const opener = cardRow('embedding','Connection').querySelector('button');
   assert(!visible(cardRow('embedding','API origin')), 'DISABLED_EDITOR_NOT_RENDERED');
   press(cardRow('embedding','Connection'), 'Configure');
@@ -236,5 +352,5 @@
   app.setting.close();
   return 'OBSIDIAN_SETTINGS_UX_PASS: clean Basic, task sections, draft/invalid save, failed save ' +
     'preservation, conditional OCR/structured paths, independent AI roles, cloud boundary, Basic/Expert ' +
-    'operational equivalence, migrated enabled local summary, separate API/legacy index paths, native controls, offline evidence; mode=' + beforeReloadMode;
+    'operational equivalence, migrated enabled local summary, separate API/legacy index paths, native controls, offline evidence; mode=' + beforeReloadMode + '; connectionChecks=' + checkEvidence;
 })()
