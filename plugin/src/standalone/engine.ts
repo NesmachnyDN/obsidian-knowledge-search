@@ -5,6 +5,7 @@ import {
 } from './contracts';
 import { terms } from './markdown';
 import { metadataAnchor } from './metadata';
+import { verifySpan } from '../search/navigation';
 import type { MarkdownParser } from './worker';
 import type { SourceProvider } from './source';
 import type { GenerationStore } from './storage';
@@ -13,6 +14,11 @@ export type EngineState = {
   status: 'initializing' | 'ready' | 'degraded' | 'failed' | 'unavailable';
   generationId: string | null; sources: number; records: number;
   error: string | null; maintenanceWarning: string | null; busy: boolean;
+};
+/** Internal, host-selected evidence lease; not a public search response. */
+export type SelectedCorpus = {
+  rootId: string; lexicalGenerationId: string; evidence: readonly EvidenceHit[];
+  current(): boolean; verify(hit: EvidenceHit): Promise<void>;
 };
 // Query-driven bounded audit; no recurring timer or hidden background scanner.
 // lstat-based hints detect normal misses immediately. Unchanged hints are never
@@ -220,6 +226,57 @@ export class StandaloneEngine {
       }
       this.recordState(this.generation ? 'degraded' : 'failed', code(error));
     }
+  }
+  /** Complete explicit selection, independent of search query and Top-K. */
+  async captureDenseCorpus(paths: readonly string[], limit: number, signal: AbortSignal): Promise<SelectedCorpus> {
+    if (!Array.isArray(paths) || !paths.length || paths.length > BOUNDS.sources
+      || paths.some(path => !validPath(path)) || new Set(paths).size !== paths.length
+      || !Number.isSafeInteger(limit) || limit < 1 || limit > BOUNDS.blocks)
+      throw new StandaloneError('INVALID_REQUEST');
+    const selected = new Set(paths);
+    const gen = this.generation, revision = this.revision;
+    const current = (): boolean => !signal.aborted && !this.stopped && !this.paused
+      && this.revision === revision && this.generation === gen && gen !== null
+      && this.state.status === 'ready' && !this.work && !this.store.isPublicationUncertain();
+    const check = (): void => {
+      if (!current()) throw new StandaloneError(signal.aborted ? 'CANCELLED' : 'SOURCE_STALE');
+    };
+    check();
+    const evidence: EvidenceHit[] = [];
+    const docs = gen!.documents.filter(doc => selected.has(doc.sourceId));
+    if (docs.length !== selected.size) throw new StandaloneError('INVALID_REQUEST');
+    for (const doc of docs) {
+      if (doc.extractionStatus !== 'ok') throw new StandaloneError('EVIDENCE_INCOMPLETE');
+      const before = evidence.length;
+      for (const block of doc.blocks) {
+        if (block.kind === 'property' || block.kind === 'blank' || !block.originalText.trim()) continue;
+        if (evidence.length >= limit) throw new StandaloneError('INDEX_LIMIT');
+        // The internal EvidenceHit carrier uses enumeration ordinals, not query ranks.
+        // A consumer must use the retrieval envelope for actual ranking.
+        const rank = evidence.length + 1;
+        evidence.push({sourceId:doc.sourceId,sourceSha256:doc.sha256,originalExcerpt:block.originalText,
+          sourceLocators:[block.locator],rank,lexicalRank:rank,retrievalMode:'lexical',
+          indexGenerationId:gen!.generationId,score:0,headings:block.headings,
+          wikiLinks:block.wikiLinks,properties:doc.properties});
+      }
+      if (evidence.length === before) throw new StandaloneError('EVIDENCE_INCOMPLETE');
+    }
+    const live = await this.provider.list(); check();
+    if (live.length !== gen!.documents.length || live.some((path,i) => path !== gen!.documents[i]?.sourceId))
+      throw new StandaloneError('SOURCE_STALE');
+    for (const doc of docs) {
+      const bytes = await this.provider.read(doc.sourceId); check();
+      for (const hit of evidence) if (hit.sourceId === doc.sourceId) verifySpan(hit,bytes);
+    }
+    const verify = async (hit: EvidenceHit): Promise<void> => {
+      check();
+      if (!selected.has(hit.sourceId) || hit.indexGenerationId !== gen!.generationId)
+        throw new StandaloneError('EVIDENCE_INCOMPLETE');
+      verifySpan(hit,await this.provider.read(hit.sourceId)); check();
+    };
+    check();
+    return {rootId:gen!.rootId,lexicalGenerationId:gen!.generationId,
+      evidence:structuredClone(evidence),current,verify};
   }
   async search(input: unknown): Promise<SearchResponse> {
     validateRequest(input);
