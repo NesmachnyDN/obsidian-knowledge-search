@@ -60,6 +60,13 @@ Basic is the default for new installations. Expert is a presentation preference 
 
 Status vocabulary: Disabled, Not configured, Configured / not verified, Permission required, Initializing, Ready, Busy, Unavailable, Failed, Cancelled. Map only states that can be proven from existing runtime or local UI draft; never invent successful readiness or use color alone. No numerical coverage unless trustworthy denominator and current generation are known.
 
+### Planned connection-check action
+
+The maintainer-requested [connection-check contract](../../prompts/OKS-06UX-CHECK.md)
+adds explicit draft-level, role-specific synthetic verification and the optional
+portable-artifact S3 check when its adapter exists. This is a candidate requirement,
+not a claim of current runtime support or approval to disclose Vault content.
+
 ## Design notes and open checks
 
 - Prefer existing native SDK and verify supported minAppVersion; planning manifest is 1.15.1. Evaluate conditional declarative settings and secret references against actual installed SDK/host support; no unconditional API migration or new auth design.
