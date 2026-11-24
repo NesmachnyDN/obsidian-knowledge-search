@@ -18,7 +18,7 @@ class HostPlugin {
   app: unknown; manifest = { id: 'oks-synthetic-evidence' }; saved: unknown = null;
   loadData(): Promise<unknown> { return Promise.resolve(this.saved); }
   async saveData(value: unknown): Promise<void> { this.saved = value; }
-  registerView(): void {} addCommand(): void {} addSettingTab(): void {} registerEvent(): void {}
+  registerView(): void {} addCommand(): void {} addSettingTab(): void {} registerEvent(): void {} register(_callback: () => void): void {}
 }
 class FileSystemAdapter { constructor(private root: string) {} getBasePath(): string { return this.root; } }
 class Empty {}

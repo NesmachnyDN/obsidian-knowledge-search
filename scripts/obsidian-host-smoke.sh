@@ -140,6 +140,12 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
   trap cleanup EXIT
   trap "exit 130" INT
   trap "exit 143" TERM
+  # Settings checks exercise only a synthetic API on the isolated loopback.
+  if [[ "${OKS_HOST_NO_ROUTE:-0}" == 1 && ( "${OKS_06UX_TEST:-0}" == 1 || "${OKS_06UX_L10N_RU_TEST:-0}" == 1 ) ]]; then
+    ip link set lo up
+    test "$(ip -o link show | wc -l)" -eq 1
+    test -z "$(ip route show default)"
+  fi
   if [[ "${OKS_AI_RERANK_TEST:-0}" == 1 ]]; then
     ip link set lo up
     test "$(ip -o link show | wc -l)" -eq 1

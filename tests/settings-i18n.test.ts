@@ -72,3 +72,13 @@ test('UX-L10N-04: all typed Settings states have Russian labels and preserve Eng
   for (const label of ['Open Standalone search', 'Optional local API dense / hybrid search',
     'Prepare explicit dense index rebuild']) assert.ok(navigation.includes(label));
 });
+
+test('CHECK-01: connection check labels and typed errors are localized without translating diagnostic codes', () => {
+  assert.equal(translateSettings('Check','ru'),'Проверка');
+  assert.equal(translateSettings('Check','en'),'Check');
+  assert.equal(translateSettings('Checking connection…','ru'),'Проверка выполняется…');
+  const reason=translateSettings('Authentication failed. Check the bearer token.','ru');
+  const message=formatSettings('Check failed ({ms} ms): {reason} ({code})',
+    {ms:120,reason,code:'UNAUTHENTICATED'},'ru');
+  assert.equal(message,'Ошибка проверки (120 мс): Ошибка авторизации. Проверьте bearer-токен. (UNAUTHENTICATED)');
+});

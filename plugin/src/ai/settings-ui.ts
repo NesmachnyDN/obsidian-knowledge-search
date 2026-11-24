@@ -1,5 +1,6 @@
 import { Modal, Setting, getLanguage, type App } from 'obsidian';
 import { preferenceStatus } from './config';
+import { renderConnectionCheck } from './connection-check-ui';
 import { translateSettings, formatSettings } from '../search/settings-i18n';
 import { applySettingsLayout, settingsDisclosure } from '../search/settings-layout';
 import { AI_ROLES, type AiRole, type ProviderConfig, type ProviderPreference,
@@ -37,7 +38,8 @@ export function refreshProviderOperationStatus(root: HTMLElement, status?: Opera
 export function renderProviderSettings(root: HTMLElement, app: App, preferences: ProviderPreferences,
   drafts: AiDrafts, openEditors: Set<string>, expert: boolean,
   save: (role: AiRole, preference: ProviderPreference) => Promise<void>,
-  refresh: (focusKey: string) => void, operationStatus?: OperationStatusReader): void {
+  refresh: (focusKey: string) => void, operationStatus?: OperationStatusReader): () => void {
+  const disposers: (() => void)[] = [];
   for (const role of AI_ROLES) {
     const pref = preferences[role];
     const known = preferenceStatus(role, pref);
@@ -51,18 +53,19 @@ export function renderProviderSettings(root: HTMLElement, app: App, preferences:
         'Configured / not verified · Permission required for each disclosed operation';
     new Setting(section).setName(t('Provider state'))
       .setDesc(t(headline) + (known.error ? ' (' + known.error + ')' : '') +
-        t('. No connection is tested or content transmitted from Settings.'));
+        t('. Only an explicit connection check sends synthetic test data.'));
     const operation = new Setting(section).setName(t('Current AI operation'))
       .setDesc(operationText(operationStatus?.(role)));
     operation.descEl.dataset.oksOperation = role;
     const draft = drafts[role] ?? newProviderDraft(pref);
     const key = 'ai-' + role;
+    let resetCheck = (): void => {};
     const disclosure = settingsDisclosure(section, openEditors, key, 'Connection', 'Configure',
-      () => { drafts[role] = draft; });
+      () => { drafts[role] = draft; }, () => resetCheck());
     const form = disclosure.form;
     form.setAttribute('aria-label', t(titles[role]) + ' ' + t('editor'));
     const finish = (): void => {
-      delete drafts[role]; openEditors.delete(key); refresh(key);
+      resetCheck(); delete drafts[role]; openEditors.delete(key); refresh(key);
     };
     const localHelp = form.createEl('p', { text:
       t('Local means literal 127.0.0.1 or [::1]; it is not automatically trusted or ready.') });
@@ -76,7 +79,7 @@ export function renderProviderSettings(root: HTMLElement, app: App, preferences:
       .addDropdown(dropdown => { dropdown.selectEl.setAttribute('aria-label', t(titles[role]) + ' ' + t('connection type')); return dropdown.addOption('local', t('Local API (loopback)'))
         .addOption('cloud', t('Cloud HTTPS (authorization required)'))
         .setValue(draft.transport).onChange(value => {
-          draft.transport = value as ProviderDraft['transport']; drafts[role] = draft; showTransport();
+          draft.transport = value as ProviderDraft['transport']; drafts[role] = draft; showTransport(); resetCheck();
         }); });
     showTransport();
     for (const [key, title, help] of [
@@ -88,7 +91,7 @@ export function renderProviderSettings(root: HTMLElement, app: App, preferences:
         .addText(text => { text.inputEl.setAttribute('aria-label', t(titles[role]) + ' ' + t(title));
           return text.setValue(draft[key]).setPlaceholder(key === 'origin' ?
           'http://127.0.0.1:8765' : t('Required'))
-          .onChange(value => { draft[key] = value; drafts[role] = draft; }); });
+          .onChange(value => { draft[key] = value; drafts[role] = draft; resetCheck(); }); });
     }
     if (expert) {
       for (const [key, title] of [
@@ -100,7 +103,7 @@ export function renderProviderSettings(root: HTMLElement, app: App, preferences:
         new Setting(form).setName(t(title)).addText(text => {
           text.inputEl.type = 'number';
           text.inputEl.setAttribute('aria-label', t(titles[role]) + ' ' + t(title));
-          text.setValue(draft[key]).onChange(value => { draft[key] = value; drafts[role] = draft; });
+          text.setValue(draft[key]).onChange(value => { draft[key] = value; drafts[role] = draft; resetCheck(); });
         });
       }
     }
@@ -109,6 +112,9 @@ export function renderProviderSettings(root: HTMLElement, app: App, preferences:
     } else {
       form.createEl('p', { text: t('Changing this role does not rebuild or replace the dense index.') });
     }
+    const connection = renderConnectionCheck(form, role, draft, t(titles[role]));
+    resetCheck = connection.reset;
+    disposers.push(connection.dispose);
     const error = form.createEl('p'); error.setAttribute('role', 'alert');
     error.setAttribute('aria-live', 'polite');
     const persist = async (next: ProviderConfig): Promise<void> => {
@@ -122,6 +128,7 @@ export function renderProviderSettings(root: HTMLElement, app: App, preferences:
     new Setting(form).setName(t('Draft preferences'))
       .addButton(button => button.setButtonText(t('Save connection'))
         .onClick(async () => {
+          resetCheck();
           const result = providerDraft(draft);
           if (!result.ok) { error.textContent = t(result.message); return; }
           error.textContent = '';
@@ -147,6 +154,7 @@ export function renderProviderSettings(root: HTMLElement, app: App, preferences:
         finish();
       }))
       .addButton(button => button.setButtonText(t('Disable role')).setWarning().onClick(async () => {
+        resetCheck();
         try { await save(role, { state: 'disabled' }); finish(); }
         catch { error.textContent = t('Disable failed. Saved settings were not changed.'); }
       }));
@@ -159,4 +167,5 @@ export function renderProviderSettings(root: HTMLElement, app: App, preferences:
         }));
     }
   }
+  return () => { for (const dispose of disposers) dispose(); };
 }
