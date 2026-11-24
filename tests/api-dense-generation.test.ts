@@ -103,8 +103,8 @@ test('D2 atomic single CURRENT legacy -> API -> changed model, no old model file
     await store.publish(legacyEntry,legacy,async()=>{},sig());
     const old=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
     const first=(await generation(root.id)).value;
-    await assert.rejects(store.publishApi(structuredClone(first),async()=>{},sig()));
-    await store.publishApi(first,async()=>{},sig());
+    await assert.rejects(store.publishApi(structuredClone(first),async()=>{},sig(),()=>true));
+    await store.publishApi(first,async()=>{},sig(),()=>true);
     assert.equal(store.snapshot(),null);assert.throws(()=>old.snapshot());
     assert.deepEqual(await store.snapshotApi(first.spaceId,lexicalId),first);
     await assert.rejects(store.publish(legacyEntry,legacy,async()=>{},sig()));
@@ -114,10 +114,10 @@ test('D2 atomic single CURRENT legacy -> API -> changed model, no old model file
     const secondCfg={...cfg,identity:{model:space.model,revision:'v2'}};
     const second=(await generation(root.id,secondCfg,secondSpace)).value;
     const canceled=new AbortController();let checks=0;
-    await assert.rejects(store.publishApi(second,async()=>{if(++checks===3)canceled.abort()},canceled.signal));
+    await assert.rejects(store.publishApi(second,async()=>{if(++checks===3)canceled.abort()},canceled.signal,()=>true));
     assert.deepEqual(await store.snapshotApi(first.spaceId,lexicalId),first);
     assert.equal((await readdir(store.path)).filter(n=>n.endsWith('.json')).length,1);
-    await store.publishApi(second,async()=>{},sig());
+    await store.publishApi(second,async()=>{},sig(),()=>true);
     const cold=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
     assert.deepEqual(await cold.snapshotApi(second.spaceId,lexicalId),second);
     const names=await readdir(cold.path);
@@ -139,9 +139,9 @@ test('D2 stale source, revoke, concurrent writer and forged pointer fail closed'
     const g=(await generation(root.id)).value;
     let entered!:()=>void,release!:()=>void;
     const ready=new Promise<void>(r=>entered=r),blocked=new Promise<void>(r=>release=r);
-    const job=store.publishApi(g,async()=>{entered();await blocked;},sig());
+    const job=store.publishApi(g,async()=>{entered();await blocked;},sig(),()=>true);
     await ready;
-    try{await assert.rejects(competing.publishApi(g,async()=>{},sig()));}
+    try{await assert.rejects(competing.publishApi(g,async()=>{},sig(),()=>true));}
     finally{release();}
     await job;
     assert.equal(await store.snapshotApi(g.spaceId,lexicalId).then(x=>x?.entries.length),2);
@@ -149,13 +149,13 @@ test('D2 stale source, revoke, concurrent writer and forged pointer fail closed'
     await writeFile(join(vault,'a.md'),'changed');
     const recovered=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
     assert.equal(await recovered.snapshotApi(g.spaceId,lexicalId),null);
-    await assert.rejects(recovered.publishApi(g,async()=>{},sig()));
+    await assert.rejects(recovered.publishApi(g,async()=>{},sig(),()=>true));
     await writeFile(join(vault,'a.md'),raw);
-    await recovered.publishApi(g,async()=>{},sig());
+    await recovered.publishApi(g,async()=>{},sig(),()=>true);
     assert.deepEqual(await recovered.snapshotApi(g.spaceId,lexicalId),g);
     await writeFile(join(recovered.path,'CURRENT'),'{}\n',{mode:0o600});
     await assert.rejects(recovered.snapshotApi(g.spaceId,lexicalId));
-    await assert.rejects(recovered.publishApi(g,async()=>{},sig()));
+    await assert.rejects(recovered.publishApi(g,async()=>{},sig(),()=>true));
   });
 });
 
@@ -167,11 +167,11 @@ test('D2 B1: sibling event during final guard cancels first publication even wit
     let checks=0;
     await assert.rejects(store.publishApi(g,async()=>{
       if(++checks===3)sibling.revoke('a.md');
-    },sig()),{message:'MODEL_CANCELLED'});
+    },sig(),()=>true),{message:'MODEL_CANCELLED'});
     assert.equal(checks,3);
     assert.deepEqual(await readdir(store.path),[]);
     assert.equal(await store.snapshotApi(g.spaceId,lexicalId),null);
-    await store.publishApi(g,async()=>{},sig());
+    await store.publishApi(g,async()=>{},sig(),()=>true);
     assert.deepEqual(await store.snapshotApi(g.spaceId,lexicalId),g);
   });
 });
@@ -182,17 +182,17 @@ test('D2 B1: final caller check mutating source without event cannot publish or 
     let checks=0;
     await assert.rejects(store.publishApi(g,async()=>{
       if(++checks===3)await writeFile(join(vault,'a.md'),'changed');
-    },sig()));
+    },sig(),()=>true));
     assert.equal(checks,3);
     assert.deepEqual(await readdir(store.path),[]);
     await writeFile(join(vault,'a.md'),raw);
-    await store.publishApi(g,async()=>{},sig());
+    await store.publishApi(g,async()=>{},sig(),()=>true);
     const previous=await readFile(join(store.path,'CURRENT'));
     const replacement=(await generation(root.id)).value;
     checks=0;
     await assert.rejects(store.publishApi(replacement,async()=>{
       if(++checks===3)await writeFile(join(vault,'a.md'),'changed again');
-    },sig()));
+    },sig(),()=>true));
     assert.equal(checks,3);
     assert.deepEqual(await readFile(join(store.path,'CURRENT')),previous);
     assert.equal((await readdir(store.path)).length,2);
@@ -204,20 +204,20 @@ test('D2 B1: sibling event during replacement preserves CURRENT and suppresses a
   await temporary(async(vault,root)=>{
     const store=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
     const first=(await generation(root.id)).value;
-    await store.publishApi(first,async()=>{},sig());
+    await store.publishApi(first,async()=>{},sig(),()=>true);
     const sibling=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
     const prior=await readFile(join(store.path,'CURRENT'));
     const next=(await generation(root.id)).value;
     let checks=0;
     await assert.rejects(store.publishApi(next,async()=>{
       if(++checks===3)sibling.revoke('a.md');
-    },sig()),{message:'MODEL_CANCELLED'});
+    },sig(),()=>true),{message:'MODEL_CANCELLED'});
     assert.equal(checks,3);
     assert.deepEqual(await readFile(join(store.path,'CURRENT')),prior);
     assert.equal((await readdir(store.path)).length,2);
     assert.equal(await store.snapshotApi(first.spaceId,lexicalId),null);
     assert.equal(await sibling.snapshotApi(first.spaceId,lexicalId),null);
-    await store.publishApi(next,async()=>{},sig());
+    await store.publishApi(next,async()=>{},sig(),()=>true);
     assert.deepEqual(await store.snapshotApi(next.spaceId,lexicalId),next);
   });
 });
@@ -225,14 +225,14 @@ test('D2 B2: API revocation survives same-process reopen before bytes change and
   await temporary(async(vault,root)=>{
     const store=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
     const g=(await generation(root.id)).value;
-    await store.publishApi(g,async()=>{},sig());
+    await store.publishApi(g,async()=>{},sig(),()=>true);
     const sibling=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
     store.revoke('a.md');
     assert.equal(await store.snapshotApi(g.spaceId,lexicalId),null);
     assert.equal(await sibling.snapshotApi(g.spaceId,lexicalId),null);
     const reopened=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
     assert.equal(await reopened.snapshotApi(g.spaceId,lexicalId),null);
-    await reopened.publishApi(g,async()=>{},sig());
+    await reopened.publishApi(g,async()=>{},sig(),()=>true);
     assert.deepEqual(await reopened.snapshotApi(g.spaceId,lexicalId),g);
     sibling.revoke('b.md');
     assert.equal(await reopened.snapshotApi(g.spaceId,lexicalId),null);
@@ -260,7 +260,7 @@ test('D2 B1/B2: event at CURRENT rename leaves publication uncertain and reopene
   await temporary(async(vault,root)=>{
     const store=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
     const first=(await generation(root.id)).value;
-    await store.publishApi(first,async()=>{},sig());
+    await store.publishApi(first,async()=>{},sig(),()=>true);
     const sibling=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
     const next=(await generation(root.id)).value;
     // Intercept only the actual rename completion, not production logic.
@@ -275,13 +275,63 @@ test('D2 B1/B2: event at CURRENT rename leaves publication uncertain and reopene
         sibling.revoke('a.md');
       }
     });
-    await assert.rejects(store.publishApi(next,async()=>{},sig()));
+    await assert.rejects(store.publishApi(next,async()=>{},sig(),()=>true));
     assert.ok(injected);
     assert.throws(()=>store.snapshot());
     const reopened=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
     assert.equal(await reopened.snapshotApi(next.spaceId,lexicalId),null);
-    await reopened.publishApi(next,async()=>{},sig());
+    await reopened.publishApi(next,async()=>{},sig(),()=>true);
     assert.deepEqual(await reopened.snapshotApi(next.spaceId,lexicalId),next);
     assert.equal((await readdir(reopened.path)).length,2);
+  });
+});
+
+for(const replace of [false,true]){
+  test('D2 B4: caller invalidation at CURRENT rename blocks '+(replace?'replacement':'initial publication'),async(t)=>{
+    await temporary(async(vault,root)=>{
+      const store=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+      if(replace)await store.publishApi((await generation(root.id)).value,async()=>{},sig(),()=>true);
+      const sibling=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+      const next=(await generation(root.id)).value;
+      const fs=createRequire(join(process.cwd(),'package.json'))('node:fs/promises') as typeof import('node:fs/promises');
+      const original=fs.rename;
+      let current=true,checkedAfterSwitch=false;
+      t.mock.method(fs,'rename',async(from:Parameters<typeof fs.rename>[0],to:Parameters<typeof fs.rename>[1])=>{
+        await original(from,to);
+        if(current&&String(to).endsWith('/CURRENT')){
+          current=false;
+          assert.equal(await sibling.snapshotApi(next.spaceId,lexicalId),null);
+        }
+      });
+      // Keep the synchronous fence true to independently test the repeated
+      // async guard, even if the caller fails to send an abort or source event.
+      const check=async()=>{if(!current){checkedAfterSwitch=true;throw Error('CALLER_GENERATION_STALE');}};
+      await assert.rejects(store.publishApi(next,check,sig(),()=>true));
+      assert.equal(current,false);
+      assert.ok(checkedAfterSwitch);
+      assert.throws(()=>store.snapshot());
+      const reopened=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+      assert.equal(await reopened.snapshotApi(next.spaceId,lexicalId),null);
+      await reopened.publishApi(next,async()=>{},sig(),()=>true);
+      assert.deepEqual(await reopened.snapshotApi(next.spaceId,lexicalId),next);
+      assert.equal((await readdir(reopened.path)).length,2);
+    });
+  });
+}
+test('D2 B4: synchronous caller fence closes the last async verification window',async()=>{
+  await temporary(async(vault,root)=>{
+    const store=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+    const next=(await generation(root.id)).value;
+    let current=true,checks=0;
+    // All async checks report success, but the final check's await boundary
+    // can observe a concurrent external-generation invalidation.
+    await assert.rejects(store.publishApi(next,async()=>{
+      if(++checks===5)current=false;
+    },sig(),()=>current),{message:'MODEL_CANCELLED'});
+    assert.equal(checks,5);
+    const reopened=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+    assert.equal(await reopened.snapshotApi(next.spaceId,lexicalId),null);
+    await reopened.publishApi(next,async()=>{},sig(),()=>true);
+    assert.deepEqual(await reopened.snapshotApi(next.spaceId,lexicalId),next);
   });
 });

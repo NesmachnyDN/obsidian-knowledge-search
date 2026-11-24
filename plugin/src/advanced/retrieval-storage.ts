@@ -210,10 +210,17 @@ export class AdvancedRetrievalStore {
     const next:RetrievalGeneration={...base,generationId:generationDigest(base)};
     return this.commit(next,check,signal);
   }
-  async publishApi(generation:ApiDenseGeneration,check:()=>Promise<void>,signal:AbortSignal):Promise<ApiDenseGeneration>{
+  /** The caller owns a synchronous, monotonic operation/authorization fence.
+   * It must become false on lexical generation, scope or consent invalidation
+   * and stay false for this operation. The predicate is side-effect-free.
+   * Async verification alone cannot fence
+   * changes during filesystem awaits. */
+  async publishApi(generation:ApiDenseGeneration,check:()=>Promise<void>,signal:AbortSignal,
+    current:()=>boolean):Promise<ApiDenseGeneration>{
+    if(typeof current!=='function')invalid();
     const next=readBuiltApiDenseGeneration(generation);
     validateApiDenseGeneration(next,this.root.id);
-    return this.commit(next,async()=>{await check();await this.verifyApi(next,signal);},signal);
+    return this.commit(next,async()=>{await check();await this.verifyApi(next,signal);},signal,current);
   }
   private async verifyPointer(dir:string):Promise<void>{
     if(this.committedName===null){if((await readdir(dir)).includes(CURRENT))invalid();return;}
@@ -221,11 +228,17 @@ export class AdvancedRetrievalStore {
     if(!p||p.schemaVersion!==1||p.rootId!==this.root.id||p.filename!==this.committedName
       ||p.sha256!==this.committedName.slice(0,-5)||Object.keys(p).length!==4)invalid();
   }
-  private async commit<T extends ActiveGeneration>(value:T,check:()=>Promise<void>,signal:AbortSignal):Promise<T>{
+  private async commit<T extends ActiveGeneration>(value:T,check:()=>Promise<void>,signal:AbortSignal,
+    current?:()=>boolean):Promise<T>{
     this.assertCurrent();
     if(activeWriters.has(this.path))invalid();
     activeWriters.add(this.path);
     const state=this.lifecycle,revision=state.revision;
+    const fence=()=>{
+      this.assertCurrent();
+      if(signal.aborted||state.revision!==revision||current&&current()!==true)
+        throw new ModelError('MODEL_CANCELLED');
+    };
     try {
       const next=structuredClone(value);
       validateActive(next,this.root.id);
@@ -244,8 +257,7 @@ export class AdvancedRetrievalStore {
       await this.verifyPointer(dir);
       await check();
       await this.verifyPointer(dir);
-      this.assertCurrent();
-      if(signal.aborted||state.revision!==revision)throw new ModelError('MODEL_CANCELLED');
+      fence();
     };
     await guard();
     let pointerStage:string|null=null;
@@ -280,10 +292,12 @@ export class AdvancedRetrievalStore {
       if(signal.aborted||state.revision!==revision){this.poisoned=true;invalid();}
       try{await syncDirectory(dir);}
       catch{this.poisoned=true;invalid();}
-      if(next.schemaVersion===2)await this.verifyApi(next,signal);
+      // Recheck caller-owned state before retiring the last generation.
+      // After CURRENT switches, any failure must leave visibility blocked.
+      if(next.schemaVersion===2){await check();fence();}
       await this.discardUnpublished((await readdir(dir)).filter(n=>n!==CURRENT&&n!==name),dir);
-      if(next.schemaVersion===2)await this.verifyApi(next,signal);
-      if(signal.aborted||state.revision!==revision){this.poisoned=true;invalid();}
+      await this.verifyPointer(dir);
+      fence();
       return structuredClone(next);
     }catch(error){
       if(this.committedName===name&&this.generation===next){this.poisoned=true;state.blocked=true;}
@@ -312,11 +326,18 @@ export class AdvancedRetrievalStore {
        });
       // Keep the new generation unavailable until all asynchronous directory
       // operations, including descriptor close, have completed.
-      if(signal.aborted||state.revision!==revision){this.poisoned=true;invalid();}
+      // The async check includes source-byte verification. Run it after the
+      // descriptor closes, then synchronously fence and publish visibility.
+      // No await is permitted between the fence and clearing blocked.
+      if(value.schemaVersion===2)await check();
+      fence();
       state.revoked.clear();state.blocked=false;
       return result;
     } catch (error) {
-      if(state.blocked)this.poisoned=true;
+      if(state.blocked){
+        this.poisoned=true;
+        if(!(error instanceof ModelError))throw new ModelError('INDEX_PUBLICATION_UNCERTAIN');
+      }
       if(error instanceof IngestError){this.poisoned=true;invalid();}
       throw error;
     } finally { activeWriters.delete(this.path); }

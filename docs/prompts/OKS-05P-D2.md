@@ -11,6 +11,11 @@ Use in-process verified batch and built-generation provenance capabilities;
 reject swapped, fabricated, mutated or cross-scope batch/evidence pairs.
 Persist only source/locator identity and vectors, not raw excerpts or tokens.
 Verify exact source bytes at publication and on API snapshot; revoke on events.
+API publication requires a caller-owned synchronous monotonic operation fence
+(lexical generation, authorization, scope); async checks run again after
+CURRENT switch and descriptor close. Any post-switch failure leaves visibility
+blocked in-process until verified replacement; no await between final fence
+and visibility. Cold recovery still requires source/space/generation verification.
 Guard competing instances within the single Obsidian process, reject disk
 pointer drift; concurrent separate OS processes remain unsupported.
 Test legacy/API/model migration, cancellation, cold recovery, cleanup,
