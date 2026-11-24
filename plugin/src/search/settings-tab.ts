@@ -2,6 +2,7 @@ import type { AdvancedHealth } from '../advanced/health';
 import type { IngestionStatus } from '../advanced/manager';
 import type { RetrievalStatus } from '../advanced/retrieval-manager';
 import { Modal, PluginSettingTab, Setting, Notice, type App, type Plugin } from 'obsidian';
+import { renderProviderSettings } from '../ai/settings-ui';
 import type { SearchSettings } from './settings';
 export class SearchSettingsTab extends PluginSettingTab {
   constructor(app: App, plugin: Plugin, private readonly current: () => SearchSettings,
@@ -95,6 +96,7 @@ export class SearchSettingsTab extends PluginSettingTab {
       .addButton(b=>b.setButtonText('Cancel').onClick(async()=>{
         try{await this.cancelAdvanced?.();}catch{new Notice('OKS Advanced: cancel failed');}
         this.display();}));
+    renderProviderSettings(root, this.current().ai, (role, preference) => save(s => { s.ai[role] = preference; }));
     const purge = this.purge;
     new Setting(root).setName('Clear derived Standalone index')
       .setDesc('Only while indexing is disabled. Removes recognized private index files, never notes. Rebuild after re-enabling.')

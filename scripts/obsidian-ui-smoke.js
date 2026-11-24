@@ -125,6 +125,37 @@
   const settingRow = name => [...app.setting.activeTab.containerEl.querySelectorAll('.setting-item')]
     .find(el => el.querySelector('.setting-item-name')?.textContent?.trim() === name);
   await wait(() => settingRow('Enable Standalone indexing and search'), 'SETTINGS_VISIBLE');
+  for (const role of ['embedding','reranking','generation']) {
+    assert(p.settings.ai[role].state === 'disabled', 'AI_DEFAULT_DISABLED');
+    assert(settingRow('AI provider: '+role)?.textContent?.includes('disabled'), 'AI_ROLE_SETTINGS');
+  }
+  const textSetting = (name, value) => {
+    const input = settingRow(name)?.querySelector('input');
+    assert(input, 'AI_SETTING_INPUT');
+    input.value = value;
+    input.dispatchEvent(new settingDoc.defaultView.Event('input', {bubbles:true}));
+  };
+  textSetting('reranking origin (no path or credentials)', 'http://127.0.0.1:8765');
+  textSetting('reranking model ID', 'synthetic-reranker');
+  textSetting('reranking model revision', 'v1');
+  settingRow('reranking preferences').querySelector('button').click();
+  await wait(() => p.settings.ai.reranking.state === 'configured', 'AI_PREFERENCES_SAVE');
+  await wait(() => settingRow('AI provider: reranking')?.textContent?.includes('NOT_READY'), 'AI_NOT_READY');
+  assert(p.settings.ai.embedding.state === 'disabled' && p.settings.ai.generation.state === 'disabled',
+    'AI_ROLES_INDEPENDENT');
+  const offline = await p.api.request({apiVersion:1,operation:'search',request});
+  assert(offline.ok && offline.value.hits.length === 1, 'AI_CONFIG_OFFLINE_LEXICAL');
+  await p.updateSettings({...p.settings,ai:{...p.settings.ai, generation:{state:'configured',secret:'fixture-secret'}}});
+  assert(p.settings.enabled && p.settings.ai.generation.state === 'invalid' &&
+    !JSON.stringify(p.settings).includes('fixture-secret'), 'AI_INVALID_ISOLATED');
+  await p.updateSettings({...p.settings,ai:{...p.settings.ai,generation:{state:'disabled'}}});
+  // Refresh the mounted settings after the explicit invalid-settings test.
+  app.setting.activeTab.display();
+  const disable = [...settingRow('reranking preferences').querySelectorAll('button')]
+    .find(b => b.textContent === 'Disable');
+  assert(disable, 'AI_DISABLE_BUTTON'); disable.click();
+  await wait(() => p.settings.ai.reranking.state === 'disabled', 'AI_DISABLE');
+  await wait(() => settingRow('AI provider: reranking')?.textContent?.includes('disabled'), 'AI_DISABLE_UI');
   const toggleSetting = name => {
     const row = settingRow(name); assert(row, 'SETTINGS_ROW');
     const toggle = row.querySelector('.checkbox-container'); assert(toggle, 'SETTINGS_TOGGLE');
@@ -167,5 +198,5 @@
     }
   } finally { clearInterval(ticker); }
   const values = uiLatency.sort((a, b) => a - b);
-  return `OBSIDIAN_UI_SMOKE_PASS: mounted text-only lexical typed-filter unicode-crlf exact-navigation stale-click stale-hash rename delete pause resume cancel rebuild real-settings-dialog purge api disabled-worker diagnostics uiP50Ms=${values[4].toFixed(2)} uiP95Ms=${values[8].toFixed(2)} uiEventLoopDelayMaxMs=${maxDelay.toFixed(2)}`;
+  return `OBSIDIAN_UI_SMOKE_PASS: mounted text-only lexical typed-filter unicode-crlf exact-navigation stale-click stale-hash rename delete pause resume cancel rebuild real-settings-dialog ai-role-preferences offline-with-config invalid-isolation purge api disabled-worker diagnostics uiP50Ms=${values[4].toFixed(2)} uiP95Ms=${values[8].toFixed(2)} uiEventLoopDelayMaxMs=${maxDelay.toFixed(2)}`;
 })()

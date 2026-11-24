@@ -194,12 +194,12 @@ test('native table cell schema rejects forged or incoherent geometry, origins an
 });
 
 test('explicit ingestion configuration defaults disabled and old versions never silently enable it',()=>{
-  assert.equal(defaultSettings().version,4);
+  assert.equal(defaultSettings().version,5);
   assert.equal(defaultSettings().ingestion.enabled,false);
   assert.equal(parseSettings(null).ingestion.enabled,false);
   for(const version of [2,3]){
     const legacy=clone(defaultSettings()) as unknown as Record<string,unknown>;
-    delete legacy.ingestion;legacy.version=version;
+    delete legacy.ingestion;delete legacy.ai;legacy.version=version;
     if(version===2) legacy.advanced={enabled:false,profile:'none'};
     assert.equal(parseSettings(legacy).ingestion.enabled,false);
     legacy.ingestion={...defaultSettings().ingestion,enabled:true};
