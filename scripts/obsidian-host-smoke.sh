@@ -182,6 +182,13 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
   [[ "$ui" == *"OBSIDIAN_UI_SMOKE_PASS:"* ]] ||
     { echo "HOST_SMOKE_FAILURE: extended UI scenarios ($ui)" >&2; exit 1; }
   printf "%s\n" "$ui"
+  if [[ "${OKS_06UX_TEST:-0}" == 1 ]]; then
+    settings_ux="$(timeout 45s "$cli" eval "code=$(cat "$repo/scripts/obsidian-settings-ux-smoke.js")")"
+    [[ "$settings_ux" == *"OBSIDIAN_SETTINGS_UX_PASS:"* ]] || {
+      echo "HOST_SMOKE_FAILURE: OKS-06UX actual Settings acceptance ($settings_ux)" >&2; exit 1; }
+    printf "%s\n" "$settings_ux"
+    # Pixel screenshots require a separate visibly rendered acceptance session.
+  fi
   if [[ "${OKS_AI_RERANK_TEST:-0}" == 1 ]]; then
     rerank="$(timeout 30s "$cli" eval "code=$(cat "$repo/scripts/obsidian-rerank-smoke.js")")"
     [[ "$rerank" == *"OBSIDIAN_RERANK_FIXTURE_PASS:"* ]] || {

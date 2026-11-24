@@ -592,3 +592,55 @@ test('D6 B-LIFECYCLE-02: same host transfers CURRENT ownership, handles events a
     await f.cleanup();
   }
 });
+
+test('UX-AC02/05: presentation-only commits persist without revoking the live engine, evidence or dense host', async () => {
+  const f = await fixture();
+  try {
+    await f.plugin.onload(); f.layout(); await f.internal.initializing;
+    await f.plugin.standalone!.whenIdle();
+    const engine = f.plugin.standalone;
+    const host = (f.plugin as unknown as { denseHost: unknown }).denseHost;
+    const before = await f.plugin.api.request({ apiVersion: 1, operation: 'search', request: {
+      protocolVersion: 2, requestId: 'mode', query: 'REQ-LIFE-1', requestedMode: 'lexical', limit: 5,
+    } });
+    assert.equal(before.ok, true);
+    const generation = f.plugin.standalone!.status().generationId;
+    const searchResponse = f.plugin.searchController.snapshot().response;
+    await f.plugin.patchSettings(s => { s.presentationMode = 'expert'; });
+    assert.equal(f.plugin.settings.presentationMode, 'expert');
+    assert.equal(f.plugin.standalone, engine);
+    assert.equal((f.plugin as unknown as { denseHost: unknown }).denseHost, host);
+    assert.equal(f.plugin.standalone!.status().generationId, generation);
+    assert.deepEqual(f.plugin.searchController.snapshot().response, searchResponse);
+    const saved = (f.plugin as unknown as { saved: unknown }).saved;
+    assert.equal((saved as { presentationMode: string }).presentationMode, 'expert');
+    const decoded = (await import('../plugin/src/search/settings')).parseSettings(saved);
+    assert.equal(decoded.presentationMode, 'expert');
+    await f.plugin.patchSettings(s => { s.presentationMode = 'basic'; });
+    assert.equal(f.plugin.standalone, engine);
+    assert.equal(f.plugin.settings.ai.embedding.state, 'disabled');
+    assert.deepEqual(f.plugin.searchController.snapshot().response, searchResponse);
+  } finally { await f.cleanup(); }
+});
+
+test('UX-AC04: failed persistent writes do not commit edited draft or disrupt the existing offline engine', async () => {
+  const f = await fixture();
+  try {
+    await f.plugin.onload(); f.layout(); await f.internal.initializing;
+    await f.plugin.standalone!.whenIdle();
+    const engine = f.plugin.standalone!;
+    const saved = (f.plugin as unknown as { saved: unknown }).saved;
+    const previous = structuredClone(f.plugin.settings);
+    const original = f.plugin.saveData.bind(f.plugin);
+    Object.assign(f.plugin, { saveData: async () => { throw new Error('synthetic private storage refusal'); } });
+    try {
+      await assert.rejects(f.plugin.patchSettings(s => {
+        s.presentationMode = 'expert'; s.topK = 42;
+      }));
+    } finally { Object.assign(f.plugin, { saveData: original }); }
+    assert.deepEqual(f.plugin.settings, previous);
+    assert.deepEqual((f.plugin as unknown as { saved: unknown }).saved, saved);
+    assert.equal(f.plugin.standalone, engine);
+    assert.equal(engine.status().status, 'ready');
+  } finally { await f.cleanup(); }
+});
