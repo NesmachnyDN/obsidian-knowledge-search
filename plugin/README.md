@@ -1,6 +1,6 @@
 # Obsidian Knowledge Search — Linux Standalone Markdown profile
 
-**Status:** OKS-04A and OKS-04B are merged in PR #11 and PR #12. OKS-05A prepares a candidate release-shaped Standalone package and independent clean-install evidence; this is not a public plugin release or full CAP-01–10 MVP acceptance. The existing OKS-01A Python-backed synthetic evidence probe is retained only as an explicitly configured, manually run legacy diagnostic. It is **not** required for Standalone.
+**Status:** OKS-05E accepted the Gate A **Basic-only Markdown MVP**; it did not accept optional Gate B/C AI or document capabilities. OKS-06UX is an unmerged Settings usability implementation candidate and not a public plugin release. The historical OKS-01A Python-backed synthetic evidence probe is retained only as an explicitly configured, manually run legacy diagnostic; it is **not** required for Standalone.
 
 ## Runtime and installation
 
@@ -44,6 +44,14 @@ Copy **only the three files inside that package directory** to the corresponding
 - Storage and security decision: [ADR-0008](../docs/adr/0008-standalone-generation-storage.md). Canonical semantics: [portable-model.md](../contracts/portable-model.md).
 
 Resource limits: 512 Markdown sources, 65,536 bytes per source, 32,768 source blocks, 16 MiB maximum generation, 512 UTF-8 bytes/query, up to 50 hits, 32 typed predicates, one index rebuild at a time. Indexing parses Markdown in a bundled, bounded browser Web Worker (Blob URL, 5-second per-source deadline) rather than the Obsidian UI thread; the single-flight generation writer and source checks use cooperative asynchronous work. The browser worker is not a separate installed runtime, service or model. This does not imply a hard isolated Web Worker memory quota or compatibility with a malicious concurrently renaming filesystem. Larger Vaults fail with explicit diagnostic rather than silent partial success.
+
+## Settings: Basic and Expert (OKS-06UX candidate)
+
+New installations open the **Basic** settings presentation. The task sections cover Overview, Search & scope, optional AI capabilities, Documents, and Index & maintenance. Select **Expert** from Settings view to see health-only backend configuration, legacy synthetic probe, and per-role API limits. This changes presentation only; it never activates a provider, changes a disclosure grant, or rebuilds an index. The existing API-backed embedding, reranking, and LLM roles have independent configuration forms with Save/Cancel/Disable. A saved connection is not proof of readiness. Local API origins require literal loopback; cloud does not gain egress authorization simply because an HTTPS origin is saved.
+
+Optional document processing is an explicit local setup with mode-dependent OCR/structured paths. Invalid edits never commit a partial configuration; failed saves retain the draft. Model identity changes announce the need for a separately authorized staged dense rebuild. Destructive derived-index cleanup remains disabled-only and requires confirmation. See the [user and rollback guide](../docs/ux/settings/IMPLEMENTATION.md) and [field inventory](../docs/ux/settings/implementation-inventory.md).
+
+Settings persist as validated schema v6 (v1–v5 migrate). **Rollback to a v5 plugin requires restoring the private pre-upgrade v5 settings backup**; an old version cannot interpret v6. Keep private backups out of public artifacts.
 
 ## Search view and controls
 
