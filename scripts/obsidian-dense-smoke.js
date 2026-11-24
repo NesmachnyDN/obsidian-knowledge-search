@@ -71,7 +71,7 @@
     set('.oks-query','REQ-OKS-DENSE');
     await prepare();await p.updateSettings({...p.settings,ai:{...p.settings.ai,embedding:{...cfg,identity:{model:cfg.identity.model,revision:'fixture-v2'}}}});
     assert(!root().querySelector('.oks-dense-token')&&count()===preCancel,'SETTINGS_REVOCATION');
-    await run();await wait(()=>message().includes('NOT_READY'),'SPACE_MISMATCH');
+    await run();await wait(()=>message().includes('SOURCE_STALE'),'SPACE_MISMATCH');
     assert(count()===preCancel,'SPACE_MISMATCH_NO_EGRESS');
     await p.updateSettings({...p.settings,ai:{...p.settings.ai,embedding:cfg}});
     await prepare();const beforeCancel=count();approve('fixture-delay');
