@@ -62,6 +62,15 @@ fi
 export XDG_RUNTIME_DIR="$tmp/runtime" XDG_SESSION_TYPE=x11 ELECTRON_OZONE_PLATFORM_HINT=x11
 mkdir -m 700 "$XDG_RUNTIME_DIR"
 unset WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS
+ru_visual_dir="${OKS_06UX_L10N_RU_VISUAL_DIR:-}"
+if [[ -n "$ru_visual_dir" ]]; then
+  [[ "$ru_visual_dir" = /* && ! -e "$ru_visual_dir" && ! -L "$ru_visual_dir" &&
+    "${OKS_06UX_L10N_RU_TEST:-0}" == 1 && "${OKS_HOST_NO_ROUTE:-0}" == 1 &&
+    -n "${OKS_STANDALONE_PACKAGE_DIR:-}" ]] ||
+    { echo "HOST_SMOKE_FAILURE: RU screenshots require a fresh absolute output directory and isolated packaged test" >&2; exit 2; }
+  mkdir -m 700 "$ru_visual_dir"
+  export OKS_06UX_L10N_RU_VISUAL=1
+fi
 visual_dir="${OKS_06UX_VISUAL_DIR:-}"
 if [[ -n "$visual_dir" ]]; then
   [[ "$visual_dir" = /* && ! -e "$visual_dir" && ! -L "$visual_dir" &&
@@ -140,6 +149,14 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
   initial="$(timeout 8s "$cli" eval "code=JSON.stringify({plugin:!!app.plugins.plugins[\"oks-synthetic-evidence\"],status:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standalone?.status(),error:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standaloneError})")"
   [[ "$initial" == *"\"status\":\"ready\""* && "$initial" == *"\"sources\":2"* ]] ||
     { printf "HOST_SMOKE_FAILURE: native plugin not indexed; result=%s\n" "$initial" >&2; exit 1; }
+  if [[ "${OKS_06UX_L10N_RU_TEST:-0}" == 1 ]]; then
+    # Native host locale must be Russian for this isolated-synthetic test.
+    locale_test="$(timeout 30s "$cli" eval "code=$(cat "$repo/scripts/obsidian-settings-ru-smoke.js")")"
+    [[ "$locale_test" == *"OBSIDIAN_SETTINGS_RU_PASS:"* ]] ||
+      { echo "HOST_SMOKE_FAILURE: Russian Settings locale ($locale_test)" >&2; exit 1; }
+    printf "%s\n" "$locale_test"
+    exit 0
+  fi
   if [[ "${OKS_06UX_VISUAL:-0}" == 1 ]]; then
     visual="$(timeout 85s "$cli" eval "code=$(cat "$repo/scripts/obsidian-settings-visual-smoke.js")")"
     [[ "$visual" == *"OBSIDIAN_SETTINGS_VISUAL_PASS:"* ]] ||
@@ -267,6 +284,10 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
   fi
   exit 1
 }
+if [[ -n "$ru_visual_dir" ]]; then
+  cp -a "$tmp/l10n-visual/." "$ru_visual_dir/"
+  (cd "$ru_visual_dir" && sha256sum ./*.png > SHA256SUMS)
+fi
 if [[ -n "$visual_dir" ]]; then
   test -s "$tmp/visual/results.json"
   cp -a "$tmp/visual/." "$visual_dir/"

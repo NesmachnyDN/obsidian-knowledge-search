@@ -35,6 +35,22 @@ merge before calling the phase complete.
   and hidden values are retained. **An older v5 plugin cannot read v6**
   without restoring a secure pre-upgrade v5 settings backup.
 
+## Language support (OKS-06UX-L10N)
+
+- Settings follow Obsidian's selected interface language: Russian (`ru`)
+  or English (`en`); other locales fall back to English.
+- Translations include Settings headings, native controls, accessible names,
+  AI provider editors and warnings, operational summaries, inline validation
+  messages, and destructive-action confirmation.
+- No new persisted locale field, schema migration, model/provider configuration,
+  permission change, external translation service or content transmission.
+- Changes take effect when the Settings tab is displayed again; Obsidian may
+  require a restart for a language change.
+- RU acceptance uses `scripts/obsidian-settings-ru-smoke.js` inside the isolated
+  no-route host; three Russian Settings screenshots cover 900/760px and 200% zoom.
+- English compatibility retains the existing real-host UX and visual regression
+  scripts; no production Vault or AI provider is required.
+
 ## Explicitly not included
 
 No new model, provider adapter, credential store, AI readiness detection,
