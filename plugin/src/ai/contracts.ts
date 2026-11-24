@@ -25,6 +25,9 @@ export type ProviderStatus = {
   state: 'disabled' | 'unavailable' | 'ready' | 'failed';
   error: ProviderFailureCode | null;
 };
+/** Metadata-only view of an explicit operation, not a persistent provider readiness claim. */
+export type AiOperationStatus = { phase: 'idle' | 'permission-required' | 'busy' | 'complete' | 'failed';
+  error: ProviderFailureCode | null };
 export type CallContext = { signal: AbortSignal; deadlineUnixMs: number };
 export type AuthorizedPassage = { id: number; text: string };
 export type AuthorizedCandidates = { query: string; passages: readonly AuthorizedPassage[] };

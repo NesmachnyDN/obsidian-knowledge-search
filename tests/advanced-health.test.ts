@@ -13,10 +13,10 @@ const dead = (pid: number): void => assert.throws(() => process.kill(pid, 0), {c
 const nonce = 'a'.repeat(48);
 
 test('v2 settings migration preserves Standalone, disables optional backend; v3 enable requires explicit paths', () => {
-  const { ingestion: _newOnly, ai: _ai, ...legacy } = defaultSettings();
+  const { ingestion: _newOnly, ai: _ai, presentationMode: _mode, ...legacy } = defaultSettings();
   const v2 = { ...legacy, version:2, advanced:{enabled:false, profile:'local-stdio'} };
   const migrated = parseSettings(v2);
-  assert.equal(migrated.version, 5);
+  assert.equal(migrated.version, 6);
   assert.equal(migrated.enabled, true);
   assert.equal(migrated.advanced.enabled,false);
   assert.equal(migrated.advanced.interpreter,'');

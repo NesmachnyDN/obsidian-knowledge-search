@@ -1,4 +1,4 @@
-import { ProviderFailure, type ProviderFailureCode } from './contracts';
+import { ProviderFailure, type ProviderFailureCode, type AiOperationStatus } from './contracts';
 import type { ApiDenseHost, DensePreview, DenseRequest, MachineFence } from './dense-host';
 import type { DenseIndexResult } from './dense-index-manager';
 import type { ApiRetrievalResult } from './dense-retrieval';
@@ -40,6 +40,16 @@ export class DenseUiController {
       executedMode:state.result.executedMode,legs:structuredClone(state.result.legs)};
     if(state.phase==='error')return {phase:state.phase,error:state.error??'NOT_READY'};
     return {phase:state.phase};
+  }
+  /** Role-wide metadata only; owner-scoped evidence/preview access stays unchanged. */
+  operationStatus():AiOperationStatus {
+    const state=this.state;
+    if(state.phase==='preview')return {phase:'permission-required',error:null};
+    if(state.phase==='preparing'||state.phase==='running')return {phase:'busy',error:null};
+    if(state.phase==='error')return {phase:'failed',error:state.error??'NOT_READY'};
+    if(state.phase==='complete')return state.result.status==='ok'?{phase:'complete',error:null}:
+      {phase:'failed',error:state.result.error??'NOT_READY'};
+    return {phase:'idle',error:null};
   }
   occupied():boolean {return this.owner!==undefined;}
   owns(owner:symbol):boolean {return this.owner===owner;}

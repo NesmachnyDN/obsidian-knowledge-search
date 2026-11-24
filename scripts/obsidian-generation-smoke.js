@@ -5,6 +5,7 @@
   const wait=async(fn,code)=>{const deadline=Date.now()+7000;while(!fn()){
     assert(Date.now()<deadline,code);await new Promise(r=>setTimeout(r,30));}};
   const old=p.settings;
+  const operation=()=>p.searchController.evidenceOperationStatus('generation');
   const root=()=>app.workspace.getLeavesOfType('oks-standalone-search')[0]?.view.contentEl;
   const el=selector=>{const item=root()?.querySelector(selector);assert(item,'ELEMENT_'+selector);return item;};
   const click=selector=>el(selector).click();
@@ -13,6 +14,7 @@
     await wait(()=>p.searchController.snapshot().phase==='results','SEARCH');};
   const confirm=token=>{
     click('.oks-generation-prepare');
+    assert(operation().phase==='permission-required','SETTINGS_PERMISSION');
     assert(el('.oks-generation-confirm').disabled,'DEFAULT_DENY');
     assert(el('.oks-generation-query-preview').textContent==='REQ-OKS-GENERATION','QUERY_PREVIEW');
     assert(root().querySelectorAll('.oks-generation-excerpt-preview').length===2,'EXCERPT_PREVIEW');
@@ -22,6 +24,7 @@
     const check=el('.oks-generation-confirm-check');check.checked=true;check.dispatchEvent(new Event('change',{bubbles:true}));
     assert(!el('.oks-generation-confirm').disabled,'CONSENT');
     click('.oks-generation-confirm');
+    assert(operation().phase==='busy','SETTINGS_BUSY');
     assert(!root().querySelector('.oks-generation-token'),'TOKEN_REMOVED');
   };
   const a=await app.vault.create('generation-a.md','REQ-OKS-GENERATION: alpha\n');
@@ -38,6 +41,7 @@
     confirm('fixture-success');
     await wait(()=>p.searchController.snapshot().generation?.phase==='results','RESULTS');
     const result=p.searchController.snapshot();
+    assert(operation().phase==='complete'&&operation().error===null,'SETTINGS_COMPLETE');
     assert(JSON.stringify(result.response.hits)===JSON.stringify(lexical),'LEXICAL_UNCHANGED');
     assert(JSON.stringify(result.generation.hits.map(x=>x.citations))===JSON.stringify([[lexical[0]],lexical]),'CITATIONS');
     assert(root().querySelectorAll('.oks-generation-results li').length===2,'RENDERED');
@@ -50,6 +54,7 @@
     assert(!root().querySelectorAll('.oks-generation-results li').length,'NO_INVALID_CLAIMS');
     confirm('fixture-deny');await wait(()=>p.searchController.snapshot().generation?.phase==='error','AUTH_ERROR');
     assert(p.searchController.snapshot().generation.error==='UNAUTHENTICATED','TYPED_ERROR');
+    assert(operation().phase==='failed'&&operation().error==='UNAUTHENTICATED','SETTINGS_ERROR');
     assert(root().querySelectorAll('.oks-results li').length===2&&!root().querySelectorAll('.oks-generation-results li').length,'NO_FALLBACK');
     confirm('fixture-delay');click('.oks-generation-cancel');await wait(()=>p.searchController.snapshot().generation?.error==='CANCELLED','CANCEL');
     await new Promise(r=>setTimeout(r,1400));

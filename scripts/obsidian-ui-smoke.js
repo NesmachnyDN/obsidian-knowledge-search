@@ -113,49 +113,59 @@
   click('.oks-export');
   const diagnostic = element('.oks-diagnostics').value;
   assert(!diagnostic.includes('REQ-') && !diagnostic.includes('sourceId') && !diagnostic.includes('properties') && !diagnostic.includes('.md'), 'DIAGNOSTICS');
-  // Exercise actual Obsidian Settings UI, not only direct plugin methods.
+  // Real settings DOM in the disposable host; no private Vault state is touched.
   const parser = p.standalone.parser;
   assert(app.setting?.open && app.setting?.openTabById, 'SETTINGS_DIALOG_API');
   app.setting.open();
   await new Promise(r => setTimeout(r, 450));
   app.setting.openTabById(p.manifest.id);
   await new Promise(r => setTimeout(r, 250));
-  // Obsidian may own the settings DOM in a different Document than CLI eval.
   const settingDoc = app.setting.activeTab.containerEl.ownerDocument;
   const settingRow = name => [...app.setting.activeTab.containerEl.querySelectorAll('.setting-item')]
     .find(el => el.querySelector('.setting-item-name')?.textContent?.trim() === name);
-  await wait(() => settingRow('Enable Standalone indexing and search'), 'SETTINGS_VISIBLE');
+  await wait(() => settingRow('Enable offline search'), 'SETTINGS_VISIBLE');
+  const roleCard = role => {
+    const title = { embedding:'Semantic search', reranking:'Improve result ranking',
+      generation:'Evidence-based answers' }[role];
+    return [...app.setting.activeTab.containerEl.querySelectorAll('.oks-settings-role')]
+      .find(section => section.getAttribute('aria-label')?.startsWith(title));
+  };
+  const cardRow = (role,name) => [...roleCard(role).querySelectorAll('.setting-item')]
+    .find(el => el.querySelector('.setting-item-name')?.textContent?.trim() === name);
+  const clickButton = (row,label) => {
+    const button = [...row.querySelectorAll('button')].find(button => button.textContent === label);
+    assert(button, 'SETTINGS_BUTTON_'+label); button.click();
+  };
   for (const role of ['embedding','reranking','generation']) {
     assert(p.settings.ai[role].state === 'disabled', 'AI_DEFAULT_DISABLED');
-    assert(settingRow('AI provider: '+role)?.textContent?.includes('disabled'), 'AI_ROLE_SETTINGS');
+    assert(cardRow(role,'Provider state')?.textContent?.includes('Disabled'), 'AI_ROLE_SETTINGS');
   }
-  const textSetting = (name, value) => {
-    const input = settingRow(name)?.querySelector('input');
-    assert(input, 'AI_SETTING_INPUT');
+  clickButton(cardRow('reranking','Connection'), 'Configure');
+  const setText = (row,value) => {
+    const input = row?.querySelector('input');
+    assert(input,'SETTINGS_INPUT');
     input.value = value;
-    input.dispatchEvent(new settingDoc.defaultView.Event('input', {bubbles:true}));
+    input.dispatchEvent(new settingDoc.defaultView.Event('input',{bubbles:true}));
   };
-  textSetting('reranking origin (no path or credentials)', 'http://127.0.0.1:8765');
-  textSetting('reranking model ID', 'synthetic-reranker');
-  textSetting('reranking model revision', 'v1');
-  settingRow('reranking preferences').querySelector('button').click();
+  setText(cardRow('reranking','API origin'), 'http://127.0.0.1:8765');
+  setText(cardRow('reranking','Model ID'), 'synthetic-reranker');
+  setText(cardRow('reranking','Model revision'), 'v1');
+  clickButton(cardRow('reranking','Draft preferences'), 'Save connection');
   await wait(() => p.settings.ai.reranking.state === 'configured', 'AI_PREFERENCES_SAVE');
-  await wait(() => settingRow('AI provider: reranking')?.textContent?.includes('NOT_READY'), 'AI_NOT_READY');
+  await wait(() => cardRow('reranking','Provider state')?.textContent?.includes('NOT_READY'), 'AI_NOT_READY');
   assert(p.settings.ai.embedding.state === 'disabled' && p.settings.ai.generation.state === 'disabled',
     'AI_ROLES_INDEPENDENT');
   const offline = await p.api.request({apiVersion:1,operation:'search',request});
   assert(offline.ok && offline.value.hits.length === 1, 'AI_CONFIG_OFFLINE_LEXICAL');
-  await p.updateSettings({...p.settings,ai:{...p.settings.ai, generation:{state:'configured',secret:'fixture-secret'}}});
+  await p.updateSettings({...p.settings,ai:{...p.settings.ai,generation:{state:'configured',secret:'fixture-secret'}}});
   assert(p.settings.enabled && p.settings.ai.generation.state === 'invalid' &&
     !JSON.stringify(p.settings).includes('fixture-secret'), 'AI_INVALID_ISOLATED');
   await p.updateSettings({...p.settings,ai:{...p.settings.ai,generation:{state:'disabled'}}});
-  // Refresh the mounted settings after the explicit invalid-settings test.
   app.setting.activeTab.display();
-  const disable = [...settingRow('reranking preferences').querySelectorAll('button')]
-    .find(b => b.textContent === 'Disable');
-  assert(disable, 'AI_DISABLE_BUTTON'); disable.click();
+  clickButton(cardRow('reranking','Connection'), 'Configure');
+  clickButton(cardRow('reranking','Draft preferences'), 'Disable role');
   await wait(() => p.settings.ai.reranking.state === 'disabled', 'AI_DISABLE');
-  await wait(() => settingRow('AI provider: reranking')?.textContent?.includes('disabled'), 'AI_DISABLE_UI');
+  await wait(() => cardRow('reranking','Provider state')?.textContent?.includes('Disabled'), 'AI_DISABLE_UI');
   const host = p.denseHost;
   assert(host, 'D6_HOST_ATTACHED');
   const embedding = {state:'configured',transport:'local',origin:'http://127.0.0.1:1',
@@ -185,15 +195,15 @@
     const toggle = row.querySelector('.checkbox-container'); assert(toggle, 'SETTINGS_TOGGLE');
     toggle.click();
   };
-  toggleSetting('Enable Standalone indexing and search');
+  toggleSetting('Enable offline search');
   await wait(() => !p.settings.enabled && !p.standalone && !p.denseHost && parser.stopped, 'SETTINGS_DISABLE');
   const disabled = await p.api.request({ apiVersion: 1, operation: 'search', request });
   assert(!disabled.ok && disabled.error === 'DISABLED', 'DISABLED_SEARCH');
-  await wait(() => settingRow('Clear derived Standalone index')?.querySelector('button')?.disabled === false,
+  await wait(() => settingRow('Delete derived offline index')?.querySelector('button')?.disabled === false,
     'PURGE_BUTTON_REFRESH');
-  settingRow('Clear derived Standalone index').querySelector('button').click();
+  settingRow('Delete derived offline index').querySelector('button').click();
   const modal = () => [...settingDoc.querySelectorAll('.modal-container, .modal')]
-    .find(el => el.textContent?.includes('Confirm derived index cleanup'));
+    .find(el => el.textContent?.includes('Confirm derived-index cleanup'));
   await wait(() => modal(), 'PURGE_CONFIRM_MODAL');
   const confirm = [...modal().querySelectorAll('button')].find(el => el.textContent?.includes('Delete derived files'));
   assert(confirm, 'PURGE_CONFIRM_BUTTON'); confirm.click();
@@ -201,7 +211,7 @@
   const remaining = await p.purgeIndex();
   assert(remaining === 0, 'PURGE_VIA_REAL_SETTINGS');
   assert(app.vault.getAbstractFileByPath('first.md') !== null, 'PURGE_NOTES_PRESERVED');
-  toggleSetting('Enable Standalone indexing and search');
+  toggleSetting('Enable offline search');
   await wait(() => p.settings.enabled && p.standalone, 'SETTINGS_ENABLE');
   await settle();
   app.setting.close(); await p.openSearch();

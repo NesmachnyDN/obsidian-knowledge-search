@@ -18,7 +18,7 @@ const grant: DisclosureGrant = {version:1,role:'reranking',configDigest:configDi
     excerptDigest:hash(candidate.text),classification:'synthetic'}]};
 const signal = new AbortController().signal;
 test('settings v4 migration and isolated role validation preserve Standalone', () => {
-  const {ai:_, ...old}=defaultSettings();
+  const {ai:_, presentationMode: _mode, ...old}=defaultSettings();
   const migrated = parseSettings({...old,version:4});
   assert.deepEqual(migrated.ai, defaultSettings().ai);
   assert.equal(migrated.enabled,true);
