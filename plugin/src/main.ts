@@ -63,11 +63,11 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private denseHost?: ApiDenseHost;
   private denseSettingsChanging = false;
   private readonly denseUi = new DenseUiController({
-    host: () => this.denseSettingsChanging ? undefined : this.denseHost,
-    sharedFence: () => this.searchController?.sharedAuthorityTransition() ?? false,
+    host: () => this.unloaded || this.denseSettingsChanging ? undefined : this.denseHost,
+    sharedFence: () => this.unloaded || this.denseSettingsChanging || (this.searchController?.sharedAuthorityTransition() ?? false),
     revokeNavigation: () => this.navigator?.invalidate(),
     navigate: async hit => {
-      if (!this.navigator) throw new StandaloneError('NAVIGATION_REJECTED');
+      if (this.unloaded || this.denseSettingsChanging || !this.navigator) throw new StandaloneError('NAVIGATION_REJECTED');
       await this.navigator.open(hit);
     },
   });
@@ -88,7 +88,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
   readonly advancedRetrieval = new AdvancedRetrievalManager(this.advancedIngestion);
   private advancedStartup?: Promise<void>;
   readonly searchController: SearchController = new SearchController(async hit => {
-    if (!this.navigator) throw new StandaloneError('NAVIGATION_REJECTED');
+    if (this.unloaded || this.denseSettingsChanging || !this.navigator) throw new StandaloneError('NAVIGATION_REJECTED');
     await this.navigator.open(hit);
   }, () => this.advancedHealth.snapshot(), () => this.advancedIngestion.snapshot(), {
     config: () => this.settings.ai.reranking,
@@ -100,7 +100,15 @@ export default class SyntheticEvidencePlugin extends Plugin {
     verify: hit => this.verifyAiEvidence(hit),
   }, () => this.revokeDenseAuthority());
   private revokeDenseAuthority(): void {
-    this.denseUi.authority.revoke(()=>{this.denseMachine.invalidate();this.denseUi.invalidate();});
+    this.denseUi.authority.revoke(() => {
+      // Lexical navigation has its own revision even when both dense owners
+      // are idle. Revoke it before any dense retirement can publish.
+      try { this.navigator?.invalidate(); }
+      finally {
+        try { this.denseMachine.invalidate(); }
+        finally { this.denseUi.invalidate(); }
+      }
+    });
   }
   private async verifyAiEvidence(hit: EvidenceHit): Promise<void> {
     const reader = this.sourceReader, file = this.app.vault.getAbstractFileByPath(hit.sourceId);
@@ -543,15 +551,21 @@ export default class SyntheticEvidencePlugin extends Plugin {
       },
     });
   }
-  private stopDenseHost(): Promise<void> {
-    this.revokeDenseAuthority();
+  private async stopDenseHost(): Promise<void> {
+    let failed = false;
+    try { this.revokeDenseAuthority(); }
+    catch { failed = true; console.warn('DENSE_AUTHORITY_REVOKE_FAILED'); }
     const host = this.denseHost;
-    if (!host) return Promise.resolve();
-    // Publish the drain before losing ownership. close() revokes synchronously;
-    // the active job can finish against the admission promise it already captured.
-    const drain = this.trackStorageDrain(host.close());
-    this.denseHost = undefined;
-    return drain;
+    if (host) {
+      // Publish the drain before losing ownership even after a failed UI hook.
+      // close() revokes synchronously; its rejected barrier stays closed.
+      const drain = this.trackStorageDrain(host.close());
+      this.denseHost = undefined;
+      await drain;
+    }
+    // A delayed drain must not revoke a newer owner. A later synchronous
+    // shared transition retries any retained retirement fence.
+    if (failed) throw new StandaloneError('INTERNAL_FAILURE');
   }
   private async stopStandalone(): Promise<void> {
     this.navigator?.dispose(); this.navigator = undefined; this.sourceReader = undefined;
@@ -580,15 +594,20 @@ export default class SyntheticEvidencePlugin extends Plugin {
   }
   onunload(): void {
     this.unloaded = true;
-    this.resultModal?.close();
+    const cleanup = (action: () => void): void => {
+      try { action(); } catch { console.warn('PLUGIN_UNLOAD_CLEANUP_FAILED'); }
+    };
+    cleanup(() => this.resultModal?.close());
     this.resultModal = undefined;
-    void this.controller?.unload();
+    void this.controller?.unload().catch(() => { console.warn('PLUGIN_UNLOAD_CLEANUP_FAILED'); });
     this.lifecycleRevision++;
-    this.denseMachine.dispose();
-    this.denseUi.dispose();
-    this.searchController.dispose();
-    this.app.workspace.detachLeavesOfType(SEARCH_VIEW);
-    void this.stopStandalone();
+    // Revoke navigation before any observer or host teardown may run.
+    cleanup(() => this.navigator?.dispose());
+    cleanup(() => this.denseMachine.dispose());
+    cleanup(() => this.denseUi.dispose());
+    cleanup(() => this.searchController.dispose());
+    cleanup(() => this.app.workspace.detachLeavesOfType(SEARCH_VIEW));
+    void this.stopStandalone().catch(() => { console.warn('PLUGIN_UNLOAD_CLEANUP_FAILED'); });
     void this.stopAdvanced().catch(() => { /* failed barrier remains closed to reload */ });
     void this.stopIngestion().catch(() => { /* failed shutdown denies new ingestion */ });
     this.controller = undefined;

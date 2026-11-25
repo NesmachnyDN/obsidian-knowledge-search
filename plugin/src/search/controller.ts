@@ -82,6 +82,7 @@ export class SearchController {
   private pendingExpiryNotification?: object;
   private notifying = false;
   private revokingSharedAuthority = false;
+  private sharedAuthorityFault = false;
   private deliveringLifecycle = false;
   private evidencePending?: number;
   private lifecyclePending?: {revision:number; final:boolean; listeners:(() => void)[]};
@@ -236,14 +237,30 @@ export class SearchController {
     this.notificationVersion++;
     if (this.revokingSharedAuthority) return;
     this.revokingSharedAuthority = true;
-    try { this.revokeSharedAuthority?.(); }
-    finally { this.revokingSharedAuthority = false; }
-    this.drainNotifications(true);
+    try {
+      this.revokeSharedAuthority?.();
+      this.sharedAuthorityFault = false;
+    } catch {
+      // A failed trusted hook is not an observer exception: no authority
+      // can be issued until a later shared transition successfully revokes it.
+      this.sharedAuthorityFault = true;
+      if (!this.disposed) {
+        this.pending?.resolve(failure('INTERNAL_FAILURE'));
+        this.pending = undefined;
+        this.resetSharedState({phase:'error',message:'INTERNAL_FAILURE',response:null});
+      }
+      this.queueLifecycle();
+      this.notificationVersion++;
+      console.warn('SEARCH_AUTHORITY_REVOKE_FAILED');
+    } finally {
+      this.revokingSharedAuthority = false;
+      this.drainNotifications(true);
+    }
   }
   /** Host admission stays closed through shared revocation and lifecycle delivery,
    * never through independent evidence-only notifications. */
   sharedAuthorityTransition(): boolean {
-    return this.disposed || this.revokingSharedAuthority || this.deliveringLifecycle || !!this.lifecyclePending;
+    return this.disposed || this.sharedAuthorityFault || this.revokingSharedAuthority || this.deliveringLifecycle || !!this.lifecyclePending;
   }
   invalidate(): void { if (!this.disposed) this.invalidateState(); }
   private resetSharedState(state: UiState): void {
@@ -277,7 +294,7 @@ export class SearchController {
     return result;
   }
   private async pump(): Promise<void> {
-    if (this.notifying || this.revokingSharedAuthority || this.active || !this.pending) return;
+    if (this.notifying || this.revokingSharedAuthority || this.sharedAuthorityFault || this.active || !this.pending) return;
     const job = this.pending; this.pending = undefined;
     if (this.disposed || job.revision !== this.revision || !this.engine) {
       job.resolve(failure('SUPERSEDED')); return;
@@ -364,7 +381,7 @@ export class SearchController {
     this.notifyExpiry();
   }
   private prepareEvidence(role: EvidenceRole): RerankPreview {
-    if (this.disposed) throw new ProviderFailure('NOT_READY');
+    if (this.disposed || this.sharedAuthorityFault || this.revokingSharedAuthority) throw new ProviderFailure('NOT_READY');
     // Replacing consent is a single commit. In particular no observer can
     // prepare another preview between clearing the old timer and owning the new one.
     const removed = this.clearPreview(role);
@@ -449,6 +466,7 @@ export class SearchController {
     return this.confirmEvidence('generation',preview,classification,token);
   }
   private async confirmEvidence(role: EvidenceRole, preview: RerankPreview, classification: 'synthetic' | 'public', token: string): Promise<void> {
+    if (this.sharedAuthorityFault || this.revokingSharedAuthority) throw new ProviderFailure('DISCLOSURE_DENIED');
     const approved = this.currentPreview(role,false)?.preview;
     if (!approved) throw new ProviderFailure('DISCLOSURE_DENIED');
     this.clearPreview(role);
@@ -508,7 +526,7 @@ export class SearchController {
   }
   async open(index: number, expected?: EvidenceHit): Promise<ApiResult<null>> {
     const hit = this.state.response?.hits[index];
-    if (this.disposed || !this.enabled || !hit || !Number.isInteger(index)
+    if (this.sharedAuthorityTransition() || !this.enabled || !hit || !Number.isInteger(index)
       || expected && JSON.stringify(expected) !== JSON.stringify(hit)) return failure('NAVIGATION_REJECTED');
     const revision = this.revision;
     try {
@@ -517,7 +535,8 @@ export class SearchController {
         ? failure('SUPERSEDED') : { apiVersion: 1, ok: true, value: null };
     }
     catch {
-      if (!this.disposed && this.revision === revision) this.message('NAVIGATION_REJECTED');
+      if (this.disposed || this.revision !== revision) return failure('SUPERSEDED');
+      this.message('NAVIGATION_REJECTED');
       return failure('NAVIGATION_REJECTED');
     }
   }

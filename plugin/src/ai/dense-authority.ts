@@ -19,6 +19,7 @@ export class DenseAuthority {
   revoking(): boolean { return this.revocations > 0 || this.sharedFence(); }
   epoch(): number { return this.revision; }
   admissionClosed(): boolean { return this.revoking() || this.notifying; }
+  delivering(): boolean { return this.notifying; }
   batch<T>(action: () => T): T {
     this.depth++;
     try { return action(); }

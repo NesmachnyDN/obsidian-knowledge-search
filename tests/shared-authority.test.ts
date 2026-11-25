@@ -230,3 +230,69 @@ test('LIFE-07/08: real preview and D8 timer handles retire together on shared in
     await f.stage();assert.equal(live.size,1);f.c.dispose();assert.equal(live.size,0);
   }finally{f.close();for(const handle of live)clear(handle);t.mock.restoreAll();}
 });
+
+test('LIFE-09: failed trusted shared hook settles latest queued search, denies admission, publishes error and recovers',async()=>{
+  let fault=false,dispatches=0;
+  const phases:string[]=[];
+  const c=new SearchController(async()=>{},undefined,undefined,undefined,undefined,()=>{
+    if(fault)throw Error('synthetic trusted hook failure');
+  });
+  c.attach({search:async()=>{dispatches++;return response();},
+    status:()=>({status:'ready',generationId,sources:1,records:1,busy:false,error:null,maintenanceWarning:null}),
+    cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+  c.subscribe(()=>phases.push(c.snapshot().phase));
+  try{
+    fault=true;
+    assert.deepEqual(await watchdog(c.search(uiRequest('denied',1))),err('INTERNAL_FAILURE'));
+    assert.equal(dispatches,0);assert.equal(c.sharedAuthorityTransition(),true);
+    assert.equal(c.snapshot().phase,'error');assert.deepEqual(phases,['error']);
+    assert.equal((await c.open(0)).ok,false);
+    assert.throws(()=>c.prepareGeneration(),{message:'NOT_READY'});
+    fault=false;
+    assert.equal((await watchdog(c.search(uiRequest('recovered',1)))).ok,true);
+    assert.equal(dispatches,1);assert.equal(c.sharedAuthorityTransition(),false);
+    assert.deepEqual(phases,['error','searching','results']);
+  }finally{c.dispose();}
+});
+
+test('LIFE-09: trusted dense retirement fault clears D8 and UI owners before publication; bounded retry and recovery',async()=>{
+  const f=fixture();
+  try{
+    const id=await f.stage();await f.machine.review(f.owner);
+    const original=f.host.invalidate;
+    let fail=true,attempts=0,observed=0;
+    f.host.invalidate=()=>{attempts++;if(fail)throw Error('synthetic retirement fault');original();};
+    f.ui.subscribe(()=>{observed++;try{f.ui.invalidate();}catch{/* fault must not publish another wave */}});
+    const phases:string[]=[];f.c.subscribe(()=>phases.push(f.c.snapshot().phase));
+    assert.deepEqual(await watchdog(f.c.search(uiRequest('denied',1))),err('INTERNAL_FAILURE'));
+    assert.equal(f.ui.occupied(),false);assert.equal(f.machine.owns(f.owner),false);
+    assert.equal(f.ui.authority.admissionClosed(),true);
+    assert.deepEqual(await f.request('status',id),err('INVALID_OPERATION'));
+    assert.deepEqual(await f.machine.request(submit()),err('NOT_READY'));
+    assert.equal(f.dispatched.length,0);assert.ok(attempts<=2);assert.ok(observed<=1);
+    assert.deepEqual(phases,['error']);
+    fail=false;
+    assert.equal((await watchdog(f.c.search(uiRequest('recovered',1)))).ok,true);
+    assert.equal(f.ui.authority.admissionClosed(),false);
+    assert.notEqual(await f.stage(),id);
+  }finally{f.close();}
+});
+
+test('LIFE-09: failed trusted revocation at result publication does not strand active job or newer queued search',async()=>{
+  let failOnResult=true,dispatches=0;
+  let c:SearchController;
+  c=new SearchController(async()=>{},undefined,undefined,undefined,undefined,()=>{
+    if(failOnResult&&c.snapshot().phase==='results'){failOnResult=false;throw Error('synthetic result hook failure');}
+  });
+  c.attach({search:async()=>{dispatches++;return response();},
+    status:()=>({status:'ready',generationId,sources:1,records:1,busy:false,error:null,maintenanceWarning:null}),
+    cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+  let next:ReturnType<SearchController['search']>|undefined;
+  c.subscribe(()=>{if(c.snapshot().phase==='error'&&!next)next=c.search(uiRequest('recovered',1));});
+  try{
+    assert.deepEqual(await watchdog(c.search(uiRequest('old',1))),err('SUPERSEDED'));
+    assert.ok(next);
+    assert.equal((await watchdog(next)).ok,true);
+    assert.equal(dispatches,2);assert.equal(c.snapshot().phase,'results');
+  }finally{c.dispose();}
+});

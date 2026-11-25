@@ -10,6 +10,10 @@ import type { IngestResponse } from '../plugin/src/advanced/protocol';
 import type { ModelReply } from '../plugin/src/advanced/model-protocol';
 import { join, resolve } from 'node:path';
 import { parseMarkdown } from '../plugin/src/standalone/markdown';
+import { SourceNavigator } from '../plugin/src/search/navigation';
+import { uiRequest } from '../plugin/src/search/controller';
+import { hash, type EvidenceHit, type SearchRequest, type SearchResponse } from '../plugin/src/standalone/contracts';
+import type { EngineState } from '../plugin/src/standalone/engine';
 import { defaultSettings } from '../plugin/src/search/settings';
 const TEST_PYTHON = '/usr/bin/python3.12';
 // Controlled Node-only host adapter. Actual DOM/editor acceptance remains host smoke.
@@ -803,4 +807,67 @@ for (const role of ['reranking','generation'] as const) {
       await f.cleanup();
     }
   });
+}
+
+// LIFE-09: real plugin wiring, synthetic editor/source port. No AI/HTTP required.
+for (const boundary of ['first-read','editor-open'] as const) {
+  for (const transition of ['search','configure','detach','dispose','settings'] as const) {
+    test('LIFE-09: '+boundary+' / '+transition+' revokes lexical navigation with both dense owners idle',async()=>{
+      const f=await fixture(),c=f.plugin.searchController;
+      const gate=deferredDrain(),entered=deferredDrain();
+      const bytes=Buffer.from('alpha synthetic fixture\n'),generationId=hash('nav-generation');
+      const doc=parseMarkdown('fixture.md',bytes,hash('nav-root'));
+      const evidence:EvidenceHit={sourceId:'fixture.md',sourceSha256:doc.sha256,originalExcerpt:doc.blocks[0]!.originalText,
+        sourceLocators:[doc.blocks[0]!.locator],rank:1,lexicalRank:1,retrievalMode:'lexical',
+        indexGenerationId:generationId,score:1,headings:[],wikiLinks:[],properties:[]};
+      let reads=0,opens=0,selections=0,blocked=true;
+      const file={path:'fixture.md'};
+      const nav=new SourceNavigator({read:async()=>{
+        reads++;
+        if(blocked&&boundary==='first-read'&&reads===1){entered.release();await gate.promise;}
+        return bytes;
+      }},{
+        exact:()=>file,open:async()=>{
+          opens++;
+          if(blocked&&boundary==='editor-open'){entered.release();await gate.promise;}
+          return {text:()=>bytes.toString(),select:()=>{selections++;}};
+        },
+      });
+      const counts=()=>({reads,opens,selections});
+      const engine={
+        search:async(r:SearchRequest):Promise<SearchResponse>=>({protocolVersion:2,requestId:r.query,
+          requestedMode:'lexical',executedMode:'lexical',status:'ok',indexGenerationId:generationId,hits:[evidence],
+          capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0}),
+        status:():EngineState=>({status:'ready',generationId,sources:1,records:1,busy:false,error:null,maintenanceWarning:null}),
+        cancel:()=>true,resume:()=>{},rebuild:()=>{},
+      };
+      Object.assign(f.plugin,{navigator:nav});
+      c.attach(engine);
+      try{
+        assert.equal((await c.search(uiRequest('old',1))).ok,true);
+        const opening=c.open(0);
+        await navigationWatchdog(entered.promise);
+        if(transition==='search')assert.equal((await navigationWatchdog(c.search(uiRequest('new',1)))).ok,true);
+        else if(transition==='configure')c.configure(true,false);
+        else if(transition==='settings')await f.plugin.patchSettings(s=>{s.topK=s.topK===1?2:1;});
+        else c[transition]();
+        const before=counts();
+        blocked=false;gate.release();
+        assert.equal((await navigationWatchdog(opening)).ok,false);
+        assert.deepEqual(counts(),before,'revoked navigation must not dispatch further reads, open or selection');
+        if(transition==='search')assert.equal(c.snapshot().response?.requestId,'new');
+        if(transition!=='dispose'){
+          c.attach(engine);
+          assert.equal((await navigationWatchdog(c.search(uiRequest('recovery',1)))).ok,true);
+          assert.equal((await navigationWatchdog(c.open(0))).ok,true);
+          assert.equal(selections,1);
+        }
+      }finally{gate.release();await f.cleanup();}
+    });
+  }
+}
+async function navigationWatchdog<T>(work:Promise<T>):Promise<T>{
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  try{return await Promise.race([work,new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(Error('NAVIGATION_WATCHDOG')),1000);})]);}
+  finally{clearTimeout(timer);}
 }

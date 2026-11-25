@@ -48,9 +48,9 @@ export class DenseMachine {
     return this.ui.authority.revoke(()=>{
       this.slot=undefined;
       if(this.timer!==undefined)clearTimeout(this.timer);
-      this.timer=undefined;s.abort.abort();
-      if(s.owner)this.ui.cancel(s.owner);
-      this.emit();
+      this.timer=undefined;
+      try {s.abort.abort();}
+      finally {try {if(s.owner)this.ui.cancel(s.owner);}finally{this.emit();}}
       return this.ui.authority.epoch();
     });
   }
@@ -58,7 +58,7 @@ export class DenseMachine {
   dispose():void {
     if(this.disposed)return;
     this.disposed=true;this.unsubscribe();
-    this.ui.authority.revoke(()=>{this.clear();this.ui.authority.retire(this.listeners);});
+    this.ui.authority.revoke(()=>{try{this.clear();}finally{this.ui.authority.retire(this.listeners);}});
   }
   private current(s:Slot):boolean {
     try{
@@ -127,7 +127,9 @@ export class DenseMachine {
         const host=this.port.host();if(!host)return fail('NOT_READY');
         const id=randomUUID(),expiresUnixMs=this.now()+300000;
         const s:Slot={id,input:cmd.input,fence:{digest:cmd.digest,expiresUnixMs},host,abort:new AbortController()};
-        this.slot=s;this.timer=setTimeout(()=>{if(this.slot===s)this.clear();},300000);
+        this.slot=s;this.timer=setTimeout(()=>{
+          if(this.slot===s){try{this.clear();}catch{console.warn('DENSE_AUTHORITY_REVOKE_FAILED');}}
+        },300000);
         this.timer.unref?.();this.emit();
         return this.current(s)?ok({operationId:id,expiresUnixMs}):fail('INVALID_OPERATION');
       }

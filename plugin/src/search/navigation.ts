@@ -29,7 +29,7 @@ export function verifySpan(hit: EvidenceHit, bytes: Uint8Array): VerifiedSpan {
 }
 export interface NavigationPort<File> {
   exact(path: string): File | null;
-  open(file: File): Promise<{ text(): string; select(from: Position, to: Position): void }>;
+  open(file: File, guard: () => void): Promise<{ text(): string; select(from: Position, to: Position, guard: () => void): void }>;
 }
 export class SourceNavigator<File> {
   private revision = 0;
@@ -42,19 +42,26 @@ export class SourceNavigator<File> {
     const value = structuredClone(hit);
     const revision = ++this.revision;
     const file = validPath(value.sourceId) ? this.port.exact(value.sourceId) : null;
+    const current = (): boolean => !this.disposed && revision === this.revision;
     const guard = (): void => {
-      if (!file || this.disposed || revision !== this.revision || this.port.exact(value.sourceId) !== file)
+      if (!file || !current() || this.port.exact(value.sourceId) !== file || !current())
         throw new StandaloneError('NAVIGATION_REJECTED');
     };
-    guard();
-    verifySpan(value, await this.provider.read(value.sourceId)); guard();
+    const read = async (): Promise<VerifiedSpan> => {
+      guard();
+      const bytes = await this.provider.read(value.sourceId);
+      guard();
+      return verifySpan(value, bytes);
+    };
+    await read(); guard();
     // Fresh read immediately before open; no async action between guard and open.
-    verifySpan(value, await this.provider.read(value.sourceId)); guard();
-    const editor = await this.port.open(file!); guard();
-    const span = verifySpan(value, await this.provider.read(value.sourceId)); guard();
+    await read(); guard();
+    const editor = await this.port.open(file!, guard); guard();
+    const span = await read(); guard();
     // Obsidian editors normalize line endings. Unsaved edits still revoke selection.
     if (editor.text().replace(/\r\n|\r/g, '\n') !== span.text.replace(/\r\n|\r/g, '\n'))
       throw new StandaloneError('NAVIGATION_REJECTED');
-    editor.select(span.from, span.to);
+    guard();
+    editor.select(span.from, span.to, guard);
   }
 }

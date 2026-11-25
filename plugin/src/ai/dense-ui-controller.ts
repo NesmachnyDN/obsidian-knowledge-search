@@ -22,11 +22,14 @@ export class DenseUiController {
   private state:State={phase:'idle'};
   private timer?:ReturnType<typeof setTimeout>;
   private disposed=false;
+  // An unsuccessful trusted retirement is retried on the next shared revoke;
+  // never admit a new host operation while its previous authority is uncertain.
+  private retirement?: {host?:Host; running:boolean};
   readonly authority: DenseAuthority;
   private readonly listeners: ReturnType<DenseAuthority['channel']>;
   private machineChanged?: () => void;
   constructor(private readonly port:Port){
-    this.authority=new DenseAuthority(()=>port.sharedFence?.() ?? false);this.listeners=this.authority.channel();
+    this.authority=new DenseAuthority(()=>!!this.retirement || (port.sharedFence?.() ?? false));this.listeners=this.authority.channel();
   }
   /** The single machine ownership hook is authority, not a quarantinable observer. */
   bindMachine(changed:()=>void):()=>void {
@@ -65,25 +68,35 @@ export class DenseUiController {
   occupied():boolean {return this.owner!==undefined;}
   owns(owner:symbol):boolean {return this.owner===owner;}
   private emit():void {
-    this.authority.batch(()=>{this.machineChanged?.();this.authority.publish(this.listeners);});
+    this.authority.batch(()=>{try{this.machineChanged?.();}finally{this.authority.publish(this.listeners);}});
   }
   private clearTimer():void {if(this.timer!==undefined)clearTimeout(this.timer);this.timer=undefined;}
   invalidate():void {
     // Even an empty shared invalidation supersedes an interrupted prepare.
     ++this.revision;
     this.authority.revoke(()=>{
-      if(this.owner===undefined&&!this.host)return;
-      const host=this.host;
+      if(this.retirement?.running)return;
+      if(this.owner===undefined&&!this.host&&!this.retirement)return;
+      // An observer cannot turn a persistent retirement failure into an
+      // unbounded notification wave. Retry only outside observer delivery.
+      if(this.retirement&&this.authority.delivering())throw new ProviderFailure('NOT_READY');
+      const retiring={host:this.host??this.retirement?.host,running:true};
       this.clearTimer();this.host=undefined;this.owner=undefined;this.state={phase:'idle'};
-      host?.invalidate();this.port.revokeNavigation();
-      this.emit();
+      this.retirement=retiring;
+      try {
+        try {
+          try {retiring.host?.invalidate();retiring.host=undefined;}
+          finally {this.port.revokeNavigation();}
+        } finally {this.emit();}
+        this.retirement=undefined;
+      } finally {retiring.running=false;}
     });
   }
   cancel(owner:symbol):void {if(this.owner===owner)this.invalidate();}
   dispose():void {
     if(this.disposed)return;
     this.disposed=true;
-    this.authority.revoke(()=>{this.invalidate();this.emit();this.authority.retire(this.listeners);});
+    this.authority.revoke(()=>{try{this.invalidate();}finally{try{this.emit();}finally{this.authority.retire(this.listeners);}}});
   }
   private current(owner:symbol,revision:number,host:Host):boolean {
     return !this.disposed&&!this.authority.revoking()&&this.owner===owner&&this.revision===revision
@@ -92,7 +105,7 @@ export class DenseUiController {
   async prepare(owner:symbol,request:DenseRequest,fence?:MachineFence):Promise<void> {
     if(this.disposed||this.authority.admissionClosed())return;
     const revision=this.revision+1;
-    this.invalidate();
+    try {this.invalidate();} catch {console.warn('DENSE_AUTHORITY_REVOKE_FAILED');return;}
     if(this.disposed||this.authority.admissionClosed()||this.revision!==revision)return;
     const host=this.port.host();
     this.owner=owner;
@@ -104,7 +117,11 @@ export class DenseUiController {
       if(!this.current(owner,revision,host))return;
       if(preview.expiresUnixMs<=Date.now())throw new ProviderFailure('CANCELLED');
       this.state={phase:'preview',preview:structuredClone(preview)};
-      this.timer=setTimeout(()=>{if(this.current(owner,revision,host))this.invalidate();},
+      this.timer=setTimeout(()=>{
+        if(this.current(owner,revision,host)){
+          try{this.invalidate();}catch{console.warn('DENSE_AUTHORITY_REVOKE_FAILED');}
+        }
+      },
         Math.max(0,preview.expiresUnixMs-Date.now()));
       this.emit();
     }catch(error){
@@ -116,7 +133,7 @@ export class DenseUiController {
     if(this.authority.admissionClosed()||!host||!this.current(owner,revision,host)||this.state.phase!=='preview'
       ||this.state.preview.nonce!==nonce||!['synthetic','public'].includes(classification))return;
     const preview=this.state.preview;
-    if(preview.expiresUnixMs<=Date.now()){this.invalidate();return;}
+    if(preview.expiresUnixMs<=Date.now()){try{this.invalidate();}catch{console.warn('DENSE_AUTHORITY_REVOKE_FAILED');}return;}
     this.clearTimer();this.state={phase:'running'};this.emit();
     try {
       if(!this.current(owner,revision,host))return;
