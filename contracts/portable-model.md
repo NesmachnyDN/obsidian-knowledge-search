@@ -45,7 +45,7 @@ The concrete **in-process TypeScript** records in `plugin/src/standalone/contrac
 
 | Concern | Native encoding / validation |
 |---|---|
-| API request | `protocolVersion: 2`, `requestId` (bounded identifier), `requestedMode`, `query`, optional vault-relative `scope: string[]`, `limit`, optional `predicates` |
+| API request | `protocolVersion: 2`, `requestId` (bounded identifier), `requestedMode`, `query`, optional vault-relative `scope: string[]`, `limit`, optional `predicates`, optional lexical-only `range` (see below) |
 | Modes | `lexical` executes; `dense`/`hybrid` respond `CAPABILITY_UNAVAILABLE`, `executedMode: none`, no fake vectors/fallback |
 | Root identity | Local provider-only SHA-256 of canonical Vault root, device and inode; never accepted from user query; partitioned durable cache |
 | `SourceVersion` | `sourceId` = `vaultRelativePath`; `sha256` over raw input, `sourceType: markdown`, `scopeId: rootId`, `profileId`, `extractionStatus`, `properties`, `wikiLinks`, `diagnostics`, `blocks` |
@@ -58,6 +58,8 @@ The concrete **in-process TypeScript** records in `plugin/src/standalone/contrac
 | Response | request version/ID/modes, capability readiness, generation ID, `status: ok/degraded/failed`, hits, typed error code and count of stale suppressed sources |
 
 Canonical source text for this profile is a **verified physical Markdown line** rather than a synthetic context prefix or reassembled chunk. The Python structural chunking policy stays an independent reference/advanced candidate, not a hidden native dependency. Headings are preserved as metadata and used in ranking without inventing new source locators. Known unsupported markup is marked with extraction diagnostics. Full CommonMark/YAML coverage remains a separate compatibility gate.
+
+Selected-range extension (06H.2-A1): a nonempty lexical text request may specify `range: {sourceId,sourceSha256,byteStart,byteEnd,charStart,charEnd}` together with the singleton matching scope. Both intervals are half-open and authenticated against original bytes. Editor-buffer mapping is host-local and does not enter the request. Range eligibility precedes ranking; only original line terms, no inherited heading or Properties context, enter scoped hits. Explicit source-level metadata predicates remain eligibility filters, not disclosed context. Metadata-only, dense and hybrid range requests are rejected rather than widened. This is an in-process retrieval substrate, not chat admission or host UI acceptance.
 
 **Language-neutral parity fixtures:** `contracts/fixtures/standalone-v2.json`. Both `tests/standalone.test.ts` and `tests/test_standalone_conformance.py` independently validate source hash, Unicode/CRLF spans, original text, link metadata, block order and heading hierarchy. The reference line parser alone does not reject duplicate typed YAML properties, but the Python retrieval property validator does; the native parser marks the source `partial` and clears typed properties. The fixture explicitly encodes both statuses rather than falsely claiming byte-for-byte identical internal parser behavior.
 
