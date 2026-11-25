@@ -65,6 +65,7 @@ class ResultModal extends Modal {
 export default class SyntheticEvidencePlugin extends Plugin {
   settings: SearchSettings = defaultSettings();
   private navigator?: SourceNavigator<TFile>;
+  private retiringNavigator?: SourceNavigator<TFile>;
   private sourceReader?: BoundedVaultReader;
   private denseHost?: ApiDenseHost;
   private denseSettingsChanging = false;
@@ -76,6 +77,10 @@ export default class SyntheticEvidencePlugin extends Plugin {
     host: () => this.unloaded || this.denseSettingsChanging ? undefined : this.denseHost,
     sharedFence: () => this.unloaded || this.denseSettingsChanging || (this.searchController?.sharedAuthorityTransition() ?? false),
     revokeNavigation: () => this.navigator?.invalidate(),
+    captureNavigationRetirement: () => {
+      const navigator=this.navigator;
+      return ()=>navigator?.invalidate();
+    },
     navigate: async hit => {
       if (this.unloaded || this.denseSettingsChanging || !this.navigator) throw new StandaloneError('NAVIGATION_REJECTED');
       await this.navigator.open(hit);
@@ -94,8 +99,11 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private settingsQueue: Promise<void> = Promise.resolve();
   private purgeInFlight?: Promise<number>;
   readonly advancedHealth = new AdvancedHealthBridge();
-  readonly advancedIngestion = new AdvancedIngestionManager();
-  readonly advancedRetrieval = new AdvancedRetrievalManager(this.advancedIngestion);
+  readonly advancedIngestion = new AdvancedIngestionManager(work=>this.trackAdvancedRetirement(work));
+  readonly advancedRetrieval = new AdvancedRetrievalManager(this.advancedIngestion,work=>this.trackAdvancedRetirement(work));
+  private trackAdvancedRetirement(work:Promise<void>):void {
+    this.searchController.trackSourceDrain(this.trackStorageDrain(work));
+  }
   private advancedStartup?: Promise<void>;
   readonly searchController: SearchController = new SearchController(async hit => {
     if (this.unloaded || this.denseSettingsChanging || !this.navigator) throw new StandaloneError('NAVIGATION_REJECTED');
@@ -113,9 +121,19 @@ export default class SyntheticEvidencePlugin extends Plugin {
     this.denseUi.authority.revoke(() => {
       // Lexical navigation has its own revision even when both dense owners
       // are idle. Revoke it before any dense retirement can publish.
-      try { this.navigator?.invalidate(); }
-      finally {
-        try { this.denseMachine.invalidate(); }
+      // Retain an interrupted navigation owner; a newer instance cannot
+      // substitute for it. D8 and UI retirement are independent obligations.
+      const current=this.navigator;
+      try {
+        const retiring=this.retiringNavigator??current;
+        this.retiringNavigator=retiring;
+        retiring?.invalidate();
+        this.retiringNavigator=undefined;
+        if(current&&current!==retiring){
+          this.retiringNavigator=current;current.invalidate();this.retiringNavigator=undefined;
+        }
+      } finally {
+        try { this.denseMachine.invalidate(false); }
         finally { this.denseUi.invalidate(); }
       }
     });
@@ -188,30 +206,26 @@ export default class SyntheticEvidencePlugin extends Plugin {
       callback:()=>{void this.cancelAdvancedWork().catch(()=>new Notice('OKS Advanced: cancel failed'));}});
     this.addCommand({ id: 'run-synthetic-evidence-probe' , name: 'Run synthetic evidence probe', callback: () => { void this.runProbe(); } });
     this.addCommand({ id: 'cancel-synthetic-evidence-probe', name: 'Cancel synthetic evidence probe', callback: () => this.controller?.cancel() });
-    const invalidate = (file: TAbstractFile, oldPath?: string): void => {
-      if (this.unloaded) return;
-      const affectsFixture = (path: string): boolean => path === FIXTURE_PATH || FIXTURE_PATH.startsWith(path + '/');
-      if (affectsFixture(file.path) || (oldPath !== undefined && affectsFixture(oldPath))) {
-        this.controller?.cancel(); this.resultModal?.close();
-      }
-    };
     // Changes can arrive before the asynchronous core has opened; startup does
     // a full authoritative reconciliation after the event handlers are registered.
     const nativeChange = (file: TAbstractFile, oldPath?: string, fixtureChange = false): void => {
       if (this.unloaded) return;
       const paths = oldPath === undefined ? [file.path] : [file.path, oldPath];
-      this.searchController.invalidateSource(() => {
-        // A source event can abort the dense host before evidence callbacks.
-        // Both lexical and dense read rights are already logically revoked.
-        this.navigator?.invalidate();
-        for (const path of paths) this.standalone?.changed(path);
-        this.denseHost?.invalidateSources(paths);
-        for (const path of paths) {
-          this.advancedIngestion.invalidate(path);
-          this.advancedRetrieval.invalidate(path);
-        }
-        if (fixtureChange) invalidate(file, oldPath);
-      });
+      // Pin concrete owners and immutable path values before any callback.
+      const navigator = this.navigator, engine = this.standalone, dense = this.denseHost;
+      const ingestion = this.advancedIngestion, retrieval = this.advancedRetrieval;
+      const obligations: (() => void)[] = [
+        () => navigator?.invalidate(),
+        ...paths.map(path => () => engine?.changed(path)),
+        () => dense?.invalidateSources(paths),
+        ...paths.flatMap(path => [() => ingestion.invalidate(path), () => retrieval.invalidate(path)]),
+      ];
+      if (fixtureChange) {
+        const affectsFixture = paths.some(path => path === FIXTURE_PATH || FIXTURE_PATH.startsWith(path + '/'));
+        const probe = this.controller, modal = this.resultModal;
+        if (affectsFixture) obligations.push(() => probe?.cancel(), () => modal?.close());
+      }
+      this.searchController.invalidateSource(obligations);
     };
     this.registerEvent(this.app.vault.on('create', file => nativeChange(file)));
     this.registerEvent(this.app.vault.on('modify', file => nativeChange(file, undefined, true)));
@@ -318,31 +332,39 @@ export default class SyntheticEvidencePlugin extends Plugin {
         this.settingsApplyInterrupted = true;
         this.settings = settings;
         this.standaloneError = null;
+        this.searchController.assertSourceRetirementSettled();
         const wasPaused = this.searchController.status().paused;
         this.searchController.configure(settings.enabled, settings.paused);
         if (this.unloaded) return;
+        this.searchController.assertSourceRetirementSettled();
         if (repairing || before.ingestion.enabled !== settings.ingestion.enabled) {
           await this.stopDenseHost();
         }
         if (this.unloaded) return;
+        this.searchController.assertSourceRetirementSettled();
         if (repairing || JSON.stringify(before.ingestion) !== JSON.stringify(settings.ingestion))
           await this.stopIngestion();
         if (this.unloaded) return;
+        this.searchController.assertSourceRetirementSettled();
         if (!repairing && !settings.ingestion.enabled && this.standalone && !this.denseHost)
           this.attachDenseHost();
         if (repairing || JSON.stringify(before.advanced) !== JSON.stringify(settings.advanced)) {
           await this.stopAdvanced();
+          this.searchController.assertSourceRetirementSettled();
           if (settings.advanced.enabled && this.layoutReady && !this.unloaded) await this.initializeAdvanced();
         }
         if (this.unloaded) return;
+        this.searchController.assertSourceRetirementSettled();
         if (repairing || before.enabled !== settings.enabled) {
           this.lifecycleRevision++;
           await this.stopStandalone();
           await this.initializing;
+          this.searchController.assertSourceRetirementSettled();
           if (settings.enabled && this.layoutReady && !this.unloaded) await this.initializeStandalone();
         } else if (this.standalone && (wasPaused !== settings.paused || before.paused !== settings.paused)) {
           if (settings.paused) this.standalone.cancel(); else this.standalone.resume();
         }
+        this.searchController.assertSourceRetirementSettled();
         this.settingsRuntimeBase = undefined;
         this.settingsApplyInterrupted = false;
       } finally {
@@ -404,35 +426,42 @@ export default class SyntheticEvidencePlugin extends Plugin {
   }
   /** Public opt-in action: only existing Obsidian TFile, never arbitrary host path. */
   async ingestAdvancedPath(path: string): Promise<IngestResponse> {
+    const sourceRevision=this.searchController.sourceAuthorityRevision();
+    const sourceCurrent=()=>!this.denseSettingsChanging && this.searchController.sourceAuthorityCurrent(sourceRevision);
     const adapter=this.app.vault.adapter;
     const file=this.app.vault.getAbstractFileByPath(path);
-    if (this.unloaded || !this.layoutReady || !this.settings.ingestion.enabled
+    if (!sourceCurrent() || !this.layoutReady || !this.settings.ingestion.enabled
         || !(adapter instanceof FileSystemAdapter) || !(file instanceof TFile)
         || file.path!==path) throw new IngestError('SOURCE_REJECTED');
     const root=resolve(adapter.getBasePath());
     try { await ingestionBarriers.get(root); }
     catch { throw new IngestError('ADVANCED_UNAVAILABLE'); }
     const cfg={...this.settings.ingestion};
-    const allowed=():boolean=>!this.unloaded && this.layoutReady && this.settings.ingestion.enabled
+    const allowed=():boolean=>sourceCurrent() && this.layoutReady && this.settings.ingestion.enabled
       && JSON.stringify(this.settings.ingestion)===JSON.stringify(cfg)
-      && this.app.vault.getAbstractFileByPath(path) === file && file.path===path;
+      && this.app.vault.adapter===adapter && this.app.vault.getAbstractFileByPath(path) === file && file.path===path;
     if (!allowed()) throw new IngestError('ADVANCED_CANCELLED');
-    return this.advancedIngestion.ingest(cfg,root,this.manifest.id,path,allowed);
+    const result=await this.advancedIngestion.ingest(cfg,root,this.manifest.id,path,allowed);
+    if(!allowed())throw new IngestError('ADVANCED_CANCELLED');
+    return result;
   }
   /** Re-reads source bytes before returning any Advanced evidence to a caller. */
   async verifiedAdvancedResult(path: string): Promise<IngestResponse|null> {
+    const sourceRevision=this.searchController.sourceAuthorityRevision();
+    const sourceCurrent=()=>!this.denseSettingsChanging && this.searchController.sourceAuthorityCurrent(sourceRevision);
     const file=this.app.vault.getAbstractFileByPath(path);
-    if (!this.settings.ingestion.enabled || this.unloaded || !(file instanceof TFile)) return null;
+    if (!this.settings.ingestion.enabled || !sourceCurrent() || !(file instanceof TFile)) return null;
     const adapter=this.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter)) return null;
     try { await ingestionBarriers.get(resolve(adapter.getBasePath())); }
     catch { throw new IngestError('ADVANCED_UNAVAILABLE'); }
-    if (this.unloaded || !this.settings.ingestion.enabled || this.app.vault.adapter!==adapter
+    if (!sourceCurrent() || !this.settings.ingestion.enabled || this.app.vault.adapter!==adapter
         || this.app.vault.getAbstractFileByPath(path)!==file) return null;
     await this.advancedIngestion.recover(resolve(adapter.getBasePath()),this.manifest.id);
-    const allowed=()=>!this.unloaded && this.settings.ingestion.enabled
-      && this.app.vault.getAbstractFileByPath(path) === file && file.path===path;
-    return this.advancedIngestion.verified(path,allowed);
+    const allowed=()=>sourceCurrent() && this.settings.ingestion.enabled
+      && this.app.vault.adapter===adapter && this.app.vault.getAbstractFileByPath(path) === file && file.path===path;
+    const result=await this.advancedIngestion.verified(path,allowed);
+    return allowed()?result:null;
   }
   async indexAdvancedActiveFile(rebuild=false):Promise<void>{
     const file=this.app.workspace.getActiveFile();
@@ -441,39 +470,48 @@ export default class SyntheticEvidencePlugin extends Plugin {
     new Notice('OKS Advanced: real BGE-M3 index committed for '+file.name);
   }
   async indexAdvancedPath(path:string,rebuild=false):Promise<void>{
+    const sourceRevision=this.searchController.sourceAuthorityRevision();
+    const sourceCurrent=()=>!this.denseSettingsChanging && this.searchController.sourceAuthorityCurrent(sourceRevision);
     const adapter=this.app.vault.adapter;
     const file=this.app.vault.getAbstractFileByPath(path);
-    if(this.unloaded||!this.layoutReady||!this.settings.ingestion.enabled
+    if(!sourceCurrent()||!this.layoutReady||!this.settings.ingestion.enabled
        ||!(adapter instanceof FileSystemAdapter)||!(file instanceof TFile)||file.path!==path)
       throw new ModelError('SOURCE_REJECTED');
     const root=resolve(adapter.getBasePath());
     try { await ingestionBarriers.get(root); }
     catch { throw new ModelError('MODEL_UNAVAILABLE'); }
-    if(this.unloaded||!this.settings.ingestion.enabled||this.app.vault.adapter!==adapter
+    if(!sourceCurrent()||!this.settings.ingestion.enabled||this.app.vault.adapter!==adapter
        ||this.app.vault.getAbstractFileByPath(path)!==file)throw new ModelError('SOURCE_STALE');
     const cfg={...this.settings.ingestion};
-    const authorized=()=>!this.unloaded&&this.layoutReady&&this.settings.ingestion.enabled
+    const authorized=()=>sourceCurrent()&&this.layoutReady&&this.settings.ingestion.enabled
       &&JSON.stringify(this.settings.ingestion)===JSON.stringify(cfg)
       &&this.app.vault.getAbstractFileByPath(path)===file&&file.path===path;
-    if(!await this.verifiedAdvancedResult(path))await this.ingestAdvancedPath(path);
+    const verified=await this.verifiedAdvancedResult(path);
+    if(!authorized())throw new ModelError('SOURCE_STALE');
+    if(!verified)await this.ingestAdvancedPath(path);
     if(!authorized())throw new ModelError('SOURCE_STALE');
     await this.advancedRetrieval.index(cfg,root,this.manifest.id,path,authorized,rebuild);
+    if(!authorized())throw new ModelError('MODEL_CANCELLED');
   }
   async searchAdvanced(request:RetrievalRequest):Promise<RetrievalResponse>{
+    const sourceRevision=this.searchController.sourceAuthorityRevision();
+    const sourceCurrent=()=>!this.denseSettingsChanging && this.searchController.sourceAuthorityCurrent(sourceRevision);
     const adapter=this.app.vault.adapter;
-    if(this.unloaded||!this.layoutReady||!this.settings.ingestion.enabled
+    if(!sourceCurrent()||!this.layoutReady||!this.settings.ingestion.enabled
        ||!(adapter instanceof FileSystemAdapter))throw new ModelError('MODEL_UNAVAILABLE');
     const root=resolve(adapter.getBasePath());
     try { await ingestionBarriers.get(root); }
     catch { throw new ModelError('MODEL_UNAVAILABLE'); }
-    if(this.unloaded||!this.settings.ingestion.enabled||this.app.vault.adapter!==adapter)
+    if(!sourceCurrent()||!this.settings.ingestion.enabled||this.app.vault.adapter!==adapter)
       throw new ModelError('MODEL_UNAVAILABLE');
     const cfg={...this.settings.ingestion};
-    const authorized=(path:string):boolean=>this.layoutReady&&!this.unloaded
+    const authorized=(path:string):boolean=>this.layoutReady&&sourceCurrent()
       &&this.settings.ingestion.enabled
       &&JSON.stringify(this.settings.ingestion)===JSON.stringify(cfg)
       &&this.app.vault.getAbstractFileByPath(path) instanceof TFile;
-    return this.advancedRetrieval.search(cfg,root,this.manifest.id,request,authorized);
+    const result=await this.advancedRetrieval.search(cfg,root,this.manifest.id,request,authorized,sourceCurrent);
+    if(!sourceCurrent()&&result.status!=='failed')throw new ModelError('MODEL_CANCELLED');
+    return result;
   }
   openAdvancedSearch():void{
     if(!this.settings.ingestion.enabled){new Notice('Enable Advanced document ingestion first.');return;}
@@ -482,11 +520,13 @@ export default class SyntheticEvidencePlugin extends Plugin {
       ()=>JSON.stringify(this.advancedRetrieval.snapshot())).open();
   }
   async openAdvancedHit(hit:AdvancedEvidenceHit):Promise<void>{
+    const sourceRevision=this.searchController.sourceAuthorityRevision();
+    const sourceCurrent=()=>!this.denseSettingsChanging && this.searchController.sourceAuthorityCurrent(sourceRevision);
     const path=hit.vaultRelativeReference,file=this.app.vault.getAbstractFileByPath(path);
     const adapter=this.app.vault.adapter;
-    if(!(file instanceof TFile)||!(adapter instanceof FileSystemAdapter)||this.unloaded)
+    if(!(file instanceof TFile)||!(adapter instanceof FileSystemAdapter)||!sourceCurrent())
       throw new ModelError('SOURCE_STALE');
-    const authorized=()=>!this.unloaded&&this.settings.ingestion.enabled
+    const authorized=()=>sourceCurrent()&&this.settings.ingestion.enabled
       &&this.app.vault.getAbstractFileByPath(path)===file&&file.path===path;
     await this.advancedRetrieval.verifyHit(hit,path,authorized);
     const root=await trustedVaultRoot(resolve(adapter.getBasePath()));
@@ -502,6 +542,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     }else if(loc.locatorKind!=='native'||!loc.nativeItemRef)
       throw new ModelError('EVIDENCE_INVALID');
     const leaf=this.app.workspace.getLeaf('tab');
+    if(!authorized())throw new ModelError('SOURCE_STALE');
     await leaf.openFile(file,{active:true});
     await this.advancedRetrieval.verifyHit(hit,path,authorized);
     if(loc.locatorKind==='markdown'){
@@ -512,7 +553,9 @@ export default class SyntheticEvidencePlugin extends Plugin {
         throw new ModelError('SOURCE_STALE');
       const prefix=new TextDecoder('utf-8',{fatal:true}).decode(source.bytes.subarray(0,loc.byteStart!));
       const line=loc.lineStart!-1,ch=prefix.split(/\r\n|\r|\n/).at(-1)!.length;
+      if(!authorized())throw new ModelError('SOURCE_STALE');
       view.editor.setSelection({line,ch},{line,ch:ch+hit.originalExcerpt.length});
+      if(!authorized())throw new ModelError('SOURCE_STALE');
       view.editor.scrollIntoView({from:{line,ch},to:{line,ch:ch+hit.originalExcerpt.length}},true);
     }
     // PDF/DOCX: preserve the true native locator in the result; Obsidian's
@@ -520,7 +563,14 @@ export default class SyntheticEvidencePlugin extends Plugin {
   }
   async cancelAdvancedWork():Promise<void>{await this.advancedRetrieval.stop();}
   private stopIngestion(): Promise<void> {
-    return this.trackStorageDrain(this.advancedRetrieval.releaseStorage().then(()=>this.advancedIngestion.stop()));
+    // Both concrete managers must drain even when one rejects.
+    const stopping=Promise.allSettled([
+      Promise.resolve().then(()=>this.advancedRetrieval.releaseStorage()),
+      Promise.resolve().then(()=>this.advancedIngestion.stop()),
+    ]).then(results=>{
+      if(results.some(result=>result.status==='rejected'))throw new IngestError('ADVANCED_UNAVAILABLE');
+    });
+    return this.trackStorageDrain(stopping);
   }
   private trackStorageDrain(stopping: Promise<void>): Promise<void> {
     const adapter=this.app.vault.adapter;
@@ -630,33 +680,50 @@ export default class SyntheticEvidencePlugin extends Plugin {
       },
     });
   }
-  private async stopDenseHost(): Promise<void> {
-    // Callers have already retired shared authority through the controller
-    // (configure/detach/dispose). Do not retry a failed trusted hook outside
-    // that fault transaction, particularly during a persisted settings change.
+  private reserveDenseClose():{start:()=>void;drain:Promise<void>} {
     const host = this.denseHost;
-    if (host) {
-      // Publish the drain before losing ownership even after a failed UI hook.
-      // close() revokes synchronously; its rejected barrier stays closed.
-      const drain = this.trackStorageDrain(host.close());
-      this.denseHost = undefined;
-      await drain;
-    }
-    // A delayed drain must not revoke a newer owner. A later synchronous
-    // shared transition retries any retained retirement fence.
+    if (!host) return {start:()=>{},drain:Promise.resolve()};
+    // Reserve the barrier and detach the exact owner before any callback:
+    // abort callbacks can synchronously unload or instantiate a replacement.
+    let complete!:(value:PromiseLike<void>)=>void,fail!:(error:unknown)=>void;
+    const reserved=new Promise<void>((resolve,reject)=>{complete=resolve;fail=reject;});
+    const drain=this.trackStorageDrain(reserved);
+    this.denseHost=undefined;
+    let started=false;
+    return {drain,start:()=>{
+      if(started)return;
+      started=true;
+      try {complete(host.close());} catch(error){fail(error);}
+    }};
+  }
+  private async stopDenseHost(): Promise<void> {
+    const close=this.reserveDenseClose();
+    close.start();
+    await close.drain;
   }
   private async stopStandalone(): Promise<void> {
-    this.navigator?.dispose(); this.navigator = undefined; this.sourceReader = undefined;
-    this.searchController.detach();
-    const drain = this.stopDenseHost().catch(() => { /* storage barrier stays closed */ });
-    const engine = this.standalone; this.standalone = undefined;
-    if (!engine) { await drain; return; }
-    // Basic search owns a separate writer; an AI drain must not block its reload.
-    const closing = engine.close();
-    if (this.rootId) barriers.set(this.rootId, closing);
-    await closing;
-    if (this.rootId && barriers.get(this.rootId) === closing) barriers.delete(this.rootId);
-    await drain;
+    const navigator=this.navigator, engine=this.standalone, rootId=this.rootId;
+    this.navigator=undefined;this.sourceReader=undefined;this.standalone=undefined;
+    // Reserve Basic's writer barrier before any callback; retain rejected
+    // close, never substitute a new owner for an ambiguous old writer.
+    let complete!:(value:PromiseLike<void>)=>void,fail!:(error:unknown)=>void;
+    const closing=engine?new Promise<void>((resolve,reject)=>{complete=resolve;fail=reject;}):Promise.resolve();
+    if(engine&&rootId){
+      barriers.set(rootId,closing);
+      void closing.then(()=>{if(barriers.get(rootId)===closing)barriers.delete(rootId);},()=>{});
+    }
+    const dense=this.reserveDenseClose();
+    const drain=dense.drain.catch(()=>{/* AI storage barrier remains closed */});
+    let failure=false;
+    try {this.searchController.detach();} catch {failure=true;}
+    try {navigator?.dispose();} catch {failure=true;}
+    dense.start();
+    if(engine){
+      try {complete(engine.close());}catch(error){fail(error);}
+    }
+    const results=await Promise.allSettled([closing,drain]);
+    if(failure||results.some(result=>result.status==='rejected'))
+      throw new StandaloneError('INTERNAL_FAILURE');
   }
   private async runProbe(): Promise<void> {
     if (this.unloaded) return;

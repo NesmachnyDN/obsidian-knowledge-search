@@ -10,7 +10,7 @@ type Classification = 'synthetic' | 'public';
 type State = {phase:'idle'|'preparing'|'running'|'error'; error?:ProviderFailureCode}
   | {phase:'preview'; preview:DensePreview} | {phase:'complete'; result:Result};
 type Host = Pick<ApiDenseHost,'prepare'|'confirm'|'invalidate'>;
-type Port = {host():Host|undefined; revokeNavigation():void; navigate(hit:EvidenceHit):Promise<void>; sharedFence?():boolean};
+type Port = {host():Host|undefined; revokeNavigation():void; captureNavigationRetirement?():()=>void; navigate(hit:EvidenceHit):Promise<void>; sharedFence?():boolean};
 const errorCode=(error:unknown):ProviderFailureCode=>error instanceof ProviderFailure?error.code:'NOT_READY';
 
 /** One view-owned operation at a time; all other views observe revocation.
@@ -24,7 +24,7 @@ export class DenseUiController {
   private disposed=false;
   // An unsuccessful trusted retirement is retried on the next shared revoke;
   // never admit a new host operation while its previous authority is uncertain.
-  private retirement?: {host?:Host; running:boolean};
+  private retirement?: {host?:Host; navigation?:()=>void; running:boolean};
   readonly authority: DenseAuthority;
   private readonly listeners: ReturnType<DenseAuthority['channel']>;
   private machineChanged?: () => void;
@@ -81,13 +81,15 @@ export class DenseUiController {
       // An observer cannot turn a persistent retirement failure into an
       // unbounded notification wave. Retry only outside observer delivery.
       if(this.retirement&&this.authority.delivering())throw new ProviderFailure('NOT_READY');
-      const retiring={host:this.host??this.retirement?.host,running:true};
+      const retiring=this.retirement??{host:this.host,navigation:
+        this.port.captureNavigationRetirement?.()??(()=>this.port.revokeNavigation()),running:false};
+      retiring.running=true;
       this.clearTimer();this.host=undefined;this.owner=undefined;this.state={phase:'idle'};
       this.retirement=retiring;
       try {
         try {
           try {retiring.host?.invalidate();retiring.host=undefined;}
-          finally {this.port.revokeNavigation();}
+          finally {if(retiring.navigation){retiring.navigation();retiring.navigation=undefined;}}
         } finally {this.emit();}
         this.retirement=undefined;
       } finally {retiring.running=false;}

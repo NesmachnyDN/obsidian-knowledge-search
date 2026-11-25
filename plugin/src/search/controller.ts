@@ -50,6 +50,14 @@ export function propertyInput(key: string, valueType: string, operator: string, 
 type Engine = Pick<StandaloneEngine, 'search' | 'status' | 'cancel' | 'resume' | 'rebuild'>;
 // The concrete trusted owner is retained, not a callback resolving a mutable host.
 type RetirementTarget = { invalidate(): void };
+type RetirementObligation = {
+  kind: 'source' | 'evidence' | 'role'; revision: number; owner?: AbortController;
+  role?: EvidenceRole; running?: boolean;
+  run: () => void; attempted: boolean; failed?: boolean;
+};
+// One shared controller owns admission; obligations do not confer authority.
+// A bounded overflow is terminal-only: never silently discard freshness work.
+const MAX_RETIREMENT_OBLIGATIONS = 4096;
 type EvidenceRole = 'reranking' | 'generation';
 export const EVIDENCE_PREVIEW_TTL_MS = 300_000;
 export type RerankPreview = { role: EvidenceRole; sequence: number; revision: number; expiresUnixMs: number; config: ProviderConfig; scopeId: string; query: string; hits: EvidenceHit[]; runtimeProfileBinding?: string; runtimeProfileDigest?: string };
@@ -87,8 +95,53 @@ export class SearchController {
   private revokingSharedAuthority = false;
   private sharedResetDepth = 0;
   private runtimeSettingsChanging = false;
-  private pendingHostRetirement?: RetirementTarget;
-  private sharedAuthorityFault = false;
+  private readonly retirement: {
+    host?: RetirementTarget; sharedHookFault: boolean; obligations: RetirementObligation[];
+    running: boolean; sourceRunning: boolean; overflow: boolean;
+  } = {sharedHookFault:false,obligations:[],running:false,sourceRunning:false,overflow:false};
+  private sourceRevision = 0;
+  private sourceDrains = new Set<Promise<void>>();
+  private sourceDrainFailed = false;
+  /** An asynchronous owner cannot be considered retired on dispatch alone.
+   * A rejected drain is terminal-only; rebuild cannot prove process exit. */
+  trackSourceDrain(work:Promise<void>):void {
+    if(this.disposed){void work.catch(()=>{});return;}
+    if(this.sourceDrains.size>=MAX_RETIREMENT_OBLIGATIONS){
+      this.retirement.overflow=true;void work.catch(()=>{});return;
+    }
+    this.sourceDrains.add(work);
+    // An independently detected stale source may start retirement outside a
+    // Vault-event callback. Invalidate existing publication rights as well.
+    if(!this.retirement.running&&!this.retirement.sourceRunning)this.invalidateSource([]);
+    void work.then(()=>{
+      this.sourceDrains.delete(work);
+      if(!this.disposed)this.emit();
+    },()=>{
+      this.sourceDrains.delete(work);this.sourceDrainFailed=true;
+      if(!this.disposed){this.failRetirement();this.emit();}
+    });
+  }
+  private get pendingHostRetirement(): RetirementTarget | undefined { return this.retirement.host; }
+  private set pendingHostRetirement(value: RetirementTarget | undefined) { this.retirement.host = value; }
+  private get sourceRetirementPending(): boolean {
+    return this.retirement.sourceRunning || this.sourceDrains.size>0 || this.sourceDrainFailed || this.retirement.obligations.some(item => item.kind === 'source') || this.retirement.overflow;
+  }
+  private get explicitRetirementPending(): boolean {
+    return this.sourceRetirementPending || this.retirement.obligations.some(item => item.kind !== 'role' && (item.failed || !this.retirement.running));
+  }
+  private get sharedAuthorityFault(): boolean {
+    return this.retirement.sharedHookFault || this.explicitRetirementPending;
+  }
+  /** Runtime application cannot hand over source owners while concrete
+   * retirement work remains unresolved. Generic hook recovery is separate. */
+  assertSourceRetirementSettled():void {
+    if(this.explicitRetirementPending)throw new StandaloneError('INTERNAL_FAILURE');
+  }
+  /** Advanced source authorization is independent of ordinary lexical revisions. */
+  sourceAuthorityRevision(): number { return this.sourceRevision; }
+  sourceAuthorityCurrent(revision: number): boolean {
+    return !this.disposed && !this.sourceRetirementPending && revision === this.sourceRevision;
+  }
   private deliveringLifecycle = false;
   private evidencePending?: number;
   private lifecyclePending?: {revision:number; final:boolean; listeners:(() => void)[]};
@@ -112,8 +165,13 @@ export class SearchController {
     this.enabled = enabled; this.paused = paused; this.error = safeCode(error); this.invalidate();
   }
   detach(): void { if (this.disposed) return; this.engine = undefined; this.rerankProfiles.revoke(); this.invalidate(); }
-  status(): SearchStatus { return statusSnapshot(this.engine?.status(), !this.disposed && this.enabled, this.paused,
-    this.error, this.advancedStatus?.(), this.ingestionStatus?.()); }
+  status(): SearchStatus {
+    const failed = !this.disposed && this.sharedAuthorityFault;
+    const engine = this.engine?.status();
+    return statusSnapshot(failed && engine ? {...engine,status:'failed',generationId:null,error:'INTERNAL_FAILURE'} : engine,
+      !this.disposed && this.enabled, this.paused, failed ? 'INTERNAL_FAILURE' : this.error,
+      this.advancedStatus?.(), this.ingestionStatus?.());
+  }
   snapshot(): UiState {
     this.rerankProfiles.checkLifetime();
     this.currentPreview('reranking'); this.currentPreview('generation');
@@ -124,6 +182,7 @@ export class SearchController {
     if (role === 'reranking') this.rerankProfiles.checkLifetime();
     const pending = this.currentPreview(role);
     const state = role === 'reranking' ? this.state.rerank : this.state.generation;
+    if (this.roleRetirement(role)) return {phase:'failed',error:state?.error ?? 'NOT_READY'};
     if (state?.phase === 'running') return {phase:'busy',error:null};
     if (pending) return {phase:'permission-required',error:null};
     if (state?.phase === 'error') return {phase:'failed',error:state.error ?? 'NOT_READY'};
@@ -173,7 +232,7 @@ export class SearchController {
     this.drainNotifications();
   }
   private drainNotifications(continueWave = false): void {
-    if (this.notifying || this.revokingSharedAuthority) return;
+    if (this.notifying || this.revokingSharedAuthority || this.retirement.running || this.retirement.sourceRunning) return;
     this.notifying = true;
     if (!continueWave) this.waveAdditions = 0;
     const mutations = new Map<() => void, number>();
@@ -235,6 +294,9 @@ export class SearchController {
   }
   private emit(final = false, retireHost?: RetirementTarget, requireRetirement = false): void {
     if (this.disposed && !final) return;
+    if (!this.disposed && this.explicitRetirementPending && !this.retirement.running && !this.retirement.sourceRunning)
+      this.failRetirement();
+
     // A newer request must never replace an unresolved trusted retirement.
     // A reentrant retirement request is denied before it can acquire authority.
     if (requireRetirement && (this.revokingSharedAuthority || (this.sharedAuthorityFault && this.notifying)))
@@ -246,7 +308,7 @@ export class SearchController {
     if (!this.notifying && !this.revokingSharedAuthority) this.waveAdditions = 0;
     this.queueLifecycle();
     this.notificationVersion++;
-    if (this.revokingSharedAuthority || (this.sharedAuthorityFault && this.pendingHostRetirement && this.notifying)) return;
+    if (this.revokingSharedAuthority || this.retirement.running || this.retirement.sourceRunning || (this.sharedAuthorityFault && this.pendingHostRetirement && this.notifying)) return;
     this.revokingSharedAuthority = true;
     try {
       this.revokeSharedAuthority?.();
@@ -260,11 +322,11 @@ export class SearchController {
         retireHost.invalidate();
         this.pendingHostRetirement = undefined;
       }
-      this.sharedAuthorityFault = false;
+      this.retirement.sharedHookFault = false;
     } catch (error) {
       // A failed trusted hook is not an observer exception: no authority
       // can be issued until a later shared transition successfully revokes it.
-      this.sharedAuthorityFault = true;
+      this.retirement.sharedHookFault = true;
       if (!this.disposed) {
         this.pending?.resolve(failure('INTERNAL_FAILURE'));
         this.pending = undefined;
@@ -287,25 +349,84 @@ export class SearchController {
   /** Fence admission before observers or persistence can yield. Failed retirement
    * remains latched independently of the settings transaction's lifetime. */
   beginRuntimeSettingsChange(retire: RetirementTarget | undefined, revokeRerankProfile: boolean): void {
-    if (this.disposed || this.revokingSharedAuthority || (this.sharedAuthorityFault && this.notifying))
+    if (this.disposed || this.explicitRetirementPending || this.retirement.running || this.revokingSharedAuthority || (this.sharedAuthorityFault && this.notifying))
       throw new StandaloneError('INTERNAL_FAILURE');
     this.runtimeSettingsChanging = true;
+    ++this.sourceRevision;
     this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null});
     if (this.disposed) return;
     if (revokeRerankProfile) this.rerankProfiles.revoke();
     this.emit(false, retire, true);
+    if (this.explicitRetirementPending) throw new StandaloneError('INTERNAL_FAILURE');
   }
   endRuntimeSettingsChange(): void { this.runtimeSettingsChanging = false; }
   invalidate(): void { if (!this.disposed) this.invalidateState(); }
   /** Source-event retirement can itself synchronously call abort listeners.
    * Run it only after the same logical shared reset as lexical search. */
-  invalidateSource(retire: () => void): void {
+  invalidateSource(obligations: readonly (() => void)[]): void {
     if (this.disposed) return;
-    const revision = this.revision + 1;
-    try { this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null}, undefined, retire); }
-    finally { if (this.ownsRevision(revision)) this.emit(); }
+    const revision = ++this.sourceRevision;
+    for (const run of obligations) this.enqueueRetirement({kind:'source',revision,run,attempted:false});
+    // Nested source work joins the running wave. If the wave belongs to an
+    // ordinary shared reset, revoke any lexical reservation made in its callbacks.
+    if (this.retirement.sourceRunning) return;
+    if (this.retirement.running) {
+      this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null});
+      return;
+    }
+    this.transitionSourceRetirement(false);
   }
-  private resetSharedState(state: UiState, reserve?: (revision: number) => void, retireSource?: () => void): number {
+  private enqueueRetirement(obligation: RetirementObligation): void {
+    if (obligation.owner && this.retirement.obligations.some(item => item.owner === obligation.owner)) return;
+    if (this.retirement.obligations.length >= MAX_RETIREMENT_OBLIGATIONS) {
+      this.retirement.overflow = true;
+      return;
+    }
+    this.retirement.obligations.push(obligation);
+  }
+  private drainRetirements(): void {
+    if (this.retirement.running) return;
+    this.retirement.running = true;
+    try {
+      // Each concrete obligation is attempted at most once per bounded wave.
+      // Nested work may join it, but cannot recursively retry a failure.
+      for (let count = 0; count < MAX_RETIREMENT_OBLIGATIONS; count++) {
+        const obligation = this.retirement.obligations.find(item => !item.attempted && !item.running && (item.kind !== 'role' || this.disposed));
+        if (!obligation) break;
+        obligation.attempted = true;
+        if (this.disposed && obligation.kind === 'source') continue;
+        try {
+          obligation.run();
+          const index = this.retirement.obligations.indexOf(obligation);
+          if (index >= 0) this.retirement.obligations.splice(index,1);
+        } catch {
+          obligation.failed = true;
+          console.warn('SEARCH_RETIREMENT_OBLIGATION_FAILED',obligation.kind);
+        }
+      }
+    } finally {
+      this.retirement.running = false;
+      if (this.disposed) {
+        // Terminal owners are drained independently by the plugin's existing
+        // storage, persistence and bounded operation barriers.
+        this.retirement.obligations.length = 0;
+        this.retirement.overflow = false;
+      }
+    }
+  }
+  private transitionSourceRetirement(retry: boolean): void {
+    if (this.disposed || this.retirement.running || this.retirement.sourceRunning) return;
+    this.retirement.sourceRunning = true;
+    try {
+      if (retry) for (const obligation of this.retirement.obligations) obligation.attempted = false;
+      this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null});
+    } finally {
+      this.retirement.sourceRunning = false;
+      if (!this.disposed) this.emit();
+      else this.drainNotifications();
+    }
+  }
+  private resetSharedState(state: UiState, reserve?: (revision: number) => void): number {
     const revision = ++this.revision;
     this.sharedResetDepth++;
     try {
@@ -316,14 +437,24 @@ export class SearchController {
       this.pending?.resolve(failure('SUPERSEDED')); this.pending = undefined;
       this.state = state;
       reserve?.(revision);
-      this.revokeEvidence(retireSource);
+      this.revokeEvidence();
+      if (!this.disposed && !this.retirement.running && (this.retirement.obligations.some(item => item.kind !== 'role') || this.retirement.overflow))
+        this.failRetirement();
       return revision;
     } finally {
       this.sharedResetDepth--;
       // A nested search may already have published, but dispatch must wait
       // for the outermost abort wave to finish.
-      if (this.revision !== revision) void this.pump();
+      if (this.revision !== revision && !this.sharedResetDepth && !this.retirement.running && !this.retirement.sourceRunning) {
+        // Nested publication was reserved while callbacks were still running.
+        if (this.disposed) this.drainNotifications();
+        else this.emit();
+      }
     }
+  }
+  private failRetirement(): void {
+    this.pending?.resolve(failure('INTERNAL_FAILURE')); this.pending = undefined;
+    this.state = {phase:'error',message:'INTERNAL_FAILURE',response:null};
   }
   private ownsRevision(revision: number): boolean {
     return !this.disposed && this.revision === revision;
@@ -343,6 +474,7 @@ export class SearchController {
     try { request = parseSearch(input); } catch { return failure('INVALID_REQUEST'); }
     if (this.disposed || !this.enabled) return failure('DISABLED');
     if (this.runtimeSettingsChanging) return failure('SUPERSEDED');
+    if (this.explicitRetirementPending) return failure('INTERNAL_FAILURE');
     if (this.sharedAuthorityFault && this.pendingHostRetirement && this.notifying) return failure('INTERNAL_FAILURE');
     if (!this.engine) return failure(this.error ?? 'INDEX_UNAVAILABLE');
     if (this.sharedResetDepth && this.sharedAuthorityFault) return failure('INTERNAL_FAILURE');
@@ -442,7 +574,7 @@ export class SearchController {
     this.notifyExpiry();
   }
   private prepareEvidence(role: EvidenceRole): RerankPreview {
-    if (this.sharedAuthorityTransition()) throw new ProviderFailure('NOT_READY');
+    if (this.sharedAuthorityTransition() || this.roleRetirement(role)) throw new ProviderFailure('NOT_READY');
     // Replacing consent is a single commit. In particular no observer can
     // prepare another preview between clearing the old timer and owning the new one.
     const removed = this.clearPreview(role);
@@ -487,16 +619,44 @@ export class SearchController {
       if (changed) this.emitEvidence();
     }
   }
-  private revokeEvidence(retireSource?: () => void): void {
-    const aborts: AbortController[] = [];
-    for (const r of ['reranking','generation'] as const) {
-      this.clearPreview(r);
-      const active = this.activeEvidence[r];
-      if (active) aborts.push(active.abort);
+  private revokeEvidence(): void {
+    for (const role of ['reranking','generation'] as const) {
+      this.clearPreview(role);
+      const active = this.activeEvidence[role];
+      if (active) {
+        cancelActiveDeadline(active.context);
+        const owner = active.abort;
+        this.enqueueRetirement({kind:'evidence',revision:active.revision,owner,attempted:false,run:()=>owner.abort()});
+      }
     }
-    // Clear both previews and pin the old owners before any callback.
-    try { retireSource?.(); }
-    finally { for (const abort of aborts) abort.abort(); }
+    // All previews and both elapsed-time budgets are retired before any
+    // physical callback. The same bounded ledger retains failed source work
+    // and pinned evidence aborts; successful unrelated work cannot clear it.
+    this.drainRetirements();
+  }
+  private roleRetirement(role: EvidenceRole): RetirementObligation | undefined {
+    return this.retirement.obligations.find(item => item.kind === 'role' && item.role === role);
+  }
+  private retireRoleAbort(role: EvidenceRole, active: ActiveEvidenceOperation | undefined, explicit: boolean): void {
+    let item = this.roleRetirement(role);
+    if (!item && active) {
+      // A shared transition already owns this abort; do not retry it from a role callback.
+      if (this.retirement.obligations.some(obligation => obligation.owner === active.abort)) return;
+      const owner = active.abort;
+      item = {kind:'role',role,revision:active.revision,owner,run:()=>owner.abort(),attempted:false};
+      this.enqueueRetirement(item);
+    }
+    if (!item || item.running || this.retirement.running ||
+        (item.attempted && (!explicit || this.notifying || this.revokingSharedAuthority))) return;
+    item.attempted = true; item.running = true;
+    try {
+      item.run();
+      const index = this.retirement.obligations.indexOf(item);
+      if (index >= 0) this.retirement.obligations.splice(index,1);
+    } catch {
+      item.failed = true;
+      console.warn('SEARCH_RETIREMENT_OBLIGATION_FAILED','role');
+    } finally { item.running = false; }
   }
   // Role-local revocation and explicit cancellation use the same deadline
   // authority as the worker. A new pending preview is a distinct operation.
@@ -509,18 +669,22 @@ export class SearchController {
     const key = role === 'reranking' ? 'rerank' : 'generation';
     const previous = this.state[key];
     const current = active?.revision === this.revision ? active : undefined;
-    if (!hadPreview && !previous && !current) { active?.abort.abort(); return false; }
+    if (!hadPreview && !previous && !current) {
+      const retiring = this.roleRetirement(role);
+      this.retireRoleAbort(role,active,explicit);
+      return !!retiring && !this.roleRetirement(role);
+    }
     const error = current
       ? cancelActiveDeadline(current.context).code
       : !hadPreview && previous?.error === 'TIMEOUT' ? 'TIMEOUT' : 'CANCELLED';
     if (!hadPreview && previous?.phase === 'error' && previous.error === error) {
       // Keep historical standalone cancel notifications (and worker settlement),
       // but a listener cleaning up this same terminal snapshot is a no-op.
-      active?.abort.abort();
+      this.retireRoleAbort(role,active,explicit);
       return this.ownsRevision(revision) && explicit && !this.notifying;
     }
     this.state = {...this.state,[key]:{phase:'error',error,hits:[]}};
-    active?.abort.abort();
+    this.retireRoleAbort(role,active,explicit);
     return this.ownsRevision(revision);
   }
   private cancelEvidence(role: EvidenceRole): void {
@@ -535,7 +699,7 @@ export class SearchController {
     return this.confirmEvidence('generation',preview,classification,token);
   }
   private async confirmEvidence(role: EvidenceRole, preview: RerankPreview, classification: 'synthetic' | 'public', token: string): Promise<void> {
-    if (this.sharedAuthorityTransition()) throw new ProviderFailure('DISCLOSURE_DENIED');
+    if (this.sharedAuthorityTransition() || this.roleRetirement(role)) throw new ProviderFailure('DISCLOSURE_DENIED');
     const approved = this.currentPreview(role,false)?.preview;
     if (!approved) throw new ProviderFailure('DISCLOSURE_DENIED');
     this.clearPreview(role);
@@ -610,8 +774,20 @@ export class SearchController {
     }
   }
   control(action: 'pause' | 'cancel' | 'resume' | 'rebuild', retireHost?: RetirementTarget): ApiResult<{ cancelled: boolean | null }> {
-    if (this.disposed || !this.enabled || !this.engine) return failure('DISABLED');
-    if (this.runtimeSettingsChanging || this.sharedResetDepth || this.revokingSharedAuthority) return failure('SUPERSEDED');
+    if (this.disposed) return failure('DISABLED');
+    if (this.sharedResetDepth || this.retirement.running || this.revokingSharedAuthority) return failure('SUPERSEDED');
+    if (this.explicitRetirementPending) {
+      // Rebuild is the explicit source-freshness recovery action; ordinary
+      // search, settings changes and observer publication cannot retry it.
+      if (action !== 'rebuild' || this.notifying || this.retirement.sourceRunning || this.sourceDrains.size || this.sourceDrainFailed || this.retirement.overflow)
+        return failure('INTERNAL_FAILURE');
+      const revision = this.revision + 1;
+      this.transitionSourceRetirement(true);
+      if (this.disposed || this.revision !== revision) return failure('SUPERSEDED');
+      if (this.sharedAuthorityFault) return failure('INTERNAL_FAILURE');
+    }
+    if (this.runtimeSettingsChanging) return failure('SUPERSEDED');
+    if (!this.enabled || !this.engine) return failure('DISABLED');
     if (this.sharedAuthorityFault && this.pendingHostRetirement && this.notifying) return failure('INTERNAL_FAILURE');
     const engine = this.engine, revision = this.revision + 1;
     try { this.invalidateState(false, retireHost, true); }
@@ -619,6 +795,7 @@ export class SearchController {
     // The initial shared invalidation is synchronous. Do not execute a stale
     // control command after an observer supersedes its revision or detaches.
     if (this.disposed || this.revision !== revision || this.engine !== engine) return failure('SUPERSEDED');
+    if (this.sharedAuthorityFault) return failure('INTERNAL_FAILURE');
     try {
       const pause = action === 'pause' || action === 'cancel';
       const cancelled = pause ? engine.cancel() : (engine[action](), null);
@@ -651,6 +828,10 @@ export class SearchController {
     this.terminalRetired = true;
     // Abort can synchronously invoke listeners; every old publication right
     // and both consent capabilities have already been revoked.
+    // Terminal disposal stops source-owner processing but must still attempt
+    // both pinned evidence aborts, even if unload reenters an active wave.
+    this.retirement.obligations = this.retirement.obligations.filter(item => item.kind !== 'source');
+    for (const item of this.retirement.obligations) item.attempted = false;
     try { this.revokeEvidence(); }
     finally { this.emit(true); }
   }

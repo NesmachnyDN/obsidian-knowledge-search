@@ -11,6 +11,8 @@ export class DenseAuthority {
   private revision = 0;
   private notifying = false;
   private additions = 0;
+  // At most one retired machine slot may exist: no admission while it is pinned.
+  private machineRetirement?: {run:()=>void; running:boolean};
   private readonly pending = new Set<Channel>();
   private readonly retired = new Set<Channel>();
   private readonly channels = new Set<Channel>();
@@ -25,7 +27,7 @@ export class DenseAuthority {
     this.revision++;
   }
   terminal(): boolean { return this.terminalClosed; }
-  revoking(): boolean { return this.terminalClosed || this.revocations > 0 || this.sharedFence(); }
+  revoking(): boolean { return this.terminalClosed || this.revocations > 0 || !!this.machineRetirement || this.sharedFence(); }
   epoch(): number { return this.revision; }
   /** Logical ownership ends at the shared fence, before physical retirement
    * can invoke abort callbacks. Ordinary observer delivery may read snapshots. */
@@ -41,6 +43,18 @@ export class DenseAuthority {
     this.revocations++; this.revision++;
     try { return this.batch(action); }
     finally { this.revocations--; }
+  }
+  /** D8 physical abort is separate from logical slot removal. Retain the
+   * exact abort owner across an exception; only an external retirement retries. */
+  retireMachine(run?:()=>void):void {
+    const fresh=!!run && !this.machineRetirement;
+    if(fresh)this.machineRetirement={run:run!,running:false};
+    const retiring=this.machineRetirement;
+    if(!retiring)return;
+    if(retiring.running || (!fresh && this.notifying))throw new Error('DENSE_MACHINE_RETIREMENT_PENDING');
+    retiring.running=true;
+    try {retiring.run();this.machineRetirement=undefined;}
+    finally {retiring.running=false;}
   }
   subscribe(channel: Channel, listener: Listener): () => void {
     if (this.terminalClosed || !this.channels.has(channel) || this.retired.has(channel) || this.quarantined.has(listener)) return () => {};

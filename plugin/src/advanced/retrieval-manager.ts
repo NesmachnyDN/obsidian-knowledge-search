@@ -25,7 +25,8 @@ export class AdvancedRetrievalManager {
   private revision=0;
   private disposed=false;
   private status:RetrievalStatus=initial();
-  constructor(private readonly ingestion:AdvancedIngestionManager){}
+  constructor(private readonly ingestion:AdvancedIngestionManager,
+    private readonly trackRetirement:(work:Promise<void>)=>void=()=>{}){}
   snapshot():RetrievalStatus{return {...this.status};}
   private refresh():void{
     const generation=this.store?.snapshot();
@@ -33,18 +34,30 @@ export class AdvancedRetrievalManager {
     this.status.indexedChunks=generation?.entries.reduce((n,e)=>n+e.chunkIds.length,0)??0;
   }
   invalidate(path:string):void{
-    const affected=this.store?.snapshot()?.entries.some(e=>e.sourcePath===path
-      ||e.sourcePath.startsWith(path+'/'))??false;
-    if(affected||this.activePath===path||this.active){
-      ++this.revision;
-      this.controller?.abort();
-      if(this.active)void this.ingestion.runner.stop().catch(()=>{
-        this.status={...this.status,status:'failed',error:'MODEL_UNAVAILABLE',dense:'failed'};
-      });
+    const store=this.store, owner=this.controller, active=this.active;
+    // Revoke publication before either store or abort callback can reenter.
+    if(active)++this.revision;
+    try {
+      let affected=false;
+      try {affected=store?.snapshot()?.entries.some(e=>e.sourcePath===path
+        ||e.sourcePath.startsWith(path+'/'))??false;}
+      finally {store?.revoke(path);}
+      this.refresh();
+      if(affected){this.status.dense='not-ready';this.status.status='unavailable';}
+    } finally {
+      if(active){
+        try {owner?.abort();}
+        finally {
+          const work=Promise.allSettled([this.ingestion.runner.stop(),active]).then(([stopping])=>{
+            if(stopping.status==='rejected')throw new ModelError('MODEL_UNAVAILABLE');
+          });
+          this.trackRetirement(work);
+          void work.catch(()=>{
+            this.status={...this.status,status:'failed',error:'MODEL_UNAVAILABLE',dense:'failed'};
+          });
+        }
+      }
     }
-    this.store?.revoke(path);
-    this.refresh();
-    if(affected){this.status.dense='not-ready';this.status.status='unavailable';}
   }
   private async recover(rootPath:string,pluginId:string):Promise<void>{
     if(this.disposed)throw new ModelError('MODEL_UNAVAILABLE');
@@ -118,6 +131,7 @@ export class AdvancedRetrievalManager {
         };
         await check();
         await this.store!.publish(entry,identity,check,abort.signal,rebuild);
+        stillActive();
         this.refresh();
         this.status={...this.status,status:'indexed',error:null,dense:'not-ready',lexical:'ready'};
       }catch(error){
@@ -131,7 +145,8 @@ export class AdvancedRetrievalManager {
       if(this.controller===abort)this.controller=undefined;this.activePath=undefined;}
   }
   async search(config:IngestionConfig,rootPath:string,pluginId:string,
-    request:RetrievalRequest,authorized:(path:string)=>boolean):Promise<RetrievalResponse>{
+    request:RetrievalRequest,authorized:(path:string)=>boolean,
+    current:()=>boolean=()=>true):Promise<RetrievalResponse>{
     validateAdvancedQuery(request);
     if(this.disposed||!config.enabled)throw new ModelError('MODEL_UNAVAILABLE');
     if(this.active)throw new ModelError('MODEL_BUSY');
@@ -140,9 +155,10 @@ export class AdvancedRetrievalManager {
     const job=(async()=>{
       try{
         const stillActive=()=>{
-          if(abort.signal.aborted||revision!==this.revision||!config.enabled)
+          if(abort.signal.aborted||revision!==this.revision||!config.enabled||!current())
             throw new ModelError('MODEL_CANCELLED');
         };
+        stillActive();
         await this.recover(rootPath,pluginId);
         stillActive();
         await this.ingestion.recover(rootPath,pluginId);
@@ -162,9 +178,10 @@ export class AdvancedRetrievalManager {
             throw new ModelError('MODEL_INCOMPATIBLE');
           queryVector=reply.vectors[0]!;
         }
-        if(abort.signal.aborted||revision!==this.revision)throw new ModelError('MODEL_CANCELLED');
+        stillActive();
         // No stale/renamed/modified source can be handed out after expensive inference.
         const after=await this.ingestion.verifiedAll(authorized);
+        stillActive();
         const fingerprint=(documents:IngestResponse[])=>canonical(documents.map(d=>
           [d.source?.sourceId,d.source?.sha256,d.generationId,d.chunks.map(c=>c.chunkId)]).sort());
         if(fingerprint(before.documents)!==fingerprint(after.documents)
@@ -226,8 +243,15 @@ export class AdvancedRetrievalManager {
       throw new ModelError('SOURCE_STALE');
   }
   async stop():Promise<void>{
-    ++this.revision;this.controller?.abort();
-    try{await this.ingestion.runner.stop();await this.active?.catch(()=>{});this.status=initial();}
+    ++this.revision;
+    try{
+      const active=this.active;
+      try{this.controller?.abort();}finally{
+        const [stopping]=await Promise.allSettled([this.ingestion.runner.stop(),active]);
+        if(stopping.status==='rejected')throw new ModelError('MODEL_UNAVAILABLE');
+      }
+      this.status=initial();
+    }
     catch{this.status={...this.status,status:'failed',error:'MODEL_UNAVAILABLE'};
       throw new ModelError('MODEL_UNAVAILABLE');}
   }

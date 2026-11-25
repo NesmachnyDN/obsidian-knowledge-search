@@ -1659,3 +1659,401 @@ test('B-R2-LIFE-16: source event dense abort cannot expose lexical evidence or o
     await p.standalone!.whenIdle();assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
   }finally{await f.cleanup();}
 });
+
+const sourceRetirementLabels=['lexical:new.md','lexical:fixture.md','dense:new.md,fixture.md',
+  'ingestion:new.md','retrieval:new.md','ingestion:fixture.md','retrieval:fixture.md'] as const;
+for(const label of sourceRetirementLabels) for(const afterEffect of [false,true]){
+  test('LIFE-17 source transaction: '+label+' fault '+(afterEffect?'after':'before')+' side effect',async()=>{
+    const f=await fixture(),p=f.plugin,c=p.searchController;
+    const events=new Map<string,(changed:{path:string},oldPath?:string)=>void>();
+    const file=Object.assign(new Empty(),{path:'fixture.md'});
+    Object.assign(p.app.vault,{getMarkdownFiles:()=>[file],getAbstractFileByPath:(path:string)=>path===file.path?file:null,
+      on:(name:string,callback:(changed:{path:string},oldPath?:string)=>void)=>{events.set(name,callback);return {};}});
+    const calls:string[]=[],observations:boolean[]=[],nested:ReturnType<typeof c.search>[]=[];
+    let fault=true,inside=false;
+    try{
+      await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
+      await p.patchSettings(s=>{s.ai.generation=reloadFixtureConfig;s.ai.embedding=reloadFixtureConfig;});
+      assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+      const preview=c.prepareGeneration();
+      const {denseHost,denseUi}=p as unknown as {denseHost:ApiDenseHost;denseUi:DenseUiController};
+      const owner=Symbol('retirement');
+      const space:EmbeddingSpace={...reloadFixtureConfig.identity,dimension:3,normalization:'unit-l2',
+        serializationId:'utf8-verbatim-v1',queryInstructionId:'identity-v1',documentInstructionId:'identity-v1'};
+      await denseUi.prepare(owner,{kind:'rebuild',paths:['fixture.md'],space});
+      assert.equal(denseUi.snapshot(owner).phase,'preview');
+      const epoch=c.sourceAuthorityRevision();
+      const wrap=(name:string,effect:()=>void):void=>{
+        if(name==='dense:'){effect();return;} // generic host retirement is not a source-path obligation
+        calls.push(name);
+        observations.push(c.sharedAuthorityTransition()&&!c.sourceAuthorityCurrent(epoch)
+          &&c.snapshot().response===null&&!c.isEvidencePreviewCurrent('generation',preview.sequence)&&!denseUi.owns(owner));
+        if(name===label&&fault){
+          if(afterEffect)effect();
+          if(!inside){
+            inside=true;
+            nested.push(c.search(uiRequest('nested',1)));
+            assert.equal(c.control('rebuild').ok,false);
+            c.invalidate();
+            inside=false;
+          }
+          throw Error('synthetic retirement failure');
+        }
+        effect();
+      };
+      const engine=p.standalone!,changed=engine.changed.bind(engine),dense=denseHost.invalidateSources.bind(denseHost);
+      const ingest=p.advancedIngestion.invalidate.bind(p.advancedIngestion),retrieve=p.advancedRetrieval.invalidate.bind(p.advancedRetrieval);
+      engine.changed=(path?:string)=>wrap('lexical:'+path,()=>changed(path));
+      denseHost.invalidateSources=paths=>wrap('dense:'+paths.join(','),()=>dense(paths));
+      p.advancedIngestion.invalidate=path=>wrap('ingestion:'+path,()=>ingest(path));
+      p.advancedRetrieval.invalidate=path=>wrap('retrieval:'+path,()=>retrieve(path));
+      events.get('rename')!({path:'new.md'},'fixture.md');
+      assert.deepEqual(calls,sourceRetirementLabels);
+      assert.ok(observations.every(Boolean));
+      assert.equal(c.sharedAuthorityTransition(),true);
+      assert.equal(c.snapshot().phase,'error');
+      assert.equal((await navigationWatchdog(nested[0]!)).ok,false);
+      assert.equal((await c.search(uiRequest('denied',1))).ok,false);
+      c.invalidate();assert.equal(c.snapshot().phase,'error');
+      await assert.rejects(p.patchSettings(s=>{s.topK=2;}),/INTERNAL_FAILURE/);
+      assert.deepEqual(calls,sourceRetirementLabels);
+      assert.equal(c.control('rebuild').ok,false);
+      assert.deepEqual(calls,[...sourceRetirementLabels,label]);
+      fault=false;
+      assert.equal(c.control('rebuild').ok,true);
+      assert.deepEqual(calls.slice(0,sourceRetirementLabels.length+2),[...sourceRetirementLabels,label,label]);
+      assert.equal(c.sharedAuthorityTransition(),false);
+      assert.equal(c.sourceAuthorityCurrent(epoch),false);
+      assert.equal(c.sourceAuthorityCurrent(c.sourceAuthorityRevision()),true);
+      assert.equal(c.isEvidencePreviewCurrent('generation',preview.sequence),false);
+      await engine.whenIdle();
+      assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    }finally{fault=false;await f.cleanup();}
+  });
+}
+
+test('LIFE-17 nested source event retains multiple failed obligations; terminal unload seals before callbacks',async()=>{
+  const f=await fixture(),p=f.plugin,c=p.searchController;
+  const events=new Map<string,(changed:{path:string},oldPath?:string)=>void>();
+  Object.assign(p.app.vault,{on:(name:string,callback:(changed:{path:string},oldPath?:string)=>void)=>{events.set(name,callback);return {};}});
+  const calls:string[]=[];let nest=true,fail=true;
+  try{
+    await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
+    const engine=p.standalone!,original=engine.changed.bind(engine);
+    engine.changed=path=>{
+      calls.push(String(path));
+      assert.equal(c.sharedAuthorityTransition(),true);
+      if(nest){nest=false;events.get('modify')!({path:'nested.md'});}
+      if(fail&&(path==='new.md'||path==='nested.md'))throw Error('synthetic');
+      original(path);
+    };
+    events.get('rename')!({path:'new.md'},'fixture.md');
+    assert.deepEqual(calls,['new.md','fixture.md','nested.md']);
+    assert.equal(c.sharedAuthorityTransition(),true);
+    assert.equal(c.control('rebuild').ok,false);
+    assert.deepEqual(calls,['new.md','fixture.md','nested.md','new.md','nested.md']);
+    fail=false;
+    engine.changed=path=>{calls.push(String(path));p.onunload();};
+    assert.equal(c.control('rebuild').ok,false);
+    assert.equal(c.sharedAuthorityTransition(),true);
+    assert.equal((await c.search(uiRequest('terminal',1))).ok,false);
+    assert.equal(c.sourceAuthorityCurrent(c.sourceAuthorityRevision()),false);
+    assert.deepEqual(calls,['new.md','fixture.md','nested.md','new.md','nested.md','new.md']);
+  }finally{await f.cleanup();}
+});
+
+test('LIFE-17 shared retirement retains failed evidence abort and attempts independent sibling',async()=>{
+  const f=await fixture(),p=f.plugin,c=p.searchController;
+  const gate=deferredDrain(),entered=deferredDrain();
+  let reads=0,http=0,fault=true;
+  const calls:string[]=[],active:Promise<void>[]=[];
+  const server=createServer((_req,res)=>{http++;res.writeHead(500);res.end();});
+  try{
+    await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
+    const addr=server.address();assert.ok(addr&&typeof addr!=='string');
+    const cfg={...reloadFixtureConfig,origin:'http://127.0.0.1:'+addr.port};
+    await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
+    await p.patchSettings(s=>{s.ai.generation=cfg;s.ai.reranking=cfg;});
+    const profiles=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof cfg,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
+    profiles.rerankProfiles.installSyntheticFixture(cfg,profiles.rerankPort.scopeId(),'shared-abort-fault');
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    const g=c.prepareGeneration(),r=c.prepareRerank();
+    Object.assign(p,{verifyAiEvidence:async()=>{if(++reads===2)entered.release();await gate.promise;}});
+    active.push(c.generationConfirmed(g,'synthetic','fixture'),c.rerankConfirmed(r,'synthetic','fixture'));
+    await navigationWatchdog(entered.promise);
+    const {activeEvidence}=c as unknown as {activeEvidence:Record<'generation'|'reranking',{abort:AbortController}>};
+    for(const role of ['reranking','generation'] as const){
+      const owner=activeEvidence[role].abort,original=owner.abort.bind(owner);
+      owner.abort=()=>{
+        calls.push(role);
+        assert.equal(c.sharedAuthorityTransition(),true);
+        assert.equal(c.snapshot().response,null);
+        assert.equal(c.isEvidencePreviewCurrent('generation',g.sequence),false);
+        assert.equal(c.isEvidencePreviewCurrent('reranking',r.sequence),false);
+        if(role==='reranking'&&fault)throw Error('synthetic abort retirement fault');
+        original();
+      };
+    }
+    c.invalidate();
+    assert.deepEqual(calls,['reranking','generation']);
+    assert.equal(c.sharedAuthorityTransition(),true);
+    assert.equal(c.snapshot().phase,'error');
+    assert.equal(c.status().status,'failed');
+    assert.equal((await c.search(uiRequest('blocked',1))).ok,false);
+    gate.release();await navigationWatchdog(Promise.all(active));assert.equal(http,0);
+    assert.equal(c.control('rebuild').ok,false);
+    assert.deepEqual(calls,['reranking','generation','reranking']);
+    fault=false;assert.equal(c.control('rebuild').ok,true);
+    assert.deepEqual(calls,['reranking','generation','reranking','reranking']);
+    await p.standalone!.whenIdle();
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+  }finally{
+    fault=false;gate.release();await Promise.allSettled(active);await f.cleanup();
+    await new Promise<void>(resolve=>server.close(()=>resolve()));
+  }
+});
+
+for(const failedPath of ['new.md','fixture.md'])test('LIFE-17 dense store retirement attempts both paths despite '+failedPath+' fault',async()=>{
+  const f=await fixture(),p=f.plugin,c=p.searchController;
+  const events=new Map<string,(changed:{path:string},oldPath?:string)=>void>();
+  Object.assign(p.app.vault,{on:(name:string,callback:(changed:{path:string},oldPath?:string)=>void)=>{events.set(name,callback);return {};}});
+  const calls:string[]=[];let fault=true;
+  try{
+    await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
+    const host=(p as unknown as {denseHost:{store?:{revoke(path:string):void}}}).denseHost;
+    const previous=host.store;
+    host.store={revoke(path){
+      calls.push(path);assert.equal(c.sharedAuthorityTransition(),true);
+      if(fault&&path===failedPath)throw Error('synthetic store retirement failure');
+    }};
+    try{
+      events.get('rename')!({path:'new.md'},'fixture.md');
+      assert.deepEqual(calls,['new.md','fixture.md']);
+      assert.equal(c.sharedAuthorityTransition(),true);
+      assert.equal(c.status().status,'failed');
+      assert.equal((await c.search(uiRequest('denied',1))).ok,false);
+      fault=false;assert.equal(c.control('rebuild').ok,true);
+      assert.deepEqual(calls,['new.md','fixture.md','new.md','fixture.md']);
+      assert.equal(c.sharedAuthorityTransition(),false);
+    }finally{host.store=previous;}
+  }finally{await f.cleanup();}
+});
+
+for(const role of ['reranking','generation'] as const)
+test('systemic role-local failed abort preserves independent role and Basic: '+role,async()=>{
+  const f=await fixture(),p=f.plugin,c=p.searchController;
+  const gate=deferredDrain(),entered=deferredDrain();
+  const server=createServer((_req,res)=>{res.writeHead(500);res.end();});
+  let active:Promise<void>|undefined,fault=true,attempts=0;
+  try{
+    await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
+    const addr=server.address();assert.ok(addr&&typeof addr!=='string');
+    const cfg={...reloadFixtureConfig,origin:'http://127.0.0.1:'+addr.port};
+    await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
+    await p.patchSettings(s=>{s.ai.generation=cfg;s.ai.reranking=cfg;});
+    const profiles=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof cfg,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
+    profiles.rerankProfiles.installSyntheticFixture(cfg,profiles.rerankPort.scopeId(),'local-abort-fault');
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    const generation=c.prepareGeneration(),reranking=c.prepareRerank();
+    const other=role==='generation'?'reranking':'generation',otherPreview=role==='generation'?reranking:generation;
+    const cancel=()=>role==='generation'?c.cancelGeneration():c.cancelRerank();
+    Object.assign(p,{verifyAiEvidence:async()=>{entered.release();await gate.promise;}});
+    active=role==='generation'?c.generationConfirmed(generation,'synthetic','fixture'):c.rerankConfirmed(reranking,'synthetic','fixture');
+    await navigationWatchdog(entered.promise);
+    const {activeEvidence}=c as unknown as {activeEvidence:Record<typeof role,{abort:AbortController}>};
+    const owner=activeEvidence[role].abort,original=owner.abort.bind(owner);
+    owner.abort=()=>{
+      attempts++;
+      assert.equal(c.sharedAuthorityTransition(),false);
+      if(fault){cancel();throw Error('synthetic role-local abort fault');}
+      original();
+    };
+    cancel();assert.equal(attempts,1);
+    assert.equal(c.isEvidencePreviewCurrent(other,otherPreview.sequence),true);
+    assert.equal(c.sharedAuthorityTransition(),false);
+    assert.equal(c.evidenceOperationStatus(role).phase,'failed');
+    gate.release();await navigationWatchdog(active);
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    assert.equal(attempts,1);
+    assert.throws(()=>role==='generation'?c.prepareGeneration():c.prepareRerank(),/NOT_READY/);
+    cancel();assert.equal(attempts,2);
+    fault=false;cancel();assert.equal(attempts,3);
+    assert.ok(role==='generation'?c.prepareGeneration():c.prepareRerank());
+  }finally{
+    fault=false;gate.release();await active?.catch(()=>{});await f.cleanup();
+    await new Promise<void>(resolve=>server.close(()=>resolve()));
+  }
+});
+
+for(const failed of [false,true])
+test('systemic Advanced asynchronous source drain fences shared admission and reload: '+failed,async()=>{
+  const f=await fixture(),p=f.plugin,c=p.searchController,gate=deferredDrain();
+  const events=new Map<string,(file:{path:string})=>void>();
+  Object.assign(p.app.vault,{on:(name:string,cb:(file:{path:string})=>void)=>{events.set(name,cb);return {};}});
+  let replacement:InstanceType<typeof PluginClass>|undefined;
+  const ingestion=p.advancedIngestion;
+  const stop=ingestion.runner.stop.bind(ingestion.runner);
+  const internals=ingestion as unknown as {active?:Promise<void>;activePath?:string;controller?:AbortController};
+  try{
+    await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
+    await p.patchSettings(enableLegacy);
+    internals.active=gate.promise;internals.activePath='fixture.md';internals.controller=new AbortController();
+    let attempts=0;
+    ingestion.runner.stop=()=>{attempts++;return gate.promise;};
+    events.get('modify')!({path:'fixture.md'});
+    assert.equal(attempts,1);assert.equal(internals.controller.signal.aborted,true);
+    assert.equal(c.sharedAuthorityTransition(),true);
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,false);
+    assert.equal(c.control('rebuild').ok,false);
+    if(failed)gate.reject(Error('synthetic process drain failed'));else gate.release();
+    await gate.promise.catch(()=>{});await new Promise(resolve=>setImmediate(resolve));
+    internals.active=undefined;internals.activePath=undefined;
+    ingestion.runner.stop=stop;
+    if(!failed){
+      assert.equal(c.sharedAuthorityTransition(),false);
+      await p.standalone!.whenIdle();
+      assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    }else{
+      assert.equal(c.sharedAuthorityTransition(),true);
+      assert.equal(c.control('rebuild').ok,false);
+      p.onunload();replacement=replacementPlugin(f);
+      await replacement.onload();f.layout();
+      await (replacement as unknown as {initializing:Promise<void>}).initializing;
+      await replacement.standalone!.whenIdle();
+      assert.equal((await replacement.searchController.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+      let calls=0;replacement.advancedRetrieval.search=async()=>{calls++;throw Error('unexpected admission');};
+      await assert.rejects(replacement.searchAdvanced(legacyQuery),/MODEL_UNAVAILABLE/);
+      assert.equal(calls,0);
+    }
+  }finally{
+    gate.release();internals.active=undefined;ingestion.runner.stop=stop;
+    replacement?.onunload();await f.cleanup();
+  }
+});
+
+test('systemic unload attempts both Advanced manager drains after rejection',async()=>{
+  const f=await fixture(),p=f.plugin;
+  try{
+    await p.onload();f.layout();await f.internal.initializing;
+    const calls:string[]=[];
+    p.advancedRetrieval.releaseStorage=async()=>{calls.push('retrieval');throw Error('synthetic');};
+    p.advancedIngestion.stop=async()=>{calls.push('ingestion');};
+    await assert.rejects((p as unknown as {stopIngestion():Promise<void>}).stopIngestion(),/ADVANCED_UNAVAILABLE/);
+    assert.deepEqual(calls,['retrieval','ingestion']);
+  }finally{await f.cleanup();}
+});
+
+test('systemic standalone shutdown attempts writer drain after navigation disposal throws',async()=>{
+  const f=await fixture(),p=f.plugin;
+  try{
+    await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
+    const navigator=(p as unknown as {navigator:SourceNavigator<unknown>}).navigator;
+    const original=navigator.dispose.bind(navigator);
+    navigator.dispose=()=>{original();throw Error('synthetic');};
+    await assert.rejects((p as unknown as {stopStandalone():Promise<void>}).stopStandalone(),/INTERNAL_FAILURE/);
+    assert.equal(p.standalone,undefined);
+    assert.equal(SyntheticWorker.instances[0]!.terminated,true);
+  }finally{await f.cleanup();}
+});
+
+test('systemic Dense retirement retries the original store after replacement',async()=>{
+  const f=await fixture(),p=f.plugin,c=p.searchController;
+  const events=new Map<string,(file:{path:string},old?:string)=>void>();
+  Object.assign(p.app.vault,{on:(name:string,cb:(file:{path:string},old?:string)=>void)=>{events.set(name,cb);return {};}});
+  let fault=true;
+  try{
+    await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
+    const host=(p as unknown as {denseHost:{store?:{revoke(path:string):void}}}).denseHost;
+    const previous=host.store,calls:string[]=[];
+    host.store={revoke(path){calls.push('old:'+path);if(fault)throw Error('synthetic retirement failure');}};
+    try{
+      events.get('rename')!({path:'new.md'},'fixture.md');
+      assert.equal(c.sharedAuthorityTransition(),true);
+      host.store={revoke(path){calls.push('replacement:'+path);}};
+      fault=false;assert.equal(c.control('rebuild').ok,true);
+      assert.deepEqual(calls,['old:new.md','old:fixture.md','old:new.md','old:fixture.md']);
+      assert.equal(c.sharedAuthorityTransition(),false);
+    }finally{host.store=previous;}
+  }finally{fault=false;await f.cleanup();}
+});
+
+test('systemic source retirement fault during persisted settings change preserves durable preferences and runtime fence',async()=>{
+  const f=await fixture(),p=f.plugin,c=p.searchController;
+  const events=new Map<string,(file:{path:string})=>void>();
+  Object.assign(p.app.vault,{on:(name:string,cb:(file:{path:string})=>void)=>{events.set(name,cb);return {};}});
+  let fault=true;
+  const save=p.saveData.bind(p);
+  try{
+    await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
+    const engine=p.standalone!,changed=engine.changed.bind(engine);
+    engine.changed=path=>{if(fault)throw Error('synthetic source fault');changed(path);};
+    Object.assign(p,{saveData:async(v:unknown)=>{await save(v);events.get('modify')!({path:'fixture.md'});}});
+    await assert.rejects(p.patchSettings(s=>{s.enabled=false;}),/INTERNAL_FAILURE/);
+    assert.equal(p.settings.enabled,false);
+    assert.equal((p as unknown as {saved:{enabled:boolean}}).saved.enabled,false);
+    assert.equal(p.standalone,engine,'must not transfer owner while source retirement is unresolved');
+    assert.equal(c.sharedAuthorityTransition(),true);
+    Object.assign(p,{saveData:save});
+    fault=false;
+    // Recovery of the old obligation is not a successful settings/control
+    // operation. Reapply the committed settings explicitly after it clears.
+    assert.equal(c.control('rebuild').ok,false);
+    assert.equal(c.sourceAuthorityCurrent(c.sourceAuthorityRevision()),true);
+    assert.equal(c.sharedAuthorityTransition(),true);
+    await p.updateSettings(structuredClone(p.settings));
+    assert.equal(p.standalone,undefined);
+    assert.equal(c.sharedAuthorityTransition(),false);
+    assert.equal(SyntheticWorker.instances[0]!.terminated,true);
+  }finally{fault=false;Object.assign(p,{saveData:save});await f.cleanup();}
+});
+
+test('systemic source event nested in generic trusted hook retains failed source obligation',async()=>{
+  const f=await fixture(),p=f.plugin,c=p.searchController;
+  const events=new Map<string,(file:{path:string})=>void>();
+  Object.assign(p.app.vault,{on:(name:string,cb:(file:{path:string})=>void)=>{events.set(name,cb);return {};}});
+  let fault=true,trigger=true,attempts=0;
+  try{
+    await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
+    const engine=p.standalone!,changed=engine.changed.bind(engine);
+    engine.changed=path=>{if(path==='fixture.md'){attempts++;if(fault)throw Error('synthetic nested source fault');}changed(path);};
+    const nav=(p as unknown as {navigator:SourceNavigator<unknown>}).navigator,original=nav.invalidate.bind(nav);
+    nav.invalidate=()=>{
+      original();
+      if(trigger){trigger=false;events.get('modify')!({path:'fixture.md'});}
+    };
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,false);
+    assert.equal(attempts,1);
+    assert.equal(c.sharedAuthorityTransition(),true);
+    assert.equal((await c.search(uiRequest('blocked',1))).ok,false);
+    assert.equal(attempts,1);
+    fault=false;assert.equal(c.control('rebuild').ok,true);
+    assert.equal(attempts,2);assert.equal(c.sharedAuthorityTransition(),false);
+    await engine.whenIdle();
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+  }finally{fault=false;await f.cleanup();}
+});
+
+test('systemic source ledger overflow is terminal-only and Basic reload reconciles original source',async()=>{
+  const f=await fixture(),p=f.plugin,c=p.searchController;
+  let replacement:InstanceType<typeof PluginClass>|undefined;
+  try{
+    await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    await writeFile(join(f.vault,'fixture.md'),'# Synthetic\nREQ-LIFE-NEW: changed source.\n');
+    let attempts=0;
+    c.invalidateSource(Array.from({length:4097},()=>()=>{attempts++;}));
+    assert.equal(attempts,4096);
+    assert.equal(c.sharedAuthorityTransition(),true);
+    assert.equal(c.control('rebuild').ok,false);
+    assert.equal((await c.search(uiRequest('REQ-LIFE-NEW',1))).ok,false);
+    p.onunload();replacement=replacementPlugin(f);
+    await replacement.onload();f.layout();
+    await (replacement as unknown as {initializing:Promise<void>}).initializing;
+    await replacement.standalone!.whenIdle();
+    const result=await replacement.searchController.search(uiRequest('REQ-LIFE-NEW',1));
+    assert.ok(result.ok&&result.value.status==='ok');
+    assert.equal(result.value.hits.length,1);
+    assert.equal(result.value.hits[0]!.originalExcerpt,'REQ-LIFE-NEW: changed source.');
+    assert.equal(c.sharedAuthorityTransition(),true);
+  }finally{replacement?.onunload();await f.cleanup();}
+});

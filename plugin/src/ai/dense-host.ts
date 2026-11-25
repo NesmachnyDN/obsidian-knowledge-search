@@ -22,6 +22,7 @@ export type DensePreview = { nonce:string; scopeId:string; lexicalGenerationId:s
 export type MachineFence = {digest:string;expiresUnixMs:number};
 type Classification = 'synthetic'|'public';
 type Binding = { preview:DensePreview; lease:SelectedCorpus; abort:AbortController; current():boolean };
+type DenseRetirement = {store?:AdvancedRetrievalStore;abort?:AbortController};
 type HostPort = { config():ProviderPreference; enabled():boolean; allowedPath(path:string):boolean; admitStorage():Promise<void> };
 const fail = (code:ConstructorParameters<typeof ProviderFailure>[0]):never => { throw new ProviderFailure(code); };
 
@@ -31,6 +32,11 @@ export class ApiDenseHost {
   private active?:Promise<unknown>;
   private abort?:AbortController;
   private prepared?:Binding;
+  // Source-event retry reuses the same immutable path array supplied by the
+  // caller's ledger. Keep the original store/abort even if a late operation
+  // settled or the host detached its store. Weak keys do not extend lifetimes.
+  private readonly sourceRetirements=new WeakMap<readonly string[],DenseRetirement>();
+  private sharedRetirement?:DenseRetirement;
   private store?:AdvancedRetrievalStore;
   private indexer?:ApiDenseIndexManager;
   private searcher?:ApiDenseSearch;
@@ -43,13 +49,31 @@ export class ApiDenseHost {
     ++this.revision;
     this.prepared=undefined;
     // Both sides of a rename are revoked before an abort listener can run.
-    for(const path of paths)this.store?.revoke(path);
-    this.abort?.abort();
+    // Try every path before aborting the pinned operation. The enclosing
+    // source transaction retains this batch on failure; revocation is idempotent.
+    const owner=paths.length?this.sourceRetirements.get(paths)??{store:this.store,abort:this.abort}:
+      this.sharedRetirement??{store:this.store,abort:this.abort};
+    if(paths.length)this.sourceRetirements.set(paths,owner);else this.sharedRetirement=owner;
+    const {store,abort}=owner;
+    let failed=false, fault:unknown;
+    for(const path of paths) {
+      try { store?.revoke(path); }
+      catch(error) { if(!failed) fault=error; failed=true; }
+    }
+    try { abort?.abort(); }
+    catch(error) { if(!failed) fault=error; failed=true; }
+    if(failed) throw fault;
+    if(paths.length)this.sourceRetirements.delete(paths);else this.sharedRetirement=undefined;
   }
   async close():Promise<void> {
-    this.disposed=true;this.invalidate();
-    await this.active?.catch(()=>{});
-    this.store=undefined;this.indexer=undefined;this.searcher=undefined;
+    this.disposed=true;
+    try {this.invalidate();}
+    finally {
+      // Even if physical abort threw, wait for the bounded operation to
+      // settle. The rejected close still denies ownership transfer.
+      await this.active?.catch(()=>{});
+      this.store=undefined;this.indexer=undefined;this.searcher=undefined;
+    }
   }
   private config():ProviderConfig {
     if(this.disposed||!this.port.enabled())return fail('DISABLED');
@@ -166,6 +190,7 @@ export class ApiDenseHost {
       const root=await trustedVaultRoot(this.rootPath);
       if(root.id!==scopeId||!current())return fail('SOURCE_STALE');
       const store=this.store??await AdvancedRetrievalStore.open(root,this.pluginId);
+      if(!current())return fail('CANCELLED');
       this.store=store;
       this.indexer??=new ApiDenseIndexManager(this.engine,store);
       this.searcher??=new ApiDenseSearch(store);

@@ -46,15 +46,25 @@ export class AdvancedIngestionManager {
     lastFormat:IngestionStatus['lastFormat']=null): void {
     this.current={status,error,lastFormat,searchReady:false};
   }
+  constructor(private readonly trackRetirement:(work:Promise<void>)=>void=()=>{}){}
   invalidate(path:string): void {
-    this.store?.revoke(path);
+    const store=this.store, owner=this.controller, active=this.active;
     const latest=this.lastPath===path || this.lastPath?.startsWith(path+'/')===true;
     const affected=this.activePath===path || this.activePath?.startsWith(path+'/')===true;
     if(latest) { this.lastPath=undefined;this.update('unavailable','SOURCE_STALE'); }
-    if (!affected) return;
-    if (this.active) {
-      this.controller?.abort();
-      void this.runner.stop().catch(()=>this.update('failed','ADVANCED_UNAVAILABLE'));
+    if(affected)++this.revision;
+    try { store?.revoke(path); }
+    finally {
+      if(affected&&active){
+        try {owner?.abort();}
+        finally {
+          const work=Promise.allSettled([this.runner.stop(),active]).then(([stopping])=>{
+            if(stopping.status==='rejected')throw new IngestError('ADVANCED_UNAVAILABLE');
+          });
+          this.trackRetirement(work);
+          void work.catch(()=>this.update('failed','ADVANCED_UNAVAILABLE'));
+        }
+      }
     }
   }
   async ingest(config:IngestionConfig, rootPath:string, pluginId:string, path:string,
@@ -80,7 +90,7 @@ export class AdvancedIngestionManager {
         const source=await readSource(root,path);
         if (!isAuthorized() || abort.signal.aborted) throw new IngestError('SOURCE_STALE');
         const response=await this.runner.ingest(config,root,path,source.sha256,profile);
-        if (abort.signal.aborted || token!==this.revision) throw new IngestError('ADVANCED_CANCELLED');
+        if (abort.signal.aborted || token!==this.revision || !isAuthorized()) throw new IngestError('ADVANCED_CANCELLED');
         verifyProvenance(response,source.bytes);
         if (response.status==='failed' || response.status==='unsupported') {
           this.update(response.status,response.error,format); return response;
@@ -98,7 +108,7 @@ export class AdvancedIngestionManager {
         };
         if (!(await fresh())) throw new IngestError('SOURCE_STALE');
         await this.store.publish(path,response,fresh,abort.signal);
-        if (abort.signal.aborted) throw new IngestError('ADVANCED_CANCELLED');
+        if (abort.signal.aborted || token!==this.revision || !isAuthorized()) throw new IngestError('ADVANCED_CANCELLED');
         this.lastPath=path;
         this.update(response.status==='ok'?'ready':'partial',null,format);
         return response;
@@ -148,10 +158,13 @@ export class AdvancedIngestionManager {
   }
   async stop():Promise<void> {
     ++this.revision;
-    this.controller?.abort();
     try {
-      await this.runner.stop();
-      await this.active?.catch(()=>{});
+      const active=this.active;
+      try {this.controller?.abort();}
+      finally {
+        const [stopping]=await Promise.allSettled([this.runner.stop(),active]);
+        if(stopping.status==='rejected')throw new IngestError('ADVANCED_UNAVAILABLE');
+      }
       this.update('disabled');
     } catch {
       this.update('failed','ADVANCED_UNAVAILABLE');

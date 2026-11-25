@@ -71,10 +71,11 @@ async function resourceAdmission(): Promise<void> {
 }
 
 type Job = { unit:string; controller:AbortController; child?:ChildProcessWithoutNullStreams;
-  stopPromise?: Promise<void> };
+  stopPromise?: Promise<void>; retired?:boolean };
 export class AdvancedIngestRunner {
   private running?: Job;
   private poison = false;
+  private failedOwner?: Job;
   readonly maxResponseBytes = MAX_RESPONSE;
   get busy(): boolean { return !!this.running; }
   get blocked(): boolean { return this.poison; }
@@ -95,7 +96,7 @@ export class AdvancedIngestRunner {
         await checkedPath(config.interpreter,true);
         await checkedPath(config.entry,false);
       } catch { throw new IngestError('ADVANCED_RESOURCE_REFUSED'); }
-      if (job.controller.signal.aborted) throw new IngestError('ADVANCED_CANCELLED');
+      if ((job.retired||job.controller.signal.aborted)) throw new IngestError('ADVANCED_CANCELLED');
       const request: IngestRequest = {
         protocolVersion:INGEST_VERSION,
         requestId:randomBytes(24).toString('hex'), operation:'ingest',
@@ -119,14 +120,14 @@ export class AdvancedIngestRunner {
         shell:false,detached:true,env:localEnv(),stdio:['pipe','pipe','pipe'],
       });
       job.child=child;
-      if (job.controller.signal.aborted) throw new IngestError('ADVANCED_CANCELLED');
+      if ((job.retired||job.controller.signal.aborted)) throw new IngestError('ADVANCED_CANCELLED');
       const response = await this.exchange(job,payload,b=>parseIngestFrame(b,request),deadlineMs+5000);
-      if (job.controller.signal.aborted) throw new IngestError('ADVANCED_CANCELLED');
+      if ((job.retired||job.controller.signal.aborted)) throw new IngestError('ADVANCED_CANCELLED');
       // --wait covers all child unit exit; explicitly verify no active cgroup.
       if (!(await stopped(job.unit))) throw new IngestError('ADVANCED_UNAVAILABLE');
       return response;
     } catch(error) {
-      if (job.child || job.controller.signal.aborted) {
+      if (job.child || (job.retired||job.controller.signal.aborted)) {
         try { await this.cancelJob(job); }
         catch { this.poison=true; throw new IngestError('ADVANCED_UNAVAILABLE'); }
       }
@@ -148,7 +149,7 @@ export class AdvancedIngestRunner {
       const entry=join(dirname(config.entry),'advanced_retrieval.py');
       try {await resourceAdmission();await checkedPath(config.interpreter,true);await checkedPath(entry,false);}
       catch {throw new ModelError('MODEL_RESOURCE_REFUSED');}
-      if(job.controller.signal.aborted)throw new ModelError('MODEL_CANCELLED');
+      if((job.retired||job.controller.signal.aborted))throw new ModelError('MODEL_CANCELLED');
       const request:ModelRequest={protocolVersion:4,operation:'embed',
         requestId:randomBytes(24).toString('hex'),deadlineUnixMs:Date.now()+deadlineMs,
         modelSnapshot:config.tokenizerSnapshot,maxTokens,texts};
@@ -161,14 +162,14 @@ export class AdvancedIngestRunner {
       const child=spawn('/usr/bin/systemd-run',argv,{shell:false,detached:true,env:localEnv(),
         stdio:['pipe','pipe','pipe']});
       job.child=child;
-      if(job.controller.signal.aborted)throw new ModelError('MODEL_CANCELLED');
+      if((job.retired||job.controller.signal.aborted))throw new ModelError('MODEL_CANCELLED');
       const reply=await this.exchange(job,payload,b=>parseModelFrame(b,request),deadlineMs+5000);
-      if(job.controller.signal.aborted)throw new ModelError('MODEL_CANCELLED');
+      if((job.retired||job.controller.signal.aborted))throw new ModelError('MODEL_CANCELLED');
       if(!(await stopped(job.unit)))throw new ModelError('MODEL_UNAVAILABLE');
       if(reply.status!=='ok')throw new ModelError(reply.error??'MODEL_FAILED');
       return reply;
     }catch(error){
-      if(job.child||job.controller.signal.aborted){
+      if(job.child||(job.retired||job.controller.signal.aborted)){
         try{await this.cancelJob(job);}catch{this.poison=true;throw new ModelError('MODEL_UNAVAILABLE');}
       }
       if(error instanceof ModelError)throw error;
@@ -221,6 +222,7 @@ export class AdvancedIngestRunner {
     });
   }
   private async cancelJob(job:Job): Promise<void> {
+    job.retired=true;
     if (job.stopPromise) return job.stopPromise;
     job.stopPromise=(async()=>{
       try {
@@ -263,14 +265,21 @@ export class AdvancedIngestRunner {
           await new Promise(r=>setTimeout(r,75));
         }
         throw new IngestError('ADVANCED_UNAVAILABLE');
-      } catch(error) { this.poison=true; throw error; }
+      } catch(error) { this.poison=true; this.failedOwner=job; throw error; }
     })();
     return job.stopPromise;
   }
   async stop(): Promise<void> {
-    const job=this.running;
-    if (!job) return;
-    job.controller.abort();
-    await this.cancelJob(job);
+    const job=this.running??this.failedOwner;
+    // A rejected shutdown is not evidence that an old cgroup disappeared.
+    // Preserve the failed concrete owner and reject every ownership transfer.
+    if (!job) {
+      if(this.poison)throw new IngestError('ADVANCED_UNAVAILABLE');
+      return;
+    }
+    job.retired=true;
+    try { job.controller.abort(); }
+    finally { await this.cancelJob(job); }
+    if(this.poison)throw new IngestError('ADVANCED_UNAVAILABLE');
   }
 }

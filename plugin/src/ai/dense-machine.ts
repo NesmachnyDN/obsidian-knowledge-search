@@ -10,7 +10,7 @@ import { pilotConfig } from './loopback-json';
 type Host=Pick<ApiDenseHost,'verifyMachineResult'>;
 type Port={host():Host|undefined;preference():ProviderPreference};
 type Slot={id:string;input:Extract<DenseRequest,{kind:'search'}>;fence:MachineFence;
-  host:Host;abort:AbortController;owner?:symbol};
+  host:Host;abort:AbortController;owner?:symbol; revokeRead?:()=>void};
 type Metadata={phase:string;requestedMode:'dense'|'hybrid';executedMode:'dense'|'hybrid'|'none';
   expiresUnixMs:number;error:MachineError|null;legs?:ApiRetrievalResult['legs']};
 type Reply={apiVersion:1;ok:true;value:{operationId:string;expiresUnixMs:number}|Metadata|ApiRetrievalResult|null}
@@ -43,18 +43,21 @@ export class DenseMachine {
     return this.ui.authority.subscribe(this.listeners,listener);
   }
   private emit():void{this.ui.authority.publish(this.listeners);}
-  private clear():number {
-    const s=this.slot;if(!s)return this.ui.authority.epoch();
+  private clear(retireUi=true):number {
+    const s=this.slot;if(!s){this.ui.authority.retireMachine();return this.ui.authority.epoch();}
     return this.ui.authority.revoke(()=>{
       this.slot=undefined;
       if(this.timer!==undefined)clearTimeout(this.timer);
       this.timer=undefined;
-      try {s.abort.abort();}
-      finally {try {if(s.owner)this.ui.cancel(s.owner);}finally{this.emit();}}
+      // Settle a waiting caller even if the physical abort throws before
+      // signaling. The actual verification drain still prevents new submit.
+      s.revokeRead?.();
+      try {this.ui.authority.retireMachine(()=>s.abort.abort());}
+      finally {try {if(retireUi&&s.owner)this.ui.cancel(s.owner);}finally{this.emit();}}
       return this.ui.authority.epoch();
     });
   }
-  invalidate():void {if(this.slot)this.clear();}
+  invalidate(retireUi=true):void {this.clear(retireUi);}
   dispose():void {
     if(this.disposed)return;
     this.disposed=true;this.unsubscribe();
@@ -100,17 +103,18 @@ export class DenseMachine {
     this.draining=true;
     const signal=s.abort.signal;
     const task=Promise.resolve().then(()=>{
-      if(signal.aborted)throw new ProviderFailure('CANCELLED');
+      if(signal.aborted||this.slot!==s)throw new ProviderFailure('CANCELLED');
       return s.host.verifyMachineResult(s.input,s.fence,result,signal);
     });
     void task.then(()=>{this.draining=false;},()=>{this.draining=false;});
     let cancel!:()=>void;
     const revoked=new Promise<null>(resolve=>{
-      cancel=()=>resolve(null);signal.addEventListener('abort',cancel,{once:true});
-      if(signal.aborted)cancel();
+      cancel=()=>resolve(null);s.revokeRead=cancel;
+      signal.addEventListener('abort',cancel,{once:true});
+      if(signal.aborted || this.slot!==s)cancel();
     });
     try{return await Promise.race([task,revoked]);}
-    finally{signal.removeEventListener('abort',cancel);}
+    finally{s.revokeRead=undefined;signal.removeEventListener('abort',cancel);}
   }
   async request(input:unknown):Promise<Reply> {
     try{
