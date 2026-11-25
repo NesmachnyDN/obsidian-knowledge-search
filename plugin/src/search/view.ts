@@ -102,29 +102,50 @@ export class SearchView extends ItemView {
       const rows=add('ol','',prefix+'-results');
       const evidenceRole=role==='rerank'?'reranking':'generation';
       let sequence: number | undefined;
-      const clear=()=>{sequence=undefined;const token=confirmation.querySelector<HTMLInputElement>('input[type=password]');
+      let draft=false;
+      const clear=()=>{sequence=undefined;draft=false;const token=confirmation.querySelector<HTMLInputElement>('input[type=password]');
         if(token)token.value='';confirmation.replaceChildren();};
       const cancel=()=>role==='rerank'?this.controller.cancelRerank():this.controller.cancelGeneration();
       const error=(e:unknown)=>{if(!this.disposed)message.textContent=label+': '+(e instanceof ProviderFailure?e.code:'NOT_READY');};
-      button('Prepare local '+role,prefix+'-prepare',()=>{
+      const prepare=(token:string)=>{
         clear();
         try {
-          const preview=role==='rerank'?this.controller.prepareRerank():this.controller.prepareGeneration();
+          const preview=role==='rerank'?this.controller.prepareRerank():this.controller.prepareGeneration(token);
           if(this.disposed||!this.controller.isEvidencePreviewCurrent(evidenceRole,preview.sequence))return;
           sequence=preview.sequence;
           renderRerankConfirmation(confirmation,preview,(classification,token)=>{
             if(this.disposed)return;
             const request=role==='rerank'?this.controller.rerankConfirmed(preview,classification,token):
-              this.controller.generationConfirmed(preview,classification,token);
+              this.controller.generationConfirmed(preview,classification);
             void request.catch(error);
           },cancel);
         } catch(e){clear();error(e);}
+      };
+      button('Prepare local '+role,prefix+'-prepare',()=>{
+        clear();
+        if(role==='rerank'){prepare('');return;}
+        if(this.disposed)return;
+        if(this.controller.evidenceOperationStatus('generation').phase==='busy'){error(new ProviderFailure('NOT_READY'));return;}
+        if(this.controller.evidenceOperationStatus('generation').phase==='permission-required')cancel();
+        if(this.disposed)return;
+        draft=true;
+        const doc=confirmation.ownerDocument;
+        const token=doc.createElement('input');token.type='password';token.autocomplete='off';
+        token.className=prefix+'-token';token.setAttribute('aria-label','One-request local bearer token');
+        token.placeholder='Local bearer token (not saved)';
+        const bind=textElement(doc,'button','Prepare exact preview',prefix+'-bind');
+        bind.disabled=true;token.oninput=()=>{bind.disabled=!token.value;};
+        bind.onclick=()=>{
+          if(this.disposed||!draft||!confirmation.contains(bind)||!token.value)return;
+          const secret=token.value;token.value='';prepare(secret);
+        };
+        confirmation.append(token,bind);token.focus();
       });
       button('Cancel '+role,prefix+'-cancel',()=>{clear();cancel();});
       const clearStale=()=>{
         if(sequence!==undefined&&!this.controller.isEvidencePreviewCurrent(evidenceRole,sequence))clear();
       };
-      return {message,rows,clearStale};
+      return {message,rows,clearStale,clearDraft:()=>{if(draft)clear();}};
     };
     if(this.denseUi)this.densePanel=mountDensePanel(root,this.denseUi,()=>this.settings().ai.embedding,request,this.denseMachine);
     const rerankPanel=makeEvidencePanel('rerank');
@@ -172,7 +193,7 @@ export class SearchView extends ItemView {
         row.appendChild(open); results.appendChild(row);
       });
     };
-    const unsubscribe = this.controller.subscribe(render);
+    const unsubscribe = this.controller.subscribe(()=>{generationPanel.clearDraft();render();});
     const unsubscribeEvidence = this.controller.subscribeEvidence(render);
     this.unsubscribe = () => {unsubscribe();unsubscribeEvidence();};
     this.timer = root.ownerDocument.defaultView!.setInterval(renderStatus, 500);

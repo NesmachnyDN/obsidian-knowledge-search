@@ -277,7 +277,7 @@ test('pending evidence previews expire independently, reject late or altered con
       const first=c.prepareRerank();
       assert.equal(first.expiresUnixMs,1000+EVIDENCE_PREVIEW_TTL_MS);
       t.mock.timers.tick(1000);
-      const gen=c.prepareGeneration();
+      const gen=c.prepareGeneration(token);
       t.mock.timers.tick(EVIDENCE_PREVIEW_TTL_MS-1001);
       assert.equal(c.isEvidencePreviewCurrent('reranking',first.sequence),true);
       assert.equal(c.evidenceOperationStatus('reranking').phase,'permission-required');
@@ -305,16 +305,16 @@ test('pending evidence previews expire independently, reject late or altered con
       await assert.rejects(c.rerankConfirmed(replacement,'synthetic',token),{message:'DISCLOSURE_DENIED'});
       assert.equal(c.snapshot().rerank?.error,'CANCELLED');
       const cancelled=c.prepareRerank(); c.cancelRerank();
-      const invalidated=c.prepareGeneration();
+      const invalidated=c.prepareGeneration(token);
       assert.equal(lifecycleEvents,0);assert.ok(evidenceEvents>0);
       c.invalidate();assert.equal(lifecycleEvents,1);
       await assert.rejects(c.rerankConfirmed(cancelled,'synthetic',token),{message:'DISCLOSURE_DENIED'});
-      await assert.rejects(c.generationConfirmed(invalidated,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+      await assert.rejects(c.generationConfirmed(invalidated,'synthetic'),{message:'DISCLOSURE_DENIED'});
       await c.search(uiRequest(input.query,2));
-      const disposed=c.prepareGeneration();c.dispose();
+      const disposed=c.prepareGeneration(token);c.dispose();
       t.mock.timers.tick(EVIDENCE_PREVIEW_TTL_MS+1);
       assert.equal(c.evidenceOperationStatus('generation').phase,'idle');
-      await assert.rejects(c.generationConfirmed(disposed,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+      await assert.rejects(c.generationConfirmed(disposed,'synthetic'),{message:'DISCLOSURE_DENIED'});
       assert.equal(verifies,0);assert.equal(calls,0);
     } finally { c.dispose();t.mock.timers.reset(); }
   },(req,res)=>{calls++;req.resume();reply(res,{},400);});
@@ -333,9 +333,9 @@ for (const role of ['reranking','generation'] as const) {
       c.attach({search:async()=>response,status:()=>({status:'ready',generationId:hash('generation'),
         sources:2,records:2,busy:false,error:null,maintenanceWarning:null}),
         cancel:()=>true,resume:()=>{},rebuild:()=>{}});
-      const prepare=()=>role==='reranking'?c.prepareRerank():c.prepareGeneration();
+      const prepare=()=>role==='reranking'?c.prepareRerank():c.prepareGeneration(token);
       const confirm=(p:ReturnType<typeof prepare>)=>role==='reranking'
-        ?c.rerankConfirmed(p,'synthetic',token):c.generationConfirmed(p,'synthetic',token);
+        ?c.rerankConfirmed(p,'synthetic',token):c.generationConfirmed(p,'synthetic');
       let wall=Date.now(), mono=1000, boot=1000, events=0, lifecycle=0, reading=false;
       t.mock.method(Date,'now',()=>wall);
       t.mock.method(performance,'now',()=>mono);
@@ -519,7 +519,7 @@ test('R2: controller binds exact profile, revokes one-shot consent and guards ev
       assert.deepEqual(c.evidenceOperationStatus('reranking'),{phase:'failed',error:'NOT_READY'});
       assert.equal(verifies,0);assert.equal(calls,0);
       const registry=profileRegistry(c), first=installFixture(c,cfg);
-      const generation=c.prepareGeneration();
+      const generation=c.prepareGeneration(token);
       const preview=c.prepareRerank();
       assert.equal(preview.runtimeProfileDigest,first.profileDigest);
       assert.equal(preview.runtimeProfileBinding,first.bindingDigest);
@@ -655,7 +655,7 @@ for (const boundary of [4,6]) test('B-R2-DEADLINE-01: controller cannot publish 
       cancel:()=>true,resume:()=>{},rebuild:()=>{}});
     try {
       await c.search(uiRequest(input.query,1));installFixture(c,cfg);
-      const generation=c.prepareGeneration();
+      const generation=c.prepareGeneration(token);
       const preview=c.prepareRerank();
       await c.rerankConfirmed(preview,'synthetic',token);
       assert.equal(wall,deadline);assert.equal(calls,1);assert.equal(reads,2);
@@ -773,9 +773,9 @@ for (const [role, action] of [
       c.attach({search:async()=>response,status:()=>({status:'ready',generationId:hash('generation'),
         sources:1,records:1,busy:false,error:null,maintenanceWarning:null}),
         cancel:()=>true,resume:()=>{},rebuild:()=>{}});
-      const prepare=()=>role==='reranking'?c.prepareRerank():c.prepareGeneration();
+      const prepare=()=>role==='reranking'?c.prepareRerank():c.prepareGeneration(token);
       const confirm=(p:ReturnType<typeof prepare>)=>role==='reranking'
-        ?c.rerankConfirmed(p,'synthetic',token):c.generationConfirmed(p,'synthetic',token);
+        ?c.rerankConfirmed(p,'synthetic',token):c.generationConfirmed(p,'synthetic');
       const cancel=()=>role==='reranking'?c.cancelRerank():c.cancelGeneration();
       const other=role==='reranking'?'generation':'reranking';
       const expected=expired?'TIMEOUT':'CANCELLED';
@@ -783,7 +783,7 @@ for (const [role, action] of [
       let lifecycle=0;
       try {
         await c.search(uiRequest(input.query,1));installFixture(c,cfg);
-        const otherPreview=other==='generation'?c.prepareGeneration():c.prepareRerank();
+        const otherPreview=other==='generation'?c.prepareGeneration(token):c.prepareRerank();
         const pending=confirm(prepare());await entry;
         c.subscribe(()=>{lifecycle++;});
         const unsubscribe=c.subscribeEvidence(()=>{
@@ -844,10 +844,10 @@ for (const role of ['reranking','generation'] as const) {
         c.attach({search:async()=>response,status:()=>({status:'ready',generationId:hash('generation'),
           sources:1,records:1,busy:false,error:null,maintenanceWarning:null}),cancel:()=>true,resume:()=>{},rebuild:()=>{}});
         const other=role==='reranking'?'generation':'reranking';
-        const prepare=(r=role)=>r==='reranking'?c.prepareRerank():c.prepareGeneration();
+        const prepare=(r=role)=>r==='reranking'?c.prepareRerank():c.prepareGeneration(token);
         const cancel=(r=role)=>r==='reranking'?c.cancelRerank():c.cancelGeneration();
         const confirm=(p:ReturnType<typeof prepare>)=>p.role==='reranking'
-          ?c.rerankConfirmed(p,'synthetic',token):c.generationConfirmed(p,'synthetic',token);
+          ?c.rerankConfirmed(p,'synthetic',token):c.generationConfirmed(p,'synthetic');
         const internal=c as unknown as {activeEvidence:Record<string,unknown>;previewTimers:Record<string,unknown>;prepared:Record<string,unknown>};
         const cause=expired?'TIMEOUT':'CANCELLED';
         const shared=['configure','invalidate','dispose','search'].includes(action);
@@ -948,7 +948,7 @@ for(const first of ['reranking','generation'] as const) test(`B-R2-TERM-03: ${fi
     const second=first==='reranking'?'generation':'reranking';
     const cancel=(role:typeof first|typeof second)=>role==='reranking'?c.cancelRerank():c.cancelGeneration();
     const start=(role:typeof first|typeof second)=>role==='reranking'
-      ?c.rerankConfirmed(c.prepareRerank(),'synthetic',token):c.generationConfirmed(c.prepareGeneration(),'synthetic',token);
+      ?c.rerankConfirmed(c.prepareRerank(),'synthetic',token):c.generationConfirmed(c.prepareGeneration(token),'synthetic');
     try {
       await c.search(uiRequest(input.query,1));installFixture(c,cfg);
       const a=start(first);mono+=1000;const b=start(second);await entry;
@@ -1000,7 +1000,7 @@ for(const last of [false,true]) for(const steps of [6,15]) {
         const role=remaining%2?'reranking':'generation';
         if(c.evidenceOperationStatus(role).phase==='permission-required') {
           if(role==='reranking')c.cancelRerank();else c.cancelGeneration();
-        } else if(role==='reranking')c.prepareRerank();else c.prepareGeneration();
+        } else if(role==='reranking')c.prepareRerank();else c.prepareGeneration(token);
       }}finally{depth--;}
     };
     try {
@@ -1021,7 +1021,7 @@ test('B-R2-TERM-04 storm quarantine survives re-add; healthy observers converge 
   let deliveries=0,healthy=0,last='',remove=()=>{};
   const storm=()=>{
     deliveries++;remove();remove=c.subscribeEvidence(storm);
-    if(c.evidenceOperationStatus('generation').phase==='permission-required')c.cancelGeneration();else c.prepareGeneration();
+    if(c.evidenceOperationStatus('generation').phase==='permission-required')c.cancelGeneration();else c.prepareGeneration(token);
   };
   try {
     c.prepareRerank();
@@ -1055,13 +1055,13 @@ test('B-R2-TERM-04 exceptions do not swallow final state or poison subsequent wa
   const warnings:unknown[][]=[];t.mock.method(console,'warn',(...args:unknown[])=>warnings.push(args));
   let seen='',throws=0;
   try {
-    c.prepareRerank();c.prepareGeneration();
+    c.prepareRerank();c.prepareGeneration(token);
     c.subscribeEvidence(()=>{seen=JSON.stringify(c.snapshot());});
     c.subscribeEvidence(()=>{throws++;c.cancelGeneration();throw Error('private text must not be logged');});
     c.cancelRerank();
     assert.equal(seen,JSON.stringify(c.snapshot()));assert.equal(throws,1);
     assert.deepEqual(warnings,[['SEARCH_OBSERVER_QUARANTINED','exception']]);
-    c.prepareGeneration();assert.equal(seen,JSON.stringify(c.snapshot()));assert.equal(throws,1);
+    c.prepareGeneration(token);assert.equal(seen,JSON.stringify(c.snapshot()));assert.equal(throws,1);
   }finally{c.dispose();}
 });
 for(const action of ['configure','invalidate','dispose'] as const) {
@@ -1085,7 +1085,7 @@ test('B-R2-TERM-04 removal, late addition, deferred expiry and stale grant clean
   let mono=1000;t.mock.method(performance,'now',()=>mono);installFixture(c,cfg);
   let last='',removed=0,added=0,once=false;
   try {
-    const stale=c.prepareRerank();c.prepareGeneration();
+    const stale=c.prepareRerank();c.prepareGeneration(token);
     c.subscribeEvidence(()=>{last=JSON.stringify(c.snapshot());});
     let unsubscribe=()=>{};
     c.subscribeEvidence(()=>{if(!once){once=true;unsubscribe();c.subscribeEvidence(()=>added++);mono+=EVIDENCE_PREVIEW_TTL_MS+1;c.snapshot();}});
@@ -1112,7 +1112,7 @@ for (const role of ['reranking','generation'] as const) for (const end of ['inva
       const h=set(fn,ms);live.add(h);return h;
     });
     t.mock.method(globalThis,'clearTimeout',(h:ReturnType<typeof setTimeout>)=>{live.delete(h);clear(h);});
-    const prepare=()=>role==='reranking'?c.prepareRerank():c.prepareGeneration();
+    const prepare=()=>role==='reranking'?c.prepareRerank():c.prepareGeneration(token);
     let nested:number|undefined,once=false;
     try {
       prepare();
@@ -1135,7 +1135,7 @@ for(const role of ['reranking','generation'] as const) test(`B-R2-LIFE-05: ${rol
   const set=globalThis.setTimeout,clear=globalThis.clearTimeout;
   t.mock.method(globalThis,'setTimeout',(fn:()=>void,ms:number)=>{const h=set(fn,ms);live.add(h);return h;});
   t.mock.method(globalThis,'clearTimeout',(h:ReturnType<typeof setTimeout>)=>{live.delete(h);clear(h);});
-  const prepare=()=>role==='reranking'?c.prepareRerank():c.prepareGeneration();
+  const prepare=()=>role==='reranking'?c.prepareRerank():c.prepareGeneration(token);
   try {
     prepare();c.subscribeEvidence(()=>c.dispose());
     const returned=prepare();

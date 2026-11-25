@@ -67,10 +67,11 @@ type RetirementObligation = {
 const MAX_RETIREMENT_OBLIGATIONS = 4096;
 type EvidenceRole = 'reranking' | 'generation';
 export const EVIDENCE_PREVIEW_TTL_MS = 300_000;
-export type RerankPreview = { role: EvidenceRole; sequence: number; revision: number; expiresUnixMs: number; config: ProviderConfig; scopeId: string; query: string; hits: EvidenceHit[]; runtimeProfileBinding?: string; runtimeProfileDigest?: string };
+export type RerankPreview = { role: EvidenceRole; sequence: number; revision: number; expiresUnixMs: number; config: ProviderConfig; scopeId: string; query: string; hits: EvidenceHit[]; runtimeProfileBinding?: string; runtimeProfileDigest?: string; credentialStamp?:GenerationCredentialStamp };
 // Internal elapsed-time deadlines are never taken from the returned preview.
-type ActiveEvidenceOperation = { abort: AbortController; context: CallContext; revision: number };
-type PendingEvidencePreview = { preview: RerankPreview; monotonicStartedMs: number; bootStartedSeconds: number };
+type BoundGenerationCredential = {owner:object;configuration:string;stamp:GenerationCredentialStamp};
+type ActiveEvidenceOperation = { abort: AbortController; context: CallContext; revision: number; credential?:BoundGenerationCredential };
+type PendingEvidencePreview = { preview: RerankPreview; monotonicStartedMs: number; bootStartedSeconds: number; credential?:BoundGenerationCredential };
 export type ScopedRetrievalTurn = Readonly<{ result: Promise<ApiResult<SearchResponse>>; cancel(): void }>;
 /** Opaque host identities. They only select host-owned state; they never carry
  * a lease, grant, configuration, credential, or transport capability. */
@@ -113,6 +114,7 @@ export class SearchController {
   // Object identity is host-local: a cloned or foreign session never matches.
   private readonly retainedSessions = new Set<RetainedChatSessionOwner>();
   private generationAdmissionDepth = 0;
+  private generationTransition?:object;
   private readonly generationCredential = new GenerationCredentialAuthority();
   private readonly generator = new EvidenceGenerator();
   private readonly reranker = new EvidenceReranker();
@@ -818,10 +820,10 @@ export class SearchController {
     return role === 'reranking' ? this.rerankPort : this.generationPort;
   }
   prepareRerank(): RerankPreview { return this.prepareEvidence('reranking'); }
-  prepareGeneration(): RerankPreview {
-    if (this.scopedRetrieval) throw new ProviderFailure('BUSY');
+  prepareGeneration(token:string): RerankPreview {
+    if (this.scopedRetrieval || this.generationTransition) throw new ProviderFailure('BUSY');
     this.generationAdmissionDepth++;
-    try { return this.prepareEvidence('generation'); }
+    try { return this.prepareEvidence('generation',token); }
     finally { this.generationAdmissionDepth--; }
   }
   /** Settings changes revoke admission itself, not just pending consent. */
@@ -858,6 +860,8 @@ export class SearchController {
         && boot < pending.bootStartedSeconds+EVIDENCE_PREVIEW_TTL_MS/1000
         && Number.isFinite(wall) && wall < pending.preview.expiresUnixMs
         && this.profileCurrent(pending.preview,checkConfig)
+        && (role!=='generation' || !!pending.credential && this.boundCredentialCurrent(pending.credential)
+          && (!checkConfig || this.generationPreviewConfigurationCurrent(pending.preview)))
         && this.prepared[role] === pending && !this.disposed) return pending;
     } catch { /* An unavailable clock cannot authorize disclosure. */ }
     this.expirePreview(role,pending);
@@ -866,8 +870,10 @@ export class SearchController {
   isEvidencePreviewCurrent(role: EvidenceRole, sequence: number): boolean {
     return this.currentPreview(role)?.preview.sequence === sequence;
   }
-  private clearPreview(role: EvidenceRole): boolean {
-    const hadPreview = !!this.prepared[role];
+  private clearPreview(role: EvidenceRole,consume=false): boolean {
+    const pending=this.prepared[role];
+    const hadPreview = !!pending;
+    if (!consume && pending?.credential) this.generationCredential.revoke(pending.credential.owner);
     delete this.prepared[role];
     clearTimeout(this.previewTimers[role]);
     delete this.previewTimers[role];
@@ -880,10 +886,25 @@ export class SearchController {
     this.state = {...this.state,[key]:{phase:'error',error:'CANCELLED',hits:[]}};
     this.notifyExpiry();
   }
-  private prepareEvidence(role: EvidenceRole): RerankPreview {
+  private generationPreviewConfigurationCurrent(preview:RerankPreview):boolean {
+    const pref=this.generationPort?.config();
+    return pref?.state==='configured' && configDigest('generation',pref)===configDigest('generation',preview.config)
+      && this.generationPort?.scopeId()===preview.scopeId;
+  }
+  private boundCredentialCurrent(binding:BoundGenerationCredential):boolean {
+    return this.generationCredential.current(binding.owner,binding.configuration,binding.stamp);
+  }
+  private revokeGenerationTransition():void {
+    const owner=this.generationTransition;this.generationTransition=undefined;
+    if(owner)this.generationCredential.revoke(owner);
+  }
+  private prepareEvidence(role: EvidenceRole,token?:string): RerankPreview {
     if (this.sharedAuthorityTransition() || this.roleRetirement(role)) throw new ProviderFailure('NOT_READY');
     // Replacing consent is a single commit. In particular no observer can
     // prepare another preview between clearing the old timer and owning the new one.
+    const transition=role==='generation'?{}:undefined;
+    const revision=this.revision;
+    if(transition)this.generationTransition=transition;
     const removed = this.clearPreview(role);
     let changed = removed;
     try {
@@ -907,9 +928,20 @@ export class SearchController {
       const expiresUnixMs = Date.now()+EVIDENCE_PREVIEW_TTL_MS;
       if (![monotonicStartedMs,bootStartedSeconds,expiresUnixMs].every(Number.isFinite))
         throw new ProviderFailure('NOT_READY');
+      let credential:BoundGenerationCredential|undefined;
+      if (transition) {
+        const configuration=configDigest('generation',config);
+        const now=port?.config();
+        if (now?.state!=='configured' || configDigest('generation',now)!==configuration || port?.scopeId()!==scopeId
+          || this.generationTransition!==transition || this.revision!==revision || this.sharedAuthorityTransition())
+          throw new ProviderFailure('CANCELLED');
+        const attempt=this.generationCredential.begin(transition,configuration);
+        credential={owner:transition,configuration,stamp:this.generationCredential.complete(attempt,token)};
+      }
       const preview = structuredClone({role,sequence:++this.sequence,revision:this.revision,expiresUnixMs,config,scopeId,query:this.lastQuery,hits:response.hits,
-        ...(admission ? {runtimeProfileBinding:admission.bindingDigest,runtimeProfileDigest:admission.profileDigest} : {})});
-      const pending = {preview,monotonicStartedMs,bootStartedSeconds};
+        ...(admission ? {runtimeProfileBinding:admission.bindingDigest,runtimeProfileDigest:admission.profileDigest} : {}),
+        ...(credential?{credentialStamp:credential.stamp}:{})});
+      const pending = {preview,monotonicStartedMs,bootStartedSeconds,credential};
       this.prepared[role] = pending;
       this.previewTimers[role] = setTimeout(()=>this.expirePreview(role,pending),EVIDENCE_PREVIEW_TTL_MS);
       changed = true;
@@ -923,14 +955,20 @@ export class SearchController {
       }
       throw error;
     } finally {
+      if(transition && this.generationTransition===transition) {
+        this.generationTransition=undefined;
+        if(this.prepared.generation?.credential?.owner!==transition)this.generationCredential.revoke(transition);
+      }
       if (changed) this.emitEvidence();
     }
   }
   private revokeEvidence(): void {
+    this.revokeGenerationTransition();
     for (const role of ['reranking','generation'] as const) {
       this.clearPreview(role);
       const active = this.activeEvidence[role];
       if (active) {
+        if(active.credential)this.generationCredential.revoke(active.credential.owner);
         cancelActiveDeadline(active.context);
         const owner = active.abort;
         this.enqueueRetirement({kind:'evidence',revision:active.revision,owner,attempted:false,run:()=>owner.abort()});
@@ -972,6 +1010,7 @@ export class SearchController {
     const hadPreview = !!this.prepared[role];
     const active = this.activeEvidence[role];
     const revision = this.revision;
+    if(role==='generation'){this.revokeGenerationTransition();if(active?.credential)this.generationCredential.revoke(active.credential.owner);}
     this.clearPreview(role);
     const key = role === 'reranking' ? 'rerank' : 'generation';
     const previous = this.state[key];
@@ -1002,21 +1041,30 @@ export class SearchController {
   rerankConfirmed(preview: RerankPreview, classification: 'synthetic' | 'public', token: string): Promise<void> {
     return this.confirmEvidence('reranking',preview,classification,token);
   }
-  generationConfirmed(preview: RerankPreview, classification: 'synthetic' | 'public', token: string): Promise<void> {
-    if (this.scopedRetrieval) return Promise.reject(new ProviderFailure('BUSY'));
+  generationConfirmed(preview: RerankPreview, classification: 'synthetic' | 'public'): Promise<void> {
+    if (this.scopedRetrieval || this.generationTransition) return Promise.reject(new ProviderFailure('BUSY'));
     this.generationAdmissionDepth++;
-    try { return this.confirmEvidence('generation',preview,classification,token); }
+    try { return this.confirmEvidence('generation',preview,classification); }
     finally { this.generationAdmissionDepth--; }
   }
-  private async confirmEvidence(role: EvidenceRole, preview: RerankPreview, classification: 'synthetic' | 'public', token: string): Promise<void> {
+  private async confirmEvidence(role: EvidenceRole, preview: RerankPreview, classification: 'synthetic' | 'public', token?: string): Promise<void> {
     if (this.sharedAuthorityTransition() || this.roleRetirement(role)) throw new ProviderFailure('DISCLOSURE_DENIED');
-    const approved = this.currentPreview(role,false)?.preview;
-    if (!approved) throw new ProviderFailure('DISCLOSURE_DENIED');
-    this.clearPreview(role);
+    const pending = this.currentPreview(role,false);
+    if (!pending) throw new ProviderFailure('DISCLOSURE_DENIED');
+    const {preview:approved,credential}=pending;
+    if(credential)this.generationTransition=credential.owner;
+    this.clearPreview(role,true);
+    const retireCredential=():void=>{
+      if(credential){
+        if(this.generationTransition===credential.owner)this.generationTransition=undefined;
+        this.generationCredential.revoke(credential.owner);
+      }
+    };
+    try {
     const port = this.port(role);
     if (!port || this.activeEvidence[role] || !['synthetic','public'].includes(classification)
       || role === 'reranking' && classification !== 'synthetic'
-      || JSON.stringify(approved) !== JSON.stringify(preview)) { this.emitEvidence(); throw new ProviderFailure('DISCLOSURE_DENIED'); }
+      || JSON.stringify(approved) !== JSON.stringify(preview)) { retireCredential(); this.emitEvidence(); throw new ProviderFailure('DISCLOSURE_DENIED'); }
     const current = (): boolean => {
       const config = port.config();
       return !this.disposed && this.enabled && !this.paused && this.revision === approved.revision
@@ -1024,20 +1072,26 @@ export class SearchController {
         && port.scopeId() === approved.scopeId && config.state === 'configured'
         && configDigest(role,config) === configDigest(role,approved.config)
         && this.engine?.status().generationId === this.state.response?.indexGenerationId
-        && this.state.response?.indexGenerationId === approved.hits[0]?.indexGenerationId;
+        && this.state.response?.indexGenerationId === approved.hits[0]?.indexGenerationId
+        && (!credential || this.boundCredentialCurrent(credential))
+        && this.revision === approved.revision && !this.disposed;
     };
-    if (!current()) { this.emitEvidence(); throw new ProviderFailure('CANCELLED'); }
+    if (!current()) { retireCredential(); this.emitEvidence(); throw new ProviderFailure('CANCELLED'); }
     const admission = role === 'reranking' ? this.currentRerankAdmission(approved.config,approved.scopeId) : undefined;
     const abort = new AbortController();
     const key = role === 'reranking' ? 'rerank' : 'generation';
     const context = bindActiveDeadline({signal:abort.signal,deadlineUnixMs:Date.now()+approved.config.limits.timeoutMs},approved.config.limits.timeoutMs);
     const {deadlineUnixMs} = context;
-    const operation = {abort,context,revision:approved.revision};
+    if(credential && (this.generationTransition!==credential.owner || !current()))throw new ProviderFailure('CANCELLED');
+    const operation = {abort,context,revision:approved.revision,credential};
     this.activeEvidence[role] = operation;
+    if(credential && this.generationTransition===credential.owner)this.generationTransition=undefined;
     this.state = {...this.state,[key]:{phase:'running',error:null,hits:[]}};
     try {
       this.emitEvidence();
       const worker = role === 'reranking' ? this.reranker : this.generator;
+      if(!current())throw new ProviderFailure('CANCELLED');
+      const capturedToken=credential?this.generationCredential.secret(credential.owner,credential.configuration,credential.stamp):token!;
       const hits = await worker.run({
         config:approved.config,scopeId:approved.scopeId,query:{text:approved.query,classification},
         candidates:approved.hits.map(hit=>({hit,classification})),
@@ -1046,7 +1100,7 @@ export class SearchController {
           scopeId:approved.scopeId,expiresUnixMs:deadlineUnixMs,queryDigest:hash(approved.query),
           queryClassification:classification,sources:approved.hits.map(hit=>({sourceId:hit.sourceId,
             sourceSha256:hit.sourceSha256,excerptDigest:hash(hit.originalExcerpt),classification}))},
-      },token,context,hit=>port.verify(hit),current,admission);
+      },capturedToken,context,hit=>port.verify(hit),current,admission);
       if (this.revision === approved.revision && !this.disposed) {
         const valid = current();
         remainingOperationMs(context);
@@ -1055,6 +1109,7 @@ export class SearchController {
         // Retire the operation before notifying listeners: a reentrant cancel
         // now concerns a completed result, not a still-running deadline.
         delete this.activeEvidence[role];
+        if(credential)this.generationCredential.revoke(credential.owner);
         this.state = {...this.state,[key]:{phase:'results',error:null,hits}};
         this.emitEvidence();
       }
@@ -1062,10 +1117,12 @@ export class SearchController {
       error = deadlineFailure(context) ?? error;
       if (this.activeEvidence[role] === operation && this.revision === approved.revision && !this.disposed) {
         delete this.activeEvidence[role];
+        if(credential)this.generationCredential.revoke(credential.owner);
         this.state = {...this.state,[key]:{phase:'error',error:error instanceof ProviderFailure?error.code:'NOT_READY',hits:[]}};
         this.emitEvidence();
       }
     } finally { if (this.activeEvidence[role] === operation) delete this.activeEvidence[role]; }
+    } finally { retireCredential(); }
   }
   async open(index: number, expected?: EvidenceHit): Promise<ApiResult<null>> {
     const hit = this.state.response?.hits[index];
