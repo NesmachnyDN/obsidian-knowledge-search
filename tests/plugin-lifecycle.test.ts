@@ -871,3 +871,147 @@ async function navigationWatchdog<T>(work:Promise<T>):Promise<T>{
   try{return await Promise.race([work,new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(Error('NAVIGATION_WATCHDOG')),1000);})]);}
   finally{clearTimeout(timer);}
 }
+
+test('B-R2-LIFE: failed settings shared retirement must deny lexical navigation until recovery',async()=>{
+  const f=await fixture(),c=f.plugin.searchController;
+  const bytes=Buffer.from('alpha synthetic fixture\n'),generationId=hash('review-nav-generation');
+  const doc=parseMarkdown('fixture.md',bytes,hash('review-nav-root'));
+  const evidence:EvidenceHit={sourceId:'fixture.md',sourceSha256:doc.sha256,originalExcerpt:doc.blocks[0]!.originalText,
+    sourceLocators:[doc.blocks[0]!.locator],rank:1,lexicalRank:1,retrievalMode:'lexical',
+    indexGenerationId:generationId,score:1,headings:[],wikiLinks:[],properties:[]};
+  const file={path:'fixture.md'};
+  let reads=0,opens=0,fail=false;
+  const nav=new SourceNavigator({read:async()=>{reads++;return bytes;}},{
+    exact:()=>file,open:async()=>{opens++;return {text:()=>bytes.toString(),select:()=>{}};}
+  });
+  const denseHost={prepare:async()=>({nonce:'synthetic',expiresUnixMs:Date.now()+100000}),
+    invalidate:()=>{if(fail)throw Error('synthetic retirement failure');}};
+  const denseUi=(f.plugin as unknown as {denseUi:DenseUiController}).denseUi;
+  Object.assign(f.plugin,{navigator:nav,denseHost});
+  c.attach({search:async(r:SearchRequest):Promise<SearchResponse>=>({protocolVersion:2,requestId:r.query,
+    requestedMode:'lexical',executedMode:'lexical',status:'ok',indexGenerationId:generationId,hits:[evidence],
+    capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0}),
+    status:()=>({status:'ready',generationId,sources:1,records:1,busy:false,error:null,maintenanceWarning:null}),
+    cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+  try {
+    assert.equal((await c.search(uiRequest('old',1))).ok,true);
+    const owner=Symbol('review-owner');
+    await denseUi.prepare(owner,{} as never);
+    assert.equal(denseUi.snapshot(owner).phase,'preview');
+    fail=true;
+    await assert.rejects(f.plugin.patchSettings(s=>{s.topK=s.topK===1?2:1;}),/synthetic retirement failure/);
+    assert.equal(denseUi.authority.admissionClosed(),true);
+    const result=await c.open(0);
+    assert.equal(c.sharedAuthorityTransition(),true);
+    assert.equal(result.ok,false,'lexical navigation must remain closed after failed trusted retirement');
+    assert.equal(reads,0);
+    assert.equal(opens,0);
+    assert.throws(()=>c.prepareGeneration());
+    assert.throws(()=>c.prepareRerank());
+    assert.equal((await c.search(uiRequest('denied',1))).ok,false);
+    fail=false;
+    await f.plugin.patchSettings(s=>{s.topK=s.topK===1?2:1;});
+    assert.equal(c.sharedAuthorityTransition(),false);
+    assert.equal((await c.search(uiRequest('recovered',1))).ok,true);
+    assert.equal((await c.open(0)).ok,true);
+  } finally {fail=false;Object.assign(f.plugin,{denseHost:undefined});await f.cleanup();}
+});
+
+test('B-R2-LIFE: disabling generation with pending settings save must revoke existing preview',async()=>{
+  const f=await fixture(),c=f.plugin.searchController;
+  const file=Object.assign(new Empty(),{path:'fixture.md'});
+  Object.assign(f.plugin.app.vault,{getMarkdownFiles:()=>[file],
+    getAbstractFileByPath:(p:string)=>p===file.path?file:null});
+  const entered=deferredDrain(),gate=deferredDrain();
+  let verifies=0;
+  const original=f.plugin.saveData.bind(f.plugin);
+  try {
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    const cfg={state:'configured',transport:'local',origin:'http://127.0.0.1:1',identity:{model:'fixture',revision:'v1'},
+      limits:{timeoutMs:2000,maxInputBytes:4096,maxCandidates:8,maxOutputTokens:32,maxConcurrent:1}} as const;
+    await f.plugin.patchSettings(s=>{s.ai.generation=cfg;});
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    const preview=c.prepareGeneration();
+    Object.assign(f.plugin,{verifyAiEvidence:async()=>{verifies++;throw Error('synthetic stop before HTTP');},
+      saveData:async(v:unknown)=>{entered.release();await gate.promise;await original(v);}});
+    const disable=f.plugin.patchSettings(s=>{s.ai.generation={state:'disabled'};});
+    await navigationWatchdog(entered.promise);
+    const current=c.isEvidencePreviewCurrent('generation',preview.sequence);
+    await c.generationConfirmed(preview,'synthetic','fixture-token').catch(()=>{});
+    assert.equal(current,false);
+    gate.release();await disable;
+    assert.equal(verifies,0,'old consent must not read sources after role-disable transition begins');
+  }finally{gate.release();Object.assign(f.plugin,{saveData:original});await f.cleanup();}
+});
+
+for (const role of ['reranking','generation'] as const) {
+  for (const stage of ['preview','verification','transport'] as const) {
+    test(`B-R2-LIFE-11 ${role} ${stage} save failure revokes consent and permits fresh recovery`,async()=>{
+      const active=stage!=='preview';
+      const f=await fixture(),c=f.plugin.searchController;
+      const transportEntered=deferredDrain();
+      let sends=0;
+      const server=createServer((req,_res)=>{req.resume();req.on('end',()=>{sends++;transportEntered.release();});});
+      const saveEntered=deferredDrain(),saveGate=deferredDrain(),verifyEntered=deferredDrain(),verifyGate=deferredDrain();
+      const cfg={state:'configured',transport:'local',origin:'http://127.0.0.1:1',identity:{model:'fixture',revision:'v1'},
+        limits:{timeoutMs:2000,maxInputBytes:4096,maxCandidates:8,maxOutputTokens:32,maxConcurrent:1}} as const;
+      const original=f.plugin.saveData.bind(f.plugin);
+      let verifies=0;
+      const prepare=()=>role==='reranking'?c.prepareRerank():c.prepareGeneration();
+      const confirm=(p:ReturnType<typeof prepare>)=>role==='reranking'
+        ?c.rerankConfirmed(p,'synthetic','fixture'):c.generationConfirmed(p,'synthetic','fixture');
+      const provision=()=>{
+        const host=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof cfg,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
+        host.rerankProfiles.installSyntheticFixture(cfg,host.rerankPort.scopeId(),'settings-fixture');
+      };
+      try {
+        if(stage==='transport') {
+          await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+          const address=server.address();assert.ok(address&&typeof address!=='string');
+          Object.assign(cfg,{origin:'http://127.0.0.1:'+address.port});
+          verifyGate.release();
+        }
+        await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+        await f.plugin.patchSettings(s=>{s.ai.reranking=cfg;s.ai.generation=cfg;});
+        provision();
+        assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+        const preview=prepare();
+        const other=role==='reranking'?c.prepareGeneration():c.prepareRerank();
+        Object.assign(f.plugin,{verifyAiEvidence:async()=>{verifies++;verifyEntered.release();await verifyGate.promise;},
+          saveData:async()=>{saveEntered.release();await saveGate.promise;throw Error('synthetic save failure');}});
+        const operation=active?confirm(preview):undefined;
+        if(active)await navigationWatchdog(verifyEntered.promise);
+        if(stage==='transport')await navigationWatchdog(transportEntered.promise);
+        const saving=f.plugin.patchSettings(s=>{s.ai[role]={state:'disabled'};});
+        const rejected=assert.rejects(saving,/synthetic save failure/);
+        await navigationWatchdog(saveEntered.promise);
+        assert.equal(c.sharedAuthorityTransition(),true);
+        assert.equal(c.isEvidencePreviewCurrent(role,preview.sequence),false);
+        assert.equal(c.isEvidencePreviewCurrent(role==='reranking'?'generation':'reranking',other.sequence),false);
+        assert.throws(()=>c.prepareGeneration());assert.throws(()=>c.prepareRerank());
+        assert.equal((await c.search(uiRequest('blocked',1))).ok,false);
+        assert.equal(c.control('resume').ok,false);
+        await assert.rejects(confirm(preview));
+        if(operation)await navigationWatchdog(operation);
+        assert.equal(verifies,active?1:0);
+        assert.equal(sends,stage==='transport'?1:0);
+        saveGate.release();await rejected;
+        assert.equal(f.plugin.settings.ai[role].state,'configured');
+        assert.equal(c.isEvidencePreviewCurrent(role,preview.sequence),false);
+        await assert.rejects(confirm(preview));
+        verifyGate.release();
+        Object.assign(f.plugin,{saveData:original});
+        await f.plugin.patchSettings(s=>{s.topK=s.topK===1?2:1;});
+        provision();
+        assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+        const fresh=prepare();assert.equal(c.isEvidencePreviewCurrent(role,fresh.sequence),true);
+        f.plugin.onunload();
+        assert.equal(c.sharedAuthorityTransition(),true);
+        await assert.rejects(confirm(fresh));
+        assert.equal(verifies,active?1:0);
+        assert.equal(sends,stage==='transport'?1:0);
+      }finally{saveGate.release();verifyGate.release();Object.assign(f.plugin,{saveData:original});await f.cleanup();
+        server.closeAllConnections();if(server.listening)await new Promise<void>(resolve=>server.close(()=>resolve()));}
+    });
+  }
+}

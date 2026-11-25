@@ -82,6 +82,8 @@ export class SearchController {
   private pendingExpiryNotification?: object;
   private notifying = false;
   private revokingSharedAuthority = false;
+  private runtimeSettingsChanging = false;
+  private pendingSettingsRetirement?: () => void;
   private sharedAuthorityFault = false;
   private deliveringLifecycle = false;
   private evidencePending?: number;
@@ -227,8 +229,9 @@ export class SearchController {
   private queueLifecycle(): void {
     this.lifecyclePending = {revision:this.revision,final:this.disposed,listeners:[...this.listeners]};
   }
-  private emit(final = false): void {
+  private emit(final = false, retireSettings?: () => void): void {
     if (this.disposed && !final) return;
+    if (retireSettings) this.pendingSettingsRetirement = retireSettings;
     this.pendingExpiryNotification = undefined;
     // Reserve publication before the synchronous host hook. A nested transition
     // may replace it but cannot drain or dispatch while authority is being revoked.
@@ -239,8 +242,10 @@ export class SearchController {
     this.revokingSharedAuthority = true;
     try {
       this.revokeSharedAuthority?.();
+      this.pendingSettingsRetirement?.();
+      this.pendingSettingsRetirement = undefined;
       this.sharedAuthorityFault = false;
-    } catch {
+    } catch (error) {
       // A failed trusted hook is not an observer exception: no authority
       // can be issued until a later shared transition successfully revokes it.
       this.sharedAuthorityFault = true;
@@ -252,6 +257,7 @@ export class SearchController {
       this.queueLifecycle();
       this.notificationVersion++;
       console.warn('SEARCH_AUTHORITY_REVOKE_FAILED');
+      if (retireSettings) throw error;
     } finally {
       this.revokingSharedAuthority = false;
       this.drainNotifications(true);
@@ -260,8 +266,17 @@ export class SearchController {
   /** Host admission stays closed through shared revocation and lifecycle delivery,
    * never through independent evidence-only notifications. */
   sharedAuthorityTransition(): boolean {
-    return this.disposed || this.sharedAuthorityFault || this.revokingSharedAuthority || this.deliveringLifecycle || !!this.lifecyclePending;
+    return this.disposed || this.runtimeSettingsChanging || this.sharedAuthorityFault || this.revokingSharedAuthority || this.deliveringLifecycle || !!this.lifecyclePending;
   }
+  /** Fence admission before observers or persistence can yield. Failed retirement
+   * remains latched independently of the settings transaction's lifetime. */
+  beginRuntimeSettingsChange(retire: () => void): void {
+    this.runtimeSettingsChanging = true;
+    this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null});
+    this.rerankProfiles.revoke();
+    this.emit(false, retire);
+  }
+  endRuntimeSettingsChange(): void { this.runtimeSettingsChanging = false; }
   invalidate(): void { if (!this.disposed) this.invalidateState(); }
   private resetSharedState(state: UiState): void {
     this.revision++; this.revokeEvidence(); this.lastQuery = '';
@@ -282,6 +297,7 @@ export class SearchController {
     let request: SearchRequest;
     try { request = parseSearch(input); } catch { return failure('INVALID_REQUEST'); }
     if (this.disposed || !this.enabled) return failure('DISABLED');
+    if (this.runtimeSettingsChanging) return failure('SUPERSEDED');
     if (!this.engine) return failure(this.error ?? 'INDEX_UNAVAILABLE');
     this.resetSharedState({phase:'searching',message:'Verifying original sources…',response:null});
     const revision = this.revision;
@@ -294,7 +310,7 @@ export class SearchController {
     return result;
   }
   private async pump(): Promise<void> {
-    if (this.notifying || this.revokingSharedAuthority || this.sharedAuthorityFault || this.active || !this.pending) return;
+    if (this.notifying || this.runtimeSettingsChanging || this.revokingSharedAuthority || this.sharedAuthorityFault || this.active || !this.pending) return;
     const job = this.pending; this.pending = undefined;
     if (this.disposed || job.revision !== this.revision || !this.engine) {
       job.resolve(failure('SUPERSEDED')); return;
@@ -381,7 +397,7 @@ export class SearchController {
     this.notifyExpiry();
   }
   private prepareEvidence(role: EvidenceRole): RerankPreview {
-    if (this.disposed || this.sharedAuthorityFault || this.revokingSharedAuthority) throw new ProviderFailure('NOT_READY');
+    if (this.sharedAuthorityTransition()) throw new ProviderFailure('NOT_READY');
     // Replacing consent is a single commit. In particular no observer can
     // prepare another preview between clearing the old timer and owning the new one.
     const removed = this.clearPreview(role);
@@ -466,7 +482,7 @@ export class SearchController {
     return this.confirmEvidence('generation',preview,classification,token);
   }
   private async confirmEvidence(role: EvidenceRole, preview: RerankPreview, classification: 'synthetic' | 'public', token: string): Promise<void> {
-    if (this.sharedAuthorityFault || this.revokingSharedAuthority) throw new ProviderFailure('DISCLOSURE_DENIED');
+    if (this.sharedAuthorityTransition()) throw new ProviderFailure('DISCLOSURE_DENIED');
     const approved = this.currentPreview(role,false)?.preview;
     if (!approved) throw new ProviderFailure('DISCLOSURE_DENIED');
     this.clearPreview(role);
@@ -542,7 +558,7 @@ export class SearchController {
   }
   control(action: 'pause' | 'cancel' | 'resume' | 'rebuild'): ApiResult<{ cancelled: boolean | null }> {
     if (this.disposed || !this.enabled || !this.engine) return failure('DISABLED');
-    if (this.revokingSharedAuthority) return failure('SUPERSEDED');
+    if (this.runtimeSettingsChanging || this.revokingSharedAuthority) return failure('SUPERSEDED');
     const engine = this.engine, revision = this.revision + 1;
     this.invalidate();
     // The initial shared invalidation is synchronous. Do not execute a stale
