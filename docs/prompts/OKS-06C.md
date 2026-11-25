@@ -42,7 +42,9 @@ from a check. Use transient dedicated credentials, never source-sync or AI keys.
   overwriting. Read back and verify its digest. Clean up only the created
   object/version, using exact version identity where applicable; never
   delete other versions or existing artifacts. Define bounded cleanup and
-  cancellation handling even after ambiguous create outcomes, and report
+  cancellation handling even after ambiguous create outcomes (no new probe
+  work after cancellation; only separately bounded cleanup of a provably
+  owned object), and report
   unverified ownership, retention, versioning or cleanup failure explicitly.
   A delete marker alone does not establish removal of the created version.
   Never claim write verification for a consumer or successful cleanup on
