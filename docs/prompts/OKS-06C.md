@@ -1,0 +1,85 @@
+# OKS-06C — Portable embedding reuse: planning and acceptance obligations
+
+Status: prospective requirements, documentation-only maintainer direction (2026-11-24). This is not implementation authorization, a frozen wire schema, or evidence of a passed gate. Before implementing, reconcile the actual develop state and earlier admissible slices, pin the base SHA, review the bounded execution contract and exact schema/protocol, and satisfy SDD entry dependencies.
+
+## Authority and scope
+
+- AGENTS.md, SECURITY.md, SDD, SPEC CAP-12/AC-12 with CAP-01/06/08/09/10 and conditional CAP-04/05; ADR-0008, ADR-0010, ADR-0013, ADR-0015; canonical source/evidence contracts.
+- After independent Gate A acceptance in 05E and applicable 05P/05E dense-role acceptance. Portable reuse is optional and never a new Gate A requirement. Preserve one active model-compatible dense index and separate autonomous basic search.
+- Reuse source identity, scope, chunk/evidence validation, lifecycle fences, generation storage and provider consent/budget mechanisms where compatible. Review licensed S3/authentication dependencies and avoid new source sync, parsing or index subsystems.
+- No source-bucket credentials, external sync orchestration, live SQLite transport, multi-writer, remote extraction, real-Vault scan, cloud provisioning/upload or model downloads authorized. Use synthetic sources and controlled artifact transport; live S3/provider checks require separate authorization. No private manifests, vectors, source text or credentials in public evidence.
+
+## Design gate before implementation
+
+Specify authenticated versioned generation and content manifests, deterministic serialization/digests, immutable object addressing, exact coverage and zero-chunk outcomes, publisher snapshot/commit protocol, identity/authorization and replay/rollback policy. Define local reconciliation and typed lifecycle states (at minimum waiting for artifacts, waiting for content, rejected/incompatible/denied, staging and active), bounded pending persistence, revalidation triggers, retry/cancel/abandon behavior, stale suppression and atomic commit/recovery. Distinguish transient waiting from permanent divergence and denied/corrupt input; do not silently auto-rebuild or infer while waiting. Specify privacy-approved source identifiers, trusted publisher authentication and encryption where required. Predeclare measurable workload, transfer, disk/RSS, latency and quality budgets before acceptance; no unmeasured performance claim.
+
+Define the default-off portable exchange setting and independent local-only mode; conditional transport settings (endpoint, region/signing, bucket, prefix, addressing, secret references), session cancellation/fencing, switch/rollback and destination authorization. Reuse an adapter/SDK behind a provider-neutral object contract. Model/space configuration is independent of storage and other AI roles; cover distinct dimensions/profile identities without hard-coded pilot assumptions. Predeclare two independent S3-compatible implementations and a common contract suite; use synthetic local services, no real cloud without separate authorization.
+
+## Explicit S3 connection check (issue #59)
+
+Apply [OKS-06UX-CHECK](OKS-06UX-CHECK.md) CHECK-01/02/04/05/06 to
+the same reviewed S3 adapter used by portable exchange. The adapter and
+settings/security contract are prerequisites, not delivered by this planning
+document. The explicit unsaved-draft check is distinct from automatic
+exchange: when exchange is off there are no automatic S3 requests, but an
+explicit bounded synthetic check may run without enabling exchange. Opening,
+editing or saving Settings must never trigger it. Disabling exchange during
+a check, editing its configuration, closing its editor or unloading the
+plugin cancels/fences the old check. No import/export, sync, index change,
+Vault read, activation, persisted permission or inferred readiness follows
+from a check. Use transient dedicated credentials, never source-sync or AI keys.
+
+- Consumer/default: validate endpoint, TLS, signing/region, addressing,
+  bucket and prefix before I/O. Limit the read-only probe to the configured
+  bucket/prefix. Report each actually exercised permission separately;
+  an empty successful listing proves scoped List, not Get/Head or write.
+  Only an explicitly designated synthetic object may be used for a Head/Get
+  permission probe; if none is available report that permission as unverified,
+  not failed or implicitly granted. Do not expose returned real object names,
+  read actual portable artifacts, enumerate other buckets or provision resources.
+- Publisher: only with separate explicit write-test authorization, conditionally
+  create a tiny synthetic object at a unique reserved probe key without
+  overwriting. Read back and verify its digest. Clean up only the created
+  object/version, using exact version identity where applicable; never
+  delete other versions or existing artifacts. Define bounded cleanup and
+  cancellation handling even after ambiguous create outcomes (no new probe
+  work after cancellation; only separately bounded cleanup of a provably
+  owned object), and report
+  unverified ownership, retention, versioning or cleanup failure explicitly.
+  A delete marker alone does not establish removal of the created version.
+  Never claim write verification for a consumer or successful cleanup on
+  an unknown result.
+- Both: share the approved client's endpoint, no-redirect TLS/authentication,
+  bounds, cancellation and redacted typed error policy. Exercise the check
+  contract against the two independent S3 implementations required by
+  06C-AC-16 and isolated Obsidian RU/EN Basic/Expert. Live bucket testing
+  remains separately authorized. No selected SDK or storage provider is
+  implied by this contract.
+
+## Mandatory acceptance matrix (synthetic, independently reviewed)
+
+| ID | Scenario | Required observed result |
+|---|---|---|
+| 06C-AC-01 | Cache generation complete, source absent or old on source bucket and consumer | Pending content, no activation, no stale evidence or document inference; activate only after exact authorized local content arrives. |
+| 06C-AC-02 | Source arrives before vectors/manifest in an enabled import workflow | Pending artifacts; no ready claim or repeated inference solely while waiting; matching complete generation activates once. |
+| 06C-AC-03 | Partial/reordered/duplicate delivery on either channel, restart and repeated retries | Idempotent bounded staging, no partial activation; eventual complete valid delivery activates without duplicate inference. |
+| 06C-AC-04 | Same path with changed raw bytes, Unicode/CRLF, differing extraction/chunk input or profile | No hash/path/name-only false matches; exact compatible inputs reusable only after local evidence validation. |
+| 06C-AC-05 | Local concurrent edits, rename/delete, inaccessible/excluded file, scope change, additional local source inside/outside collection | No stale/unauthorized hit, no silent omission from claimed coverage, no forced overwrite; outside-scope sources do not block valid scoped import. Divergence is explicit; authorized abandon/rebuild path available. |
+| 06C-AC-06 | In-flight mutation during publisher snapshot, consumer staging, commit or query | No mixed-source publication; source-event fence/revalidation rejects obsolete candidates/results. |
+| 06C-AC-07 | Crash/cancel before and during publication, rollback after source/model/scope change | No half-active generation; idempotent restart/reconciliation; rollback only after fresh local validation; one active dense index. |
+| 06C-AC-08 | Corrupt/truncated/missing object; malformed, oversized, forged or replayed manifest; incorrect collection/space | Fail closed with bounded resources and distinct typed rejection or pending reason; never accept stale replay or expose private payload. |
+| 06C-AC-09 | S3 disabled/offline/timeout, permanent missing content, repeated restarts, provider unavailable | Basic occurrence/Properties remains available; truthful AI status, bounded retries/storage, cancel/abandon and explicit retry; no hidden fallback or automatic paid calls. |
+| 06C-AC-10 | Two independent local roots, same authorized inputs and compatible model; incremental changes | Verified reuse with zero document-embedding calls for compatible inputs; unchanged chunks reused; new/mismatched inputs calculated only by authorized rebuild/provider workflow; query encoder independently verified. |
+| 06C-AC-11 | Unapproved scope, credential misuse, private filenames/metadata and diagnostic export | No unauthorized read/export/activation; separate least-privilege credentials; authenticated manifests and required encryption; aggregate diagnostics only, no sensitive payload. |
+| 06C-AC-12 | Real isolated Obsidian host with two synthetic replicas; event changes, missed events/startup and explicit retry | Pending state and counts distinguish artifacts/content/active index; event-driven reconciliation completes safely, no new sync-client dependency, no basic search regression; evidence and retrieval quality/resource budgets measured. |
+| 06C-AC-13 | Fresh install and restart with exchange disabled, no S3 config/credentials or reachable endpoint; local indexing, incremental changes, rebuild and retrieval | Zero automatic S3 requests/probes/polls (without an explicit Check action); basic search and locally configured dense/hybrid work independently when their own roles/index are ready; no pending-import gate or required S3 settings. |
+| 06C-AC-14 | Hot disable during upload/download, retry, pending-content wait and commit race | Cancel/fence old session, no new S3 work or obsolete activation after disable; preserve valid local index/cache and usable dense/hybrid with compatible encoder, resume authorized local maintenance; no forced rebuild, remote deletion or source sync changes. |
+| 06C-AC-15 | Switch S3 endpoint/provider/region/bucket/prefix/credentials with unchanged embedding space, including invalid target and late old-session response | Preserve local artifact identity, usable current index and zero transport-induced re-embedding; fresh target approval and manifest validation; no automatic copy/delete, cross-credential use or old-session activation. |
+| 06C-AC-16 | Two independent S3-compatible implementations under one adapter contract | Same immutable-object and manifest-last semantics, bounded reads, missing/duplicate/corrupt object handling, auth failure, cancellation and recovery; no vendor-specific core dependency. Record actual tested implementations/configs; no untested cloud support claim. |
+| 06C-AC-17 | Multiple synthetic embedding profiles with distinct model/provider/dimension/normalization; independent reranker/LLM and credential changes | Compatible space reused regardless of S3 backend; incompatible space rejected or staged/reindexed under ADR-0015, no mixing; no re-embedding solely for reranker/LLM or credential-only change; one active dense index. |
+
+Instrument document embedding invocation counts, activation attempts/generation IDs, source coverage and stale-hit counts using synthetic data. Require zero automatic S3 operations initiated while disabled (the explicit synthetic Check above is not exchange), zero transport-only forced re-embedding, zero stale/unauthorized evidence, zero incomplete-generation activations, zero automatic document inference caused solely by waiting, and zero repeated document inference for verified compatible cache hits. Separate transport-level tests from real-host acceptance; mock/fixture success cannot be represented as live S3/provider or production deployment proof.
+
+## Exit
+
+Record exact base/HEAD, scope and requirement traceability, test commands and observed results, frozen corpus/budgets, privacy/resource/recovery evidence, limitations and independent full-diff review under SDD. No activation/merge claim from author checks alone. Keep external sync deployment authorization separate (ADR-0013); no expansion of existing 06UX or other in-flight work.
