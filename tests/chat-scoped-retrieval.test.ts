@@ -311,3 +311,137 @@ test('06H.2-A2b2a: sessions bounded and failed retirement blocks fresh admission
     assert.equal((await c.startRetainedChatTurn(other,selector,request).result).ok,true);
   }finally{c.dispose();}
 });
+
+test('06H.2-A2b2b1: credential epochs are host-local, replace same input and revoke on clear/retirement',async()=>{
+  const cfg:ProviderConfig={state:'configured',transport:'local',origin:'http://127.0.0.1:1',
+    identity:{model:'synthetic',revision:'v1'},limits:{timeoutMs:1000,maxInputBytes:4096,maxCandidates:3,maxOutputTokens:32,maxConcurrent:1}};
+  const port={config:()=>cfg,scopeId:()=>root,verify:async()=>{throw Error('unexpected generation');}};
+  const c=new SearchController(async()=>{},undefined,undefined,undefined,port),other=new SearchController(async()=>{},undefined,undefined,undefined,port);
+  try{
+    c.attach(engine(async()=>lease()));other.attach(engine(async()=>lease()));
+    const session=c.openRetainedChatSession(),foreign=other.openRetainedChatSession();
+    const turn=c.startRetainedChatTurn(session,selector,request),second=other.startRetainedChatTurn(foreign,selector,request);
+    assert.equal((await turn.result).ok,true);assert.equal((await second.result).ok,true);
+    const authority=(c as unknown as {generationCredential:import('../plugin/src/ai/generation-credential').GenerationCredentialAuthority}).generationCredential;
+    const binding=(await import('../plugin/src/ai/disclosure')).configDigest('generation',cfg);
+    const a=await c.bindRetainedGenerationCredential(session,turn.owner,'synthetic-token');
+    const b=await c.bindRetainedGenerationCredential(session,turn.owner,'synthetic-token');
+    assert.equal(a.hostId,b.hostId);assert.ok(b.epoch>a.epoch);
+    assert.equal(authority.current(turn.owner,binding,a),false);
+    assert.equal(authority.current(turn.owner,binding,b),true);
+    assert.equal(authority.current({},binding,b),false);
+    assert.equal(authority.current(turn.owner,'wrong',b),false);
+    const x=await other.bindRetainedGenerationCredential(foreign,second.owner,'synthetic-token');
+    assert.notEqual(x.hostId,a.hostId);
+    assert.deepEqual(Object.keys(a).sort(),['epoch','hostId']);
+    await assert.rejects(c.bindRetainedGenerationCredential(foreign,turn.owner,'synthetic-token'),{message:'CANCELLED'});
+    await assert.rejects(c.bindRetainedGenerationCredential(session,{},'synthetic-token'),{message:'CANCELLED'});
+    await assert.rejects(c.bindRetainedGenerationCredential(session,turn.owner,'bad\n'),{message:'UNAUTHENTICATED'});
+    c.clearRetainedGenerationCredential(session,turn.owner);
+    const d=await c.bindRetainedGenerationCredential(session,turn.owner,'different-token');
+    assert.ok(d.epoch>b.epoch);
+    assert.equal(authority.current(turn.owner,binding,d),true);
+    assert.equal(JSON.stringify(authority).includes('different-token'),false);
+    assert.equal(JSON.stringify(c.snapshot()).includes('different-token'),false);
+    assert.throws(()=>c.prepareGeneration(),{message:'BUSY'});
+    c.cancelRetainedChatTurn(session,turn.owner);
+    assert.equal(authority.current(turn.owner,binding,d),false);
+    await assert.rejects(c.bindRetainedGenerationCredential(session,turn.owner,'synthetic-token'),{message:'CANCELLED'});
+    assert.equal((await c.search(uiRequest('offline',1))).ok,true);
+  }finally{c.dispose();other.dispose();}
+});
+
+test('06H.2-A2b2b1: outstanding resolver is logically revoked before abort, late results never bind',async()=>{
+  const cfg:ProviderConfig={state:'configured',transport:'local',origin:'http://127.0.0.1:1',
+    identity:{model:'synthetic',revision:'v1'},limits:{timeoutMs:1000,maxInputBytes:4096,maxCandidates:3,maxOutputTokens:32,maxConcurrent:1}};
+  for(const action of ['clear','replace','source','unload','config'] as const){
+    const pending=deferred<string|null>();let signal:AbortSignal|undefined,calls=0;
+    const c=new SearchController(async()=>{},undefined,undefined,undefined,
+      {config:()=>cfg,scopeId:()=>root,verify:async()=>{throw Error('unexpected generation');}},undefined,
+      {resolve:async(role,config,s)=>{assert.equal(role,'generation');assert.equal(config.identity.revision,cfg.identity.revision);calls++;signal=s;return pending.promise;}});
+    try{
+      c.attach(engine(async()=>lease()));
+      const session=c.openRetainedChatSession(),turn=c.startRetainedChatTurn(session,selector,request);
+      assert.equal((await turn.result).ok,true);
+      const work=c.resolveRetainedGenerationCredential(session,turn.owner);
+      const rejected=assert.rejects(work,{message:'CANCELLED'});
+      assert.equal(calls,1);
+      if(action==='clear')c.clearRetainedGenerationCredential(session,turn.owner);
+      if(action==='replace')await assert.rejects(c.bindRetainedGenerationCredential(session,turn.owner,'new-token'),{message:'BUSY'});
+      if(action==='source')c.invalidateSource([]);
+      if(action==='unload')c.dispose();
+      if(action==='config')cfg.identity.revision='v2';
+      if(action!=='config'){await rejected;assert.equal(signal?.aborted,true);}
+      pending.resolve('late-token');await rejected;await flush();
+      await assert.rejects(c.bindRetainedGenerationCredential(session,turn.owner,'new-token'),{message:'CANCELLED'});
+      assert.equal(JSON.stringify(c.snapshot()).includes('late-token'),false);
+      if(action!=='unload')assert.equal((await c.search(uiRequest('offline',1))).ok,true);
+    }finally{pending.resolve(null);cfg.identity.revision='v1';c.dispose();}
+  }
+});
+
+test('06H.2-A2b2b1: trusted resolver success, absent resolver and expiry fail closed',async t=>{
+  const cfg:ProviderConfig={state:'configured',transport:'local',origin:'http://127.0.0.1:1',
+    identity:{model:'synthetic',revision:'v1'},limits:{timeoutMs:1000,maxInputBytes:4096,maxCandidates:3,maxOutputTokens:32,maxConcurrent:1}};
+  const port={config:()=>cfg,scopeId:()=>root,verify:async()=>{}};
+  const pending=deferred<string|null>();let calls=0;
+  const c=new SearchController(async()=>{},undefined,undefined,undefined,port,undefined,
+    {resolve:async()=>++calls===1?'resolved-token':pending.promise});
+  const other=new SearchController(async()=>{},undefined,undefined,undefined,port);
+  try{
+    c.attach(engine(async()=>lease()));other.attach(engine(async()=>lease()));
+    const session=c.openRetainedChatSession(),turn=c.startRetainedChatTurn(session,selector,request);
+    const foreign=other.openRetainedChatSession(),otherTurn=other.startRetainedChatTurn(foreign,selector,request);
+    assert.equal((await turn.result).ok,true);assert.equal((await otherTurn.result).ok,true);
+    await assert.rejects(other.resolveRetainedGenerationCredential(foreign,otherTurn.owner),{message:'NOT_READY'});
+    const stamp=await c.resolveRetainedGenerationCredential(session,turn.owner);
+    assert.equal(typeof stamp.epoch,'number');assert.equal(JSON.stringify(c.snapshot()).includes('resolved-token'),false);
+    const start=Date.now();t.mock.method(Date,'now',()=>start);
+    const work=c.resolveRetainedGenerationCredential(session,turn.owner);
+    const rejected=assert.rejects(work,{message:'TIMEOUT'});
+    t.mock.method(Date,'now',()=>start+31000);pending.resolve('expired-token');await rejected;
+    assert.equal(JSON.stringify(c.snapshot()).includes('expired-token'),false);
+  }finally{pending.resolve(null);c.dispose();other.dispose();}
+});
+
+test('06H.2-A2b2b1: exact attempt completion, terminal seal and overflow arithmetic',async()=>{
+  const {GenerationCredentialAuthority,nextCredentialEpoch}=await import('../plugin/src/ai/generation-credential');
+  const authority=new GenerationCredentialAuthority(),owner={},other={};
+  const first=authority.begin(owner,'config'),second=authority.begin(owner,'config');
+  assert.throws(()=>authority.complete(first,'synthetic'),{message:'CANCELLED'});
+  const stamp=authority.complete(second,'synthetic');
+  authority.revoke(other);assert.equal(authority.current(owner,'config',stamp),true);
+  assert.throws(()=>authority.complete(second,'synthetic'),{message:'CANCELLED'});
+  authority.seal();assert.equal(authority.current(owner,'config',stamp),false);
+  assert.throws(()=>authority.begin(owner,'config'),{message:'NOT_READY'});
+  assert.equal(nextCredentialEpoch(Number.MAX_SAFE_INTEGER-1),Number.MAX_SAFE_INTEGER);
+  for(const epoch of [Number.MAX_SAFE_INTEGER,Infinity,-1,0.5])assert.throws(()=>nextCredentialEpoch(epoch),{message:'NOT_READY'});
+});
+
+test('06H.2-A2b2b1: resolver reentry cannot bind or admit a second turn before drain',async()=>{
+  const cfg:ProviderConfig={state:'configured',transport:'local',origin:'http://127.0.0.1:1',
+    identity:{model:'synthetic',revision:'v1'},limits:{timeoutMs:1000,maxInputBytes:4096,maxCandidates:3,maxOutputTokens:32,maxConcurrent:1}};
+  const pending=deferred<string|null>();
+  let c:SearchController,session:object,owner:object,reentered:Promise<unknown>|undefined;
+  let admitted:ReturnType<SearchController['startRetainedChatTurn']>|undefined;
+  c=new SearchController(async()=>{},undefined,undefined,undefined,{config:()=>cfg,scopeId:()=>root,verify:async()=>{}},undefined,
+    {resolve:async(_role,_config,signal)=>{
+      signal.addEventListener('abort',()=>{
+        reentered=assert.rejects(c.bindRetainedGenerationCredential(session,owner,'reentrant'),{message:'CANCELLED'});
+        admitted=c.startRetainedChatTurn(session,selector,request);
+      });
+      return pending.promise;
+    }});
+  try{
+    c.attach(engine(async()=>lease()));session=c.openRetainedChatSession();
+    const turn=c.startRetainedChatTurn(session,selector,request);owner=turn.owner;
+    assert.equal((await turn.result).ok,true);
+    const rejected=assert.rejects(c.resolveRetainedGenerationCredential(session,owner),{message:'CANCELLED'});
+    c.clearRetainedGenerationCredential(session,owner);
+    await rejected;await reentered;
+    assert.deepEqual(await admitted?.result,error('BUSY'));
+    assert.deepEqual(await c.startRetainedChatTurn(session,selector,request).result,error('BUSY'));
+    pending.resolve('late');await flush();
+    assert.equal((await c.startRetainedChatTurn(session,selector,request).result).ok,true);
+  }finally{pending.resolve(null);c.dispose();}
+});

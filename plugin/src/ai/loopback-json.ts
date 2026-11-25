@@ -1,7 +1,7 @@
 import { Agent, request, type ClientRequest } from 'node:http';
 import { remainingOperationMs, expireActiveDeadline, deadlineFailure } from './active-deadline';
 import { parsePreference } from './config';
-import { ProviderFailure, type CallContext, type ProviderConfig, type AuthorizedCandidates } from './contracts';
+import { isBearerToken, ProviderFailure, type CallContext, type ProviderConfig, type AuthorizedCandidates } from './contracts';
 
 const MAX_WIRE_BYTES = 128 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
@@ -59,7 +59,7 @@ export class LoopbackJsonTransport {
     if (!['/v1/rerank','/v1/chat/completions','/v1/embeddings'].includes(path)) return fail('ENDPOINT_DENIED');
     if (context.signal.aborted) remainingOperationMs(context);
     if (!Number.isSafeInteger(context.deadlineUnixMs)) return fail('CONFIG_INVALID');
-    if (typeof token !== 'string' || !/^[A-Za-z0-9._~+\/=-]{1,512}$/.test(token)) return fail('UNAUTHENTICATED');
+    if (!isBearerToken(token)) return fail('UNAUTHENTICATED');
     const key = config.origin + path;
     if (this.busy || activeRequests.has(key)) return fail('QUOTA_EXCEEDED');
     const body = checkedJsonBody(payload);
