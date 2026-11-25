@@ -27,7 +27,10 @@ export class DenseAuthority {
   terminal(): boolean { return this.terminalClosed; }
   revoking(): boolean { return this.terminalClosed || this.revocations > 0 || this.sharedFence(); }
   epoch(): number { return this.revision; }
-  admissionClosed(): boolean { return this.revoking() || this.notifying; }
+  /** Logical ownership ends at the shared fence, before physical retirement
+   * can invoke abort callbacks. Ordinary observer delivery may read snapshots. */
+  ownershipVisible(): boolean { return !this.revoking(); }
+  admissionClosed(): boolean { return !this.ownershipVisible() || this.notifying; }
   delivering(): boolean { return this.notifying; }
   batch<T>(action: () => T): T {
     this.depth++;

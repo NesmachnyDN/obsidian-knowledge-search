@@ -38,11 +38,13 @@ export class ApiDenseHost {
     private readonly rootId:string,private readonly pluginId:string,private readonly port:HostPort,
     private readonly now=Date.now) {}
 
-  invalidate(path?:string):void {
+  invalidate(path?:string):void { this.invalidateSources(path===undefined?[]:[path]); }
+  invalidateSources(paths:readonly string[]):void {
     ++this.revision;
     this.prepared=undefined;
+    // Both sides of a rename are revoked before an abort listener can run.
+    for(const path of paths)this.store?.revoke(path);
     this.abort?.abort();
-    if(path!==undefined)this.store?.revoke(path);
   }
   async close():Promise<void> {
     this.disposed=true;this.invalidate();

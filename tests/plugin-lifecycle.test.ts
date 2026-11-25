@@ -1569,3 +1569,93 @@ for (const role of ['generation','reranking'] as const) {
     }finally{await operation;await f.cleanup();}
   });
 }
+
+// Exercise the production wiring with a real source-backed preview. The completed
+// result uses a controlled host response; no inference or HTTP is required.
+for (const role of ['generation','reranking'] as const) {
+  for (const phase of ['preview','complete'] as const) {
+    test(`B-R2-LIFE-16: ${role} shared abort revokes ${phase} and D8 ownership before callback`,async()=>{
+      const f=await fixture(),p=f.plugin,c=p.searchController;
+      const {denseUi,denseMachine}=p as unknown as {denseUi:DenseUiController;denseMachine:import('../plugin/src/ai/dense-machine').DenseMachine};
+      const file=Object.assign(new Empty(),{path:'fixture.md'}),owner=Symbol('life16');
+      Object.assign(p.app.vault,{getMarkdownFiles:()=>[file],getAbstractFileByPath:(path:string)=>path===file.path?file:null});
+      let active:Promise<void>|undefined;
+      const replies:Promise<unknown>[]=[];
+      const observations:boolean[]=[];
+      try{
+        await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
+        await p.patchSettings(s=>{s.ai.generation=reloadFixtureConfig;s.ai.reranking=reloadFixtureConfig;s.ai.embedding=reloadFixtureConfig;});
+        const profiles=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof reloadFixtureConfig,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
+        profiles.rerankProfiles.installSyntheticFixture(reloadFixtureConfig,profiles.rerankPort.scopeId(),'life16-fixture');
+        const lexical=await c.search(uiRequest('REQ-LIFE-1',1));assert.ok(lexical.ok&&lexical.value.hits.length);
+        const space:EmbeddingSpace={...reloadFixtureConfig.identity,dimension:3,normalization:'unit-l2',serializationId:'utf8-verbatim-v1',queryInstructionId:'identity-v1',documentInstructionId:'identity-v1'};
+        const staged=await p.denseApi.request({apiVersion:1,operation:'submit',request:{protocolVersion:2,requestId:'life16-d8',query:'REQ-LIFE-1',requestedMode:'dense',matchMode:'terms',scope:['fixture.md'],limit:1},space});
+        assert.ok(staged.ok&&staged.value&&'operationId' in staged.value);
+        const operationId=staged.value.operationId;
+        const rendered:string[]=[];const off=denseUi.subscribe(()=>rendered.push(denseUi.snapshot(owner).phase));
+        await denseMachine.review(owner);
+        const preview=denseUi.snapshot(owner);assert.ok(preview.phase==='preview'&&preview.preview.evidence.length);
+        if(phase==='complete'){
+          const host=(p as unknown as {denseHost:ApiDenseHost}).denseHost;
+          const evidence=lexical.value.hits[0]!;
+          const result:import('../plugin/src/ai/dense-retrieval').ApiRetrievalResult={version:1,requestedMode:'dense',executedMode:'dense',status:'ok',error:null,indexGenerationId:'fixture-dense',lexicalGenerationId:lexical.value.indexGenerationId,hits:[{evidence,rank:1,denseRank:1,denseSimilarity:1,lexicalRank:null,lexicalScore:null,rrfScore:null}],legs:{dense:{status:'ready',candidateCount:1},lexical:{status:'unavailable',candidateCount:0}}};
+          Object.assign(host,{confirm:async()=>result});
+          await denseUi.confirm(owner,preview.preview.nonce,'synthetic','fixture');
+        }
+        assert.equal(denseUi.snapshot(owner).phase,phase);assert.equal(rendered.at(-1),phase);
+        assert.equal(denseMachine.owns(owner),true);
+        const start=()=>role==='generation'?c.generationConfirmed(c.prepareGeneration(),'synthetic','fixture'):c.rerankConfirmed(c.prepareRerank(),'synthetic','fixture');
+        Object.assign(p,{verifyAiEvidence:async()=>{throw Error('synthetic stop before HTTP');}});
+        const internals=c as unknown as {activeEvidence:Record<typeof role,{abort:AbortController}>};
+        const visible=()=>denseUi.owns(owner)&&denseMachine.owns(owner)&&denseUi.snapshot(owner).phase===phase;
+        active=start();let localVisible=false;
+        internals.activeEvidence[role].abort.signal.addEventListener('abort',()=>{localVisible=visible();},{once:true});
+        if(role==='generation')c.cancelGeneration();else c.cancelRerank();
+        await active;assert.equal(localVisible,true);assert.equal(visible(),true);
+        active=start();
+        const observe=()=>{
+          observations.push(c.sharedAuthorityTransition()&&c.snapshot().response===null&&denseUi.snapshot(owner).phase==='idle'
+            &&denseUi.metadata(owner).phase==='idle'&&denseUi.operationStatus().phase==='idle'&&!denseUi.owns(owner)&&!denseUi.occupied()
+            &&!denseMachine.owns(owner)&&!denseMachine.pending());
+          replies.push(p.denseApi.request({apiVersion:1,operation:'status',operationId}),p.denseApi.request({apiVersion:1,operation:'result',operationId}));
+        };
+        internals.activeEvidence[role].abort.signal.addEventListener('abort',observe,{once:true});
+        const machineSlot=(denseMachine as unknown as {slot:{abort:AbortController}}).slot;
+        machineSlot.abort.signal.addEventListener('abort',observe,{once:true});
+        assert.equal((await navigationWatchdog(c.search(uiRequest('REQ-LIFE-1',1)))).ok,true);
+        await active;off();
+        assert.deepEqual(observations,[true,true]);
+        assert.deepEqual(await Promise.all(replies),Array.from({length:4},()=>({apiVersion:1,ok:false,error:'INVALID_OPERATION'})));
+        assert.equal(denseUi.snapshot(owner).phase,'idle');
+        assert.equal(denseMachine.owns(owner),false);
+      }finally{await active;await f.cleanup();}
+    });
+  }
+}
+
+test('B-R2-LIFE-16: source event dense abort cannot expose lexical evidence or old ownership',async()=>{
+  const f=await fixture(),p=f.plugin,c=p.searchController;
+  const {denseUi,denseMachine}=p as unknown as {denseUi:DenseUiController;denseMachine:import('../plugin/src/ai/dense-machine').DenseMachine};
+  const owner=Symbol('source-event'),file=Object.assign(new Empty(),{path:'fixture.md'});
+  const events=new Map<string,(changed:{path:string},oldPath?:string)=>void>();
+  Object.assign(p.app.vault,{getMarkdownFiles:()=>[file],getAbstractFileByPath:(path:string)=>path===file.path?file:null,
+    on:(name:string,callback:(changed:{path:string},oldPath?:string)=>void)=>{events.set(name,callback);return {};}});
+  try{
+    await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
+    await p.patchSettings(s=>{s.ai.generation=reloadFixtureConfig;s.ai.embedding=reloadFixtureConfig;});
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    const preview=c.prepareGeneration();
+    const space:EmbeddingSpace={...reloadFixtureConfig.identity,dimension:3,normalization:'unit-l2',serializationId:'utf8-verbatim-v1',queryInstructionId:'identity-v1',documentInstructionId:'identity-v1'};
+    const staged=await p.denseApi.request({apiVersion:1,operation:'submit',request:{protocolVersion:2,requestId:'life16-source',query:'REQ-LIFE-1',requestedMode:'dense',matchMode:'terms',scope:['fixture.md'],limit:1},space});
+    assert.ok(staged.ok&&staged.value&&'operationId' in staged.value);
+    await denseMachine.review(owner);assert.equal(denseUi.snapshot(owner).phase,'preview');
+    const dense=(p as unknown as {denseHost:{abort:AbortController}}).denseHost;
+    let observed=false,callbacks=0;
+    dense.abort.signal.addEventListener('abort',()=>{callbacks++;observed=c.sharedAuthorityTransition()&&c.snapshot().response===null
+      &&!c.isEvidencePreviewCurrent('generation',preview.sequence)&&!denseUi.owns(owner)&&!denseMachine.owns(owner)&&denseUi.snapshot(owner).phase==='idle';},{once:true});
+    events.get('modify')!(file);
+    assert.equal(callbacks,1);assert.equal(observed,true);
+    assert.equal(denseUi.snapshot(owner).phase,'idle');
+    await p.standalone!.whenIdle();assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+  }finally{await f.cleanup();}
+});

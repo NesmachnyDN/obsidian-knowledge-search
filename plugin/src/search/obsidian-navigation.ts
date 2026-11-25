@@ -2,7 +2,7 @@ import { MarkdownView, TFile, type App } from 'obsidian';
 import { StandaloneError } from '../standalone/contracts';
 import type { SourceProvider } from '../standalone/source';
 import { SourceNavigator } from './navigation';
-export function obsidianNavigator(app: App, reader: SourceProvider): SourceNavigator<TFile> {
+export function obsidianNavigator(app: App, reader: SourceProvider, sharedFence: () => boolean): SourceNavigator<TFile> {
   return new SourceNavigator(reader, {
     exact: path => {
       const file = app.vault.getAbstractFileByPath(path);
@@ -28,5 +28,5 @@ export function obsidianNavigator(app: App, reader: SourceProvider): SourceNavig
         },
       };
     },
-  });
+  }, sharedFence);
 }

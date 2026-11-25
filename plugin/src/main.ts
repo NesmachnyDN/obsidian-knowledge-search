@@ -195,26 +195,28 @@ export default class SyntheticEvidencePlugin extends Plugin {
         this.controller?.cancel(); this.resultModal?.close();
       }
     };
-    this.registerEvent(this.app.vault.on('modify', file => invalidate(file)));
-    this.registerEvent(this.app.vault.on('delete', file => invalidate(file)));
-    this.registerEvent(this.app.vault.on('rename', (file, oldPath) => invalidate(file, oldPath)));
     // Changes can arrive before the asynchronous core has opened; startup does
     // a full authoritative reconciliation after the event handlers are registered.
-    const nativeChange = (file: TAbstractFile, oldPath?: string): void => {
+    const nativeChange = (file: TAbstractFile, oldPath?: string, fixtureChange = false): void => {
       if (this.unloaded) return;
-      this.navigator?.invalidate();
-      this.denseHost?.invalidate(file.path);
-      if (oldPath !== undefined) this.denseHost?.invalidate(oldPath);
-      this.searchController.invalidate();
-      this.standalone?.changed(file.path);
-      this.advancedIngestion.invalidate(file.path);
-      this.advancedRetrieval.invalidate(file.path);
-      if (oldPath !== undefined) { this.standalone?.changed(oldPath); this.advancedIngestion.invalidate(oldPath);this.advancedRetrieval.invalidate(oldPath); }
+      const paths = oldPath === undefined ? [file.path] : [file.path, oldPath];
+      this.searchController.invalidateSource(() => {
+        // A source event can abort the dense host before evidence callbacks.
+        // Both lexical and dense read rights are already logically revoked.
+        this.navigator?.invalidate();
+        for (const path of paths) this.standalone?.changed(path);
+        this.denseHost?.invalidateSources(paths);
+        for (const path of paths) {
+          this.advancedIngestion.invalidate(path);
+          this.advancedRetrieval.invalidate(path);
+        }
+        if (fixtureChange) invalidate(file, oldPath);
+      });
     };
     this.registerEvent(this.app.vault.on('create', file => nativeChange(file)));
-    this.registerEvent(this.app.vault.on('modify', file => nativeChange(file)));
-    this.registerEvent(this.app.vault.on('delete', file => nativeChange(file)));
-    this.registerEvent(this.app.vault.on('rename', (file, oldPath) => nativeChange(file, oldPath)));
+    this.registerEvent(this.app.vault.on('modify', file => nativeChange(file, undefined, true)));
+    this.registerEvent(this.app.vault.on('delete', file => nativeChange(file, undefined, true)));
+    this.registerEvent(this.app.vault.on('rename', (file, oldPath) => nativeChange(file, oldPath, true)));
     this.registerEvent(this.app.metadataCache.on('changed', file => nativeChange(file)));
     // The renderer remains responsive during Obsidian's initial layout/mount.
     // A full reconciliation covers all source changes before layout readiness.
@@ -597,7 +599,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
       try { engine = new StandaloneEngine(provider, store, parser); }
       catch (error) { await parser.close(); throw error; }
       this.standalone = engine;
-      this.navigator = obsidianNavigator(this.app, provider);
+      this.navigator = obsidianNavigator(this.app, provider, () => this.searchController.sharedAuthorityTransition());
       this.sourceReader = provider;
       this.attachDenseHost();
       this.searchController.attach(engine);
@@ -619,7 +621,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     this.denseHost = new ApiDenseHost(engine, resolve(adapter.getBasePath()), reader.rootId, this.manifest.id, {
       config: () => this.settings.ai.embedding,
       admitStorage: async () => { await ingestionBarriers.get(resolve(adapter.getBasePath())); },
-      enabled: () => !this.unloaded && !this.denseSettingsChanging && this.settings.enabled && !this.settings.paused
+      enabled: () => this.denseUi.authority.ownershipVisible() && !this.unloaded && !this.denseSettingsChanging && this.settings.enabled && !this.settings.paused
         && !this.settings.ingestion.enabled && this.standalone === engine && this.sourceReader === reader
         && this.app.vault.adapter === adapter,
       allowedPath: path => {

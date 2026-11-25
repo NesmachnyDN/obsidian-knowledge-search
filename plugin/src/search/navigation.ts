@@ -34,16 +34,17 @@ export interface NavigationPort<File> {
 export class SourceNavigator<File> {
   private revision = 0;
   private disposed = false;
-  constructor(private readonly provider: Pick<SourceProvider, 'read'>, private readonly port: NavigationPort<File>) {}
+  constructor(private readonly provider: Pick<SourceProvider, 'read'>, private readonly port: NavigationPort<File>,
+    private readonly sharedFence: () => boolean = () => false) {}
   invalidate(): void { this.revision++; }
   dispose(): void { this.disposed = true; this.invalidate(); }
   async open(hit: EvidenceHit): Promise<void> {
-    if (this.disposed) throw new StandaloneError('NAVIGATION_REJECTED');
+    if (this.disposed || this.sharedFence()) throw new StandaloneError('NAVIGATION_REJECTED');
     // Snapshot caller-owned evidence before crossing an asynchronous boundary.
     const value = structuredClone(hit);
     const revision = ++this.revision;
     const file = validPath(value.sourceId) ? this.port.exact(value.sourceId) : null;
-    const current = (): boolean => !this.disposed && revision === this.revision;
+    const current = (): boolean => !this.disposed && !this.sharedFence() && revision === this.revision;
     const guard = (): void => {
       if (!file || !current() || this.port.exact(value.sourceId) !== file || !current())
         throw new StandaloneError('NAVIGATION_REJECTED');

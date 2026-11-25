@@ -63,14 +63,14 @@ export class DenseMachine {
   private current(s:Slot):boolean {
     try{
       const p=this.port.preference();
-      return !this.disposed&&!this.ui.isDisposed()&&!this.ui.authority.revoking()&&this.slot===s&&!s.abort.signal.aborted&&this.now()<s.fence.expiresUnixMs
+      return !this.disposed&&!this.ui.isDisposed()&&this.ui.authority.ownershipVisible()&&this.slot===s&&!s.abort.signal.aborted&&this.now()<s.fence.expiresUnixMs
         &&this.port.host()===s.host&&p.state==='configured'
         &&configDigest('embedding',pilotConfig(p))===s.fence.digest
         &&(!s.owner||this.ui.owns(s.owner));
     }catch{return false;}
   }
   pending():boolean {return !this.disposed&&!this.ui.isDisposed()&&!!this.slot&&!this.slot.owner&&this.current(this.slot);}
-  owns(owner:symbol):boolean{return !this.disposed&&!this.ui.isDisposed()&&this.slot?.owner===owner;}
+  owns(owner:symbol):boolean{return !this.disposed&&!this.ui.isDisposed()&&this.ui.authority.ownershipVisible()&&this.slot?.owner===owner;}
   /** Only called from a dedicated human ItemView action. */
   async review(owner:symbol):Promise<void> {
     const s=this.slot;
@@ -135,7 +135,9 @@ export class DenseMachine {
         return this.current(s)?ok({operationId:id,expiresUnixMs}):fail('INVALID_OPERATION');
       }
       const s=this.slot;
-      if(!s||cmd.operationId!==s.id)return fail('INVALID_OPERATION');
+      // Logical revocation is already committed. A read/status callback must
+      // not recursively retire a still-pinned physical owner.
+      if(!this.ui.authority.ownershipVisible()||!s||cmd.operationId!==s.id)return fail('INVALID_OPERATION');
       if(!this.current(s)){this.clear();return fail('INVALID_OPERATION');}
       if(cmd.operation==='status')return ok(this.status(s));
       if(cmd.operation==='cancel'){this.clear();return ok(null);}

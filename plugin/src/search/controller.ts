@@ -297,7 +297,15 @@ export class SearchController {
   }
   endRuntimeSettingsChange(): void { this.runtimeSettingsChanging = false; }
   invalidate(): void { if (!this.disposed) this.invalidateState(); }
-  private resetSharedState(state: UiState, reserve?: (revision: number) => void): number {
+  /** Source-event retirement can itself synchronously call abort listeners.
+   * Run it only after the same logical shared reset as lexical search. */
+  invalidateSource(retire: () => void): void {
+    if (this.disposed) return;
+    const revision = this.revision + 1;
+    try { this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null}, undefined, retire); }
+    finally { if (this.ownsRevision(revision)) this.emit(); }
+  }
+  private resetSharedState(state: UiState, reserve?: (revision: number) => void, retireSource?: () => void): number {
     const revision = ++this.revision;
     this.sharedResetDepth++;
     try {
@@ -308,7 +316,7 @@ export class SearchController {
       this.pending?.resolve(failure('SUPERSEDED')); this.pending = undefined;
       this.state = state;
       reserve?.(revision);
-      this.revokeEvidence();
+      this.revokeEvidence(retireSource);
       return revision;
     } finally {
       this.sharedResetDepth--;
@@ -479,7 +487,7 @@ export class SearchController {
       if (changed) this.emitEvidence();
     }
   }
-  private revokeEvidence(): void {
+  private revokeEvidence(retireSource?: () => void): void {
     const aborts: AbortController[] = [];
     for (const r of ['reranking','generation'] as const) {
       this.clearPreview(r);
@@ -487,7 +495,8 @@ export class SearchController {
       if (active) aborts.push(active.abort);
     }
     // Clear both previews and pin the old owners before any callback.
-    for (const abort of aborts) abort.abort();
+    try { retireSource?.(); }
+    finally { for (const abort of aborts) abort.abort(); }
   }
   // Role-local revocation and explicit cancellation use the same deadline
   // authority as the worker. A new pending preview is a distinct operation.

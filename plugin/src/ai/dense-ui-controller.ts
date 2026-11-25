@@ -42,12 +42,12 @@ export class DenseUiController {
     return this.authority.subscribe(this.listeners,listener);
   }
   snapshot(owner:symbol):State {
-    return !this.isDisposed()&&this.owner===owner?structuredClone(this.state):{phase:'idle'};
+    return this.owns(owner)?structuredClone(this.state):{phase:'idle'};
   }
   /** Only bounded metadata is copied for machine status polling. */
   metadata(owner:symbol):{phase:State['phase'];error?:ProviderFailureCode|null;
     executedMode?:ApiRetrievalResult['executedMode'];legs?:ApiRetrievalResult['legs']} {
-    if(this.isDisposed()||this.owner!==owner)return {phase:'idle'};
+    if(!this.owns(owner))return {phase:'idle'};
     const state=this.state;
     if(state.phase==='complete'&&'hits' in state.result)return {phase:state.phase,error:state.result.error,
       executedMode:state.result.executedMode,legs:structuredClone(state.result.legs)};
@@ -56,7 +56,7 @@ export class DenseUiController {
   }
   /** Role-wide metadata only; owner-scoped evidence/preview access stays unchanged. */
   operationStatus():AiOperationStatus {
-    if(this.isDisposed())return {phase:'idle',error:null};
+    if(!this.occupied())return {phase:'idle',error:null};
     const state=this.state;
     if(state.phase==='preview')return {phase:'permission-required',error:null};
     if(state.phase==='preparing'||state.phase==='running')return {phase:'busy',error:null};
@@ -66,8 +66,8 @@ export class DenseUiController {
     return {phase:'idle',error:null};
   }
   isDisposed():boolean {return this.disposed||this.authority.terminal();}
-  occupied():boolean {return !this.isDisposed()&&this.owner!==undefined;}
-  owns(owner:symbol):boolean {return !this.isDisposed()&&this.owner===owner;}
+  occupied():boolean {return !this.isDisposed()&&this.authority.ownershipVisible()&&this.owner!==undefined;}
+  owns(owner:symbol):boolean {return this.occupied()&&this.owner===owner;}
   private emit():void {
     this.authority.batch(()=>{try{this.machineChanged?.();}finally{this.authority.publish(this.listeners);}});
   }
@@ -100,7 +100,7 @@ export class DenseUiController {
     this.authority.revoke(()=>{try{this.invalidate();}finally{try{this.emit();}finally{this.authority.retire(this.listeners);}}});
   }
   private current(owner:symbol,revision:number,host:Host):boolean {
-    return !this.disposed&&!this.authority.revoking()&&this.owner===owner&&this.revision===revision
+    return this.owns(owner)&&this.revision===revision
       &&this.host===host&&this.port.host()===host;
   }
   async prepare(owner:symbol,request:DenseRequest,fence?:MachineFence):Promise<void> {
