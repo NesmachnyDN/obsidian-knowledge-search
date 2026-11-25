@@ -16,12 +16,14 @@ export function renderRerankConfirmation(panel: HTMLElement, preview: RerankPrev
   add('p','This preview expires after five minutes. Prepare a new preview if it expires.');
   add('p','Endpoint: '+preview.config.origin+(generation?'/v1/chat/completions':'/v1/rerank')+' | Model: '+servedAlias(preview.config));
   add('p','Only use a trusted local server under your control, with no forwarding to remote APIs. HTTP loopback pilot; no cloud. Do not approve confidential or unclassified material.');
+  if(!generation) add('p','Synthetic fixture only; no actual model is verified. Runtime profile: '+preview.runtimeProfileDigest);
   if(generation) add('p','Model inferences are unverified; only literal quotations and citation references are checked.');
   add('pre',preview.query,prefix+'-query-preview');
   for (const hit of preview.hits) add('pre',hit.originalExcerpt,prefix+'-excerpt-preview');
   const classification = add('select','',prefix+'-classification');
   classification.setAttribute('aria-label','Classification of query and all excerpts');
   for (const [value,label] of ([['','Select classification'],['synthetic','Synthetic test data'],['public','Public data']] as const)) {
+    if(!generation && value==='public') continue;
     const option = textElement(doc,'option',label); option.value=value!; classification.appendChild(option);
   }
   const token = add('input','',prefix+'-token'); token.type='password'; token.autocomplete='off';

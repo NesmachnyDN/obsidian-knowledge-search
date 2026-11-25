@@ -125,3 +125,45 @@ test('D8 concurrent read, cancellation while verifying, stale fence and typed pr
     await f.complete();assert.deepEqual(await f.request('result',id),err('RATE_LIMITED'));
   }finally{f.close();}
 });
+
+for(const phase of ['pending','owned','reading'] as const)
+test('systemic D8 failed abort retains physical owner and settles caller: '+phase,async()=>{
+  const f=fixture();
+  let release!:()=>void,entered!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  const start=new Promise<void>(resolve=>{entered=resolve;});
+  let fault=true,attempts=0;
+  try{
+    const id=await f.stage();
+    if(phase==='owned')await f.review();
+    if(phase==='reading')await f.complete();
+    f.host.verifyMachineResult=async()=>{entered();await gate;return ()=>true;};
+    const {slot}=f.machine as unknown as {slot:{abort:AbortController}};
+    const owner=slot.abort,original=owner.abort.bind(owner);
+    owner.abort=()=>{
+      attempts++;
+      assert.equal(f.machine.pending(),false);
+      assert.equal(f.machine.owns(f.owner),false);
+      assert.equal(f.ui.authority.admissionClosed(),true);
+      if(fault)throw Error('synthetic physical abort failure');
+      original();
+    };
+    const result=phase==='reading'?f.request('result',id):undefined;
+    if(result)await start;
+    assert.throws(()=>f.machine.invalidate(),/synthetic physical abort failure/);
+    assert.equal(attempts,1);
+    assert.deepEqual(await f.request('status',id),err('INVALID_OPERATION'));
+    assert.deepEqual(await f.machine.request(submit()),err('NOT_READY'));
+    if(result){
+      let timer:ReturnType<typeof setTimeout>|undefined;
+      try{assert.deepEqual(await Promise.race([result,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('WATCHDOG')),1000);})]),err('SOURCE_STALE'));}
+      finally{clearTimeout(timer);}
+    }
+    assert.throws(()=>f.machine.invalidate(),/synthetic physical abort failure/);
+    assert.equal(attempts,2);
+    fault=false;f.machine.invalidate();assert.equal(attempts,3);
+    if(result)assert.deepEqual(await f.machine.request(submit()),err('BUSY'));
+    release();await gate;await new Promise(resolve=>setImmediate(resolve));
+    assert.notEqual(await f.stage(),id);
+  }finally{fault=false;release();f.close();}
+});

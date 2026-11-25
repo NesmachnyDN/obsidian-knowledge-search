@@ -10,7 +10,7 @@ import { pilotConfig } from './loopback-json';
 type Host=Pick<ApiDenseHost,'verifyMachineResult'>;
 type Port={host():Host|undefined;preference():ProviderPreference};
 type Slot={id:string;input:Extract<DenseRequest,{kind:'search'}>;fence:MachineFence;
-  host:Host;abort:AbortController;owner?:symbol};
+  host:Host;abort:AbortController;owner?:symbol; revokeRead?:()=>void};
 type Metadata={phase:string;requestedMode:'dense'|'hybrid';executedMode:'dense'|'hybrid'|'none';
   expiresUnixMs:number;error:MachineError|null;legs?:ApiRetrievalResult['legs']};
 type Reply={apiVersion:1;ok:true;value:{operationId:string;expiresUnixMs:number}|Metadata|ApiRetrievalResult|null}
@@ -26,45 +26,65 @@ export class DenseMachine {
   private reading=false;
   private draining=false;
   private disposed=false;
-  private readonly listeners=new Set<()=>void>();
+  private readonly listeners: ReturnType<DenseUiController['authority']['channel']>;
   private readonly unsubscribe:()=>void;
   constructor(private readonly ui:DenseUiController,private readonly port:Port,private readonly now=Date.now){
-    this.unsubscribe=ui.subscribe(()=>{
+    this.listeners=ui.authority.channel();
+    this.unsubscribe=ui.bindMachine(()=>{
       const s=this.slot;
-      if(s?.owner&&!ui.owns(s.owner))this.clear();
+      if(ui.isDisposed()&&s)this.clear();
+      else if(s?.owner&&!ui.owns(s.owner))this.clear();
       else if(s&&!s.owner&&ui.occupied())this.clear();
       else this.emit();
     });
   }
   subscribe(listener:()=>void):()=>void {
     if(this.disposed)return ()=>{};
-    this.listeners.add(listener);return ()=>this.listeners.delete(listener);
+    return this.ui.authority.subscribe(this.listeners,listener);
   }
-  private emit():void{for(const listener of this.listeners)listener();}
-  private clear():void {
-    const s=this.slot;this.slot=undefined;
-    if(this.timer!==undefined)clearTimeout(this.timer);
-    this.timer=undefined;s?.abort.abort();
-    if(s?.owner)this.ui.cancel(s.owner);
-    this.emit();
+  private emit():void{this.ui.authority.publish(this.listeners);}
+  private clear(retireUi=true):number {
+    // Reserve before any abort, host, navigation or observer callback. Pass
+    // this witness only to our own UI retirement, never to nested callbacks.
+    const witness={epoch:this.ui.authority.epoch()},s=this.slot;
+    this.ui.authority.revoke(()=>{
+      if(!s){this.ui.authority.retireMachine();return;}
+      this.slot=undefined;
+      if(this.timer!==undefined)clearTimeout(this.timer);
+      this.timer=undefined;
+      // Settle a waiting caller even if the physical abort throws before
+      // signaling. The actual verification drain still prevents new submit.
+      s.revokeRead?.();
+      try {this.ui.authority.retireMachine(()=>s.abort.abort());}
+      finally {try {if(retireUi&&s.owner)this.ui.cancel(s.owner,witness);}finally{this.emit();}}
+    },witness);
+    return witness.epoch;
   }
-  invalidate():void {if(this.slot)this.clear();}
-  dispose():void {this.disposed=true;this.unsubscribe();this.clear();this.listeners.clear();}
+  private retiredCurrent(epoch:number):boolean {
+    return !this.disposed&&!this.ui.isDisposed()&&!this.ui.authority.admissionClosed()
+      &&this.ui.authority.epoch()===epoch;
+  }
+  invalidate(retireUi=true):void {this.clear(retireUi);}
+  dispose():void {
+    if(this.disposed)return;
+    this.disposed=true;this.unsubscribe();
+    this.ui.authority.revoke(()=>{try{this.clear();}finally{this.ui.authority.retire(this.listeners);}});
+  }
   private current(s:Slot):boolean {
     try{
       const p=this.port.preference();
-      return !this.disposed&&this.slot===s&&!s.abort.signal.aborted&&this.now()<s.fence.expiresUnixMs
+      return !this.disposed&&!this.ui.isDisposed()&&this.ui.authority.ownershipVisible()&&this.slot===s&&!s.abort.signal.aborted&&this.now()<s.fence.expiresUnixMs
         &&this.port.host()===s.host&&p.state==='configured'
         &&configDigest('embedding',pilotConfig(p))===s.fence.digest
         &&(!s.owner||this.ui.owns(s.owner));
     }catch{return false;}
   }
-  pending():boolean {return !!this.slot&&!this.slot.owner&&this.current(this.slot);}
-  owns(owner:symbol):boolean{return this.slot?.owner===owner;}
+  pending():boolean {return !this.disposed&&!this.ui.isDisposed()&&!!this.slot&&!this.slot.owner&&this.current(this.slot);}
+  owns(owner:symbol):boolean{return !this.disposed&&!this.ui.isDisposed()&&this.ui.authority.ownershipVisible()&&this.slot?.owner===owner;}
   /** Only called from a dedicated human ItemView action. */
   async review(owner:symbol):Promise<void> {
     const s=this.slot;
-    if(!s||s.owner||this.ui.occupied())return;
+    if(this.ui.authority.admissionClosed()||!s||s.owner||this.ui.occupied())return;
     if(!this.current(s)){this.clear();return;}
     // Reserve ownership synchronously, before prepare can publish any state.
     s.owner=owner;
@@ -90,37 +110,52 @@ export class DenseMachine {
     this.draining=true;
     const signal=s.abort.signal;
     const task=Promise.resolve().then(()=>{
-      if(signal.aborted)throw new ProviderFailure('CANCELLED');
+      if(signal.aborted||this.slot!==s)throw new ProviderFailure('CANCELLED');
       return s.host.verifyMachineResult(s.input,s.fence,result,signal);
     });
     void task.then(()=>{this.draining=false;},()=>{this.draining=false;});
     let cancel!:()=>void;
     const revoked=new Promise<null>(resolve=>{
-      cancel=()=>resolve(null);signal.addEventListener('abort',cancel,{once:true});
-      if(signal.aborted)cancel();
+      cancel=()=>resolve(null);s.revokeRead=cancel;
+      signal.addEventListener('abort',cancel,{once:true});
+      if(signal.aborted || this.slot!==s)cancel();
     });
     try{return await Promise.race([task,revoked]);}
-    finally{signal.removeEventListener('abort',cancel);}
+    finally{s.revokeRead=undefined;signal.removeEventListener('abort',cancel);}
   }
   async request(input:unknown):Promise<Reply> {
     try{
+      if(this.disposed||this.ui.isDisposed())return fail('NOT_READY');
       const cmd=parseMachine(input,this.port.preference);
-      if(this.disposed)return fail('NOT_READY');
+      if(this.disposed||this.ui.isDisposed())return fail('NOT_READY');
       if(cmd.operation==='submit'){
-        if(this.slot&&!this.current(this.slot))this.clear();
+        if(this.ui.authority.admissionClosed())return fail('NOT_READY');
+        if(this.slot&&!this.current(this.slot)){
+          const retired=this.clear();
+          if(!this.retiredCurrent(retired))return fail('INVALID_OPERATION');
+        }
+        if(this.disposed||this.ui.isDisposed()||this.ui.authority.admissionClosed())return fail('NOT_READY');
         if(this.slot||this.reading||this.draining||this.ui.occupied())return fail('BUSY');
         const host=this.port.host();if(!host)return fail('NOT_READY');
         const id=randomUUID(),expiresUnixMs=this.now()+300000;
         const s:Slot={id,input:cmd.input,fence:{digest:cmd.digest,expiresUnixMs},host,abort:new AbortController()};
-        this.slot=s;this.timer=setTimeout(()=>{if(this.slot===s)this.clear();},300000);
+        this.slot=s;this.timer=setTimeout(()=>{
+          if(this.slot===s){try{this.clear();}catch{console.warn('DENSE_AUTHORITY_REVOKE_FAILED');}}
+        },300000);
         this.timer.unref?.();this.emit();
-        return ok({operationId:id,expiresUnixMs});
+        return this.current(s)?ok({operationId:id,expiresUnixMs}):fail('INVALID_OPERATION');
       }
       const s=this.slot;
-      if(!s||cmd.operationId!==s.id)return fail('INVALID_OPERATION');
+      // Logical revocation is already committed. A read/status callback must
+      // not recursively retire a still-pinned physical owner.
+      if(!this.ui.authority.ownershipVisible()||!s||cmd.operationId!==s.id)return fail('INVALID_OPERATION');
       if(!this.current(s)){this.clear();return fail('INVALID_OPERATION');}
       if(cmd.operation==='status')return ok(this.status(s));
-      if(cmd.operation==='cancel'){this.clear();return ok(null);}
+      if(cmd.operation==='cancel'){
+        const retired=this.clear();
+        return this.retiredCurrent(retired)?ok(null):fail('INVALID_OPERATION');
+      }
+      if(this.ui.authority.admissionClosed())return fail('NOT_READY');
       if(this.reading||this.draining)return fail('BUSY');
       if(!s.owner)return fail('NOT_READY');
       const state=this.ui.snapshot(s.owner);
@@ -130,11 +165,12 @@ export class DenseMachine {
       this.reading=true;
       try{
         const verified=result.status==='ok'?await this.verifyRead(s,result):()=>true;
-        if(!this.current(s)||!verified||!verified()){
+        if(!this.current(s)||!verified||!verified()||!this.current(s)){
           if(this.slot===s)this.clear();
           return fail('SOURCE_STALE');
         }
-        this.clear();return ok(result);
+        const retired=this.clear();
+        return this.retiredCurrent(retired)?ok(result):fail('SOURCE_STALE');
       }catch{
         if(this.slot===s)this.clear();
         return fail('SOURCE_STALE');

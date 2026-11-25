@@ -1,6 +1,9 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer,type IncomingMessage,type ServerResponse} from 'node:http';
+import os from 'node:os';
+import {performance} from 'node:perf_hooks';
+import {bindActiveDeadline} from '../plugin/src/ai/active-deadline';
 import {LoopbackGenerationTransport} from '../plugin/src/ai/loopback-generation';
 import {EvidenceGenerator} from '../plugin/src/ai/generation-evidence';
 import {type ProviderConfig} from '../plugin/src/ai/contracts';
@@ -158,4 +161,21 @@ test('generation controller uses independent roles, one-shot preview, no lexical
     assert.equal(calls,1);
     controller.dispose();
   },(req,res)=>{calls++;req.resume();reply(res,good());});
+});
+
+test('B-R2-ERR-01: shared generation transport preserves timeout on late socket error',async t=>{
+  let wall=Date.now(),mono=performance.now(),boot=os.uptime(),calls=0;
+  await fixture(async cfg=>{
+    t.mock.method(Date,'now',()=>wall);
+    t.mock.method(performance,'now',()=>mono);
+    t.mock.method(os,'uptime',()=>boot);
+    try {
+      const budget=bindActiveDeadline({signal:new AbortController().signal,
+        deadlineUnixMs:wall+cfg.limits.timeoutMs},cfg.limits.timeoutMs);
+      await assert.rejects(new LoopbackGenerationTransport().generate(cfg,input,token,budget),{message:'TIMEOUT'});
+      assert.equal(calls,1);
+    } finally {t.mock.restoreAll();}
+  },(req,_res)=>{
+    calls++;req.resume();req.on('end',()=>{mono+=2000;wall+=2000;req.socket.destroy();});
+  });
 });

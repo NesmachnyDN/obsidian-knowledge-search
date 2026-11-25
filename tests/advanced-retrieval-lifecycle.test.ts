@@ -59,3 +59,44 @@ test('05D remediation B6: invalidation during final lexical source scan suppress
   assert.ok(['SOURCE_STALE','MODEL_CANCELLED'].includes(result.error??''));
   assert.ok(stops>=1);
 });
+
+test('systemic Advanced runner retains failed shutdown owner after active slot settles',async()=>{
+  const {AdvancedIngestRunner}=await import('../plugin/src/advanced/runner');
+  const runner=new AdvancedIngestRunner(),abort=new AbortController();
+  const failed=Promise.reject(Error('synthetic unproved process exit'));
+  void failed.catch(()=>{});
+  Object.assign(runner,{poison:true,failedOwner:{unit:'synthetic.service',controller:abort,stopPromise:failed}});
+  await assert.rejects(runner.stop(),/synthetic unproved process exit/);
+  await assert.rejects(runner.stop(),/synthetic unproved process exit/);
+  assert.equal(runner.blocked,true);
+  assert.equal(abort.signal.aborted,true);
+});
+
+test('systemic Advanced runner commits retirement before a throwing physical abort',async()=>{
+  const {AdvancedIngestRunner}=await import('../plugin/src/advanced/runner');
+  const runner=new AdvancedIngestRunner(),abort=new AbortController();
+  const job={unit:'synthetic.service',controller:abort,stopPromise:Promise.resolve(),retired:false};
+  Object.assign(runner,{running:job});
+  abort.abort=()=>{assert.equal(job.retired,true);throw Error('synthetic abort');};
+  await assert.rejects(runner.stop(),/synthetic abort/);
+  assert.equal(job.retired,true);
+  assert.equal(abort.signal.aborted,false);
+});
+
+test('systemic source retirement drains manager operation independently of runner stop',async()=>{
+  const {AdvancedIngestionManager}=await import('../plugin/src/advanced/manager');
+  let tracked:Promise<void>|undefined,release!:()=>void;
+  const active=new Promise<void>(resolve=>{release=resolve;});
+  const manager=new AdvancedIngestionManager(work=>{tracked=work;});
+  manager.runner.stop=async()=>{};
+  Object.assign(manager,{active,activePath:'fixture.md',controller:new AbortController()});
+  try{
+    manager.invalidate('fixture.md');
+    assert.ok(tracked);
+    let settled=false;void tracked.then(()=>{settled=true;});
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(settled,false);
+    release();await tracked;
+    assert.equal(settled,true);
+  }finally{release();}
+});

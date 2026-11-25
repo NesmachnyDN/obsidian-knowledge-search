@@ -2,8 +2,10 @@ import os from 'node:os';
 import { EvidenceGenerator, type GeneratedEvidenceClaim } from '../ai/generation-evidence';
 import { EvidenceReranker, type RerankedHit } from '../ai/rerank-evidence';
 import { pilotConfig } from '../ai/loopback-rerank';
+import { bindActiveDeadline, remainingOperationMs, deadlineFailure, cancelActiveDeadline } from '../ai/active-deadline';
+import { RerankRuntimeProfiles, type RerankAdmission } from '../ai/rerank-profile';
 import { configDigest } from '../ai/disclosure';
-import { ProviderFailure, type ProviderConfig, type ProviderPreference, type ProviderFailureCode, type AiOperationStatus } from '../ai/contracts';
+import { ProviderFailure, type ProviderConfig, type ProviderPreference, type ProviderFailureCode, type AiOperationStatus, type CallContext } from '../ai/contracts';
 import { hash, isDigest } from '../standalone/contracts';
 import type { AdvancedHealth } from '../advanced/health';
 import type { IngestionStatus } from '../advanced/manager';
@@ -46,10 +48,21 @@ export function propertyInput(key: string, valueType: string, operator: string, 
   return predicate as Predicate;
 }
 type Engine = Pick<StandaloneEngine, 'search' | 'status' | 'cancel' | 'resume' | 'rebuild'>;
+// The concrete trusted owner is retained, not a callback resolving a mutable host.
+type RetirementTarget = { invalidate(): void };
+type RetirementObligation = {
+  kind: 'source' | 'evidence' | 'role'; revision: number; owner?: AbortController;
+  role?: EvidenceRole; running?: boolean;
+  run: () => void; attempted: boolean; failed?: boolean;
+};
+// One shared controller owns admission; obligations do not confer authority.
+// A bounded overflow is terminal-only: never silently discard freshness work.
+const MAX_RETIREMENT_OBLIGATIONS = 4096;
 type EvidenceRole = 'reranking' | 'generation';
 export const EVIDENCE_PREVIEW_TTL_MS = 300_000;
-export type RerankPreview = { role: EvidenceRole; sequence: number; revision: number; expiresUnixMs: number; config: ProviderConfig; scopeId: string; query: string; hits: EvidenceHit[] };
+export type RerankPreview = { role: EvidenceRole; sequence: number; revision: number; expiresUnixMs: number; config: ProviderConfig; scopeId: string; query: string; hits: EvidenceHit[]; runtimeProfileBinding?: string; runtimeProfileDigest?: string };
 // Internal elapsed-time deadlines are never taken from the returned preview.
+type ActiveEvidenceOperation = { abort: AbortController; context: CallContext; revision: number };
 type PendingEvidencePreview = { preview: RerankPreview; monotonicStartedMs: number; bootStartedSeconds: number };
 export type RerankState = { phase: 'running' | 'results' | 'error'; error: ProviderFailureCode | null; hits: readonly RerankedHit[] };
 export type RerankPort = {
@@ -63,60 +76,212 @@ export class SearchController {
   private paused = false;
   private error: string | null = null;
   private disposed = false;
+  private terminalRetired = false;
   private revision = 0;
   private lastQuery = '';
   private sequence = 0;
   private prepared: Partial<Record<EvidenceRole,PendingEvidencePreview>> = {};
   private previewTimers: Partial<Record<EvidenceRole,ReturnType<typeof setTimeout>>> = {};
-  private aborts: Partial<Record<EvidenceRole,AbortController>> = {};
+  private activeEvidence: Partial<Record<EvidenceRole,ActiveEvidenceOperation>> = {};
   private readonly generator = new EvidenceGenerator();
   private readonly reranker = new EvidenceReranker();
+  private readonly rerankProfiles = new RerankRuntimeProfiles(()=>this.invalidateRerankProfile());
   private active = false;
   private pending?: { request: SearchRequest; revision: number; resolve: (v: ApiResult<SearchResponse>) => void };
   private listeners = new Set<() => void>();
   private evidenceListeners = new Set<() => void>();
   private pendingExpiryNotification?: object;
+  private notifying = false;
+  private revokingSharedAuthority = false;
+  private sharedResetDepth = 0;
+  private runtimeSettingsChanging = false;
+  private readonly retirement: {
+    host?: RetirementTarget; sharedHookFault: boolean; obligations: RetirementObligation[];
+    running: boolean; sourceRunning: boolean; overflow: boolean;
+  } = {sharedHookFault:false,obligations:[],running:false,sourceRunning:false,overflow:false};
+  private sourceRevision = 0;
+  private sourceDrains = new Set<Promise<void>>();
+  private sourceDrainFailed = false;
+  /** An asynchronous owner cannot be considered retired on dispatch alone.
+   * A rejected drain is terminal-only; rebuild cannot prove process exit. */
+  trackSourceDrain(work:Promise<void>):void {
+    if(this.disposed){void work.catch(()=>{});return;}
+    if(this.sourceDrains.size>=MAX_RETIREMENT_OBLIGATIONS){
+      this.retirement.overflow=true;void work.catch(()=>{});return;
+    }
+    this.sourceDrains.add(work);
+    // An independently detected stale source may start retirement outside a
+    // Vault-event callback. Invalidate existing publication rights as well.
+    if(!this.retirement.running&&!this.retirement.sourceRunning)this.invalidateSource([]);
+    void work.then(()=>{
+      this.sourceDrains.delete(work);
+      if(!this.disposed)this.emit();
+    },()=>{
+      this.sourceDrains.delete(work);this.sourceDrainFailed=true;
+      if(!this.disposed){this.failRetirement();this.emit();}
+    });
+  }
+  private get pendingHostRetirement(): RetirementTarget | undefined { return this.retirement.host; }
+  private set pendingHostRetirement(value: RetirementTarget | undefined) { this.retirement.host = value; }
+  private get sourceRetirementPending(): boolean {
+    return this.retirement.sourceRunning || this.sourceDrains.size>0 || this.sourceDrainFailed || this.retirement.obligations.some(item => item.kind === 'source') || this.retirement.overflow;
+  }
+  private get explicitRetirementPending(): boolean {
+    return this.sourceRetirementPending || this.retirement.obligations.some(item => item.kind !== 'role' && (item.failed || !this.retirement.running));
+  }
+  private get sharedAuthorityFault(): boolean {
+    return this.retirement.sharedHookFault || this.explicitRetirementPending;
+  }
+  /** Runtime application cannot hand over source owners while concrete
+   * retirement work remains unresolved. Generic hook recovery is separate. */
+  assertSourceRetirementSettled():void {
+    if(this.explicitRetirementPending)throw new StandaloneError('INTERNAL_FAILURE');
+  }
+  /** Advanced source authorization is independent of ordinary lexical revisions. */
+  sourceAuthorityRevision(): number { return this.sourceRevision; }
+  sourceAuthorityCurrent(revision: number): boolean {
+    return !this.disposed && !this.sourceRetirementPending && revision === this.sourceRevision;
+  }
+  private deliveringLifecycle = false;
+  private evidencePending?: number;
+  private lifecyclePending?: {revision:number; final:boolean; listeners:(() => void)[]};
+  private notificationVersion = 0;
+  private waveAdditions = 0;
+  private readonly quarantined = new WeakSet<() => void>();
   private state: UiState = { phase: 'idle', message: 'Enter a query to search original Markdown.', response: null };
   constructor(private readonly navigate: (hit: EvidenceHit) => Promise<void>,
     private readonly advancedStatus?: () => AdvancedHealth,
     private readonly ingestionStatus?: () => IngestionStatus,
-    private readonly rerankPort?: RerankPort, private readonly generationPort?: RerankPort) {}
-  attach(engine: Engine): void { if (!this.disposed) { this.engine = engine; this.error = null; this.emit(); } }
+    private readonly rerankPort?: RerankPort, private readonly generationPort?: RerankPort,
+    private readonly revokeSharedAuthority?: () => void) {}
+  attach(engine: Engine): void {
+    if (this.disposed) return;
+    const replaced = this.engine !== undefined && this.engine !== engine;
+    this.engine = engine; this.error = null;
+    if (replaced) this.invalidate(); else this.emit();
+  }
   configure(enabled: boolean, paused: boolean, error: string | null = null): void {
+    if (this.disposed) return;
     this.enabled = enabled; this.paused = paused; this.error = safeCode(error); this.invalidate();
   }
-  detach(): void { this.engine = undefined; this.invalidate(); }
-  status(): SearchStatus { return statusSnapshot(this.engine?.status(), !this.disposed && this.enabled, this.paused,
-    this.error, this.advancedStatus?.(), this.ingestionStatus?.()); }
+  detach(): void { if (this.disposed) return; this.engine = undefined; this.rerankProfiles.revoke(); this.invalidate(); }
+  status(): SearchStatus {
+    const failed = !this.disposed && this.sharedAuthorityFault;
+    const engine = this.engine?.status();
+    return statusSnapshot(failed && engine ? {...engine,status:'failed',generationId:null,error:'INTERNAL_FAILURE'} : engine,
+      !this.disposed && this.enabled, this.paused, failed ? 'INTERNAL_FAILURE' : this.error,
+      this.advancedStatus?.(), this.ingestionStatus?.());
+  }
   snapshot(): UiState {
+    this.rerankProfiles.checkLifetime();
     this.currentPreview('reranking'); this.currentPreview('generation');
     return structuredClone(this.state);
   }
   /** No query, passages, source IDs, grants or tokens cross this metadata boundary. */
   evidenceOperationStatus(role: EvidenceRole): AiOperationStatus {
+    if (role === 'reranking') this.rerankProfiles.checkLifetime();
     const pending = this.currentPreview(role);
     const state = role === 'reranking' ? this.state.rerank : this.state.generation;
+    if (this.roleRetirement(role)) return {phase:'failed',error:state?.error ?? 'NOT_READY'};
     if (state?.phase === 'running') return {phase:'busy',error:null};
     if (pending) return {phase:'permission-required',error:null};
     if (state?.phase === 'error') return {phase:'failed',error:state.error ?? 'NOT_READY'};
     return {phase:state?.phase === 'results' ? 'complete' : 'idle',error:null};
   }
   subscribe(listener: () => void): () => void {
-    if (this.disposed) return () => {};
-    this.listeners.add(listener); return () => this.listeners.delete(listener);
+    return this.addObserver(this.listeners, listener);
   }
   // Role-local evidence transitions must not invalidate the independent dense machine.
   subscribeEvidence(listener: () => void): () => void {
+    return this.addObserver(this.evidenceListeners, listener);
+  }
+  private addObserver(channel: Set<() => void>, listener: () => void): () => void {
     if (this.disposed) return () => {};
-    this.evidenceListeners.add(listener); return () => this.evidenceListeners.delete(listener);
+    if (this.quarantined.has(listener)) {
+      console.warn('SEARCH_OBSERVER_REJECTED', 'quarantined');
+      return () => {};
+    }
+    if (!channel.has(listener)) {
+      // Count successful additions, including remove/re-add, across both channels.
+      if ((this.notifying || this.revokingSharedAuthority) && this.waveAdditions >= 32) {
+        console.warn('SEARCH_OBSERVER_REJECTED', 'registration-budget');
+        return () => {};
+      }
+      channel.add(listener);
+      if (this.notifying || this.revokingSharedAuthority) {
+        this.waveAdditions++;
+        this.notificationVersion++;
+        if (channel === this.listeners) this.queueLifecycle();
+        else this.evidencePending = this.revision;
+      }
+    }
+    return () => { channel.delete(listener); };
+  }
+  private quarantine(listener: () => void, reason: 'mutation-budget' | 'exception'): void {
+    this.quarantined.add(listener);
+    this.listeners.delete(listener);
+    this.evidenceListeners.delete(listener);
+    // Never log callback identity, exception text, state, or source material.
+    console.warn('SEARCH_OBSERVER_QUARANTINED', reason);
   }
   private emitEvidence(): void {
     this.pendingExpiryNotification = undefined;
-    for (const listener of this.evidenceListeners) listener();
+    if (this.disposed) return;
+    this.evidencePending = this.revision;
+    this.notificationVersion++;
+    this.drainNotifications();
+  }
+  private drainNotifications(continueWave = false): void {
+    if (this.notifying || this.revokingSharedAuthority || this.retirement.running || this.retirement.sourceRunning) return;
+    this.notifying = true;
+    if (!continueWave) this.waveAdditions = 0;
+    const mutations = new Map<() => void, number>();
+    try {
+      while (this.lifecyclePending || this.evidencePending !== undefined) {
+        const lifecycle = this.lifecyclePending;
+        const revision = this.evidencePending;
+        const evidence = revision === undefined ? [] : [...this.evidenceListeners];
+        this.lifecyclePending = undefined;
+        this.evidencePending = undefined;
+        const deliver = (listener: () => void): void => {
+          if (this.quarantined.has(listener)) return;
+          const before = this.notificationVersion;
+          try { listener(); }
+          catch { this.quarantine(listener, 'exception'); return; }
+          if (before !== this.notificationVersion) {
+            const count = (mutations.get(listener) ?? 0) + 1;
+            mutations.set(listener, count);
+            if (count >= 16) this.quarantine(listener, 'mutation-budget');
+          }
+        };
+        this.deliveringLifecycle = !!lifecycle;
+        try {
+          for (const listener of lifecycle?.listeners ?? []) {
+            if (this.revision !== lifecycle!.revision || this.disposed !== lifecycle!.final) break;
+            if (this.listeners.has(listener)) deliver(listener);
+          }
+        } finally { this.deliveringLifecycle = false; }
+        for (const listener of evidence) {
+          if (this.disposed || this.revision !== revision) break;
+          if (this.evidenceListeners.has(listener)) deliver(listener);
+        }
+      }
+    } finally {
+      this.notifying = false;
+      this.lifecyclePending = undefined;
+      this.evidencePending = undefined;
+      if (this.disposed) { this.listeners.clear(); this.evidenceListeners.clear(); }
+    }
+    // A search submitted by an observer is already queued; start only after
+    // the wave has settled, so a later listener can supersede it first.
+    void this.pump();
   }
   // Polling/rendering may discover expiry while a listener is already executing.
-  // Commit cancellation now, but publish only after the current synchronous stack.
+  // Commit cancellation now; join the active notification wave or defer to
+  // a single microtask when expiry is discovered outside evidence delivery.
   private notifyExpiry(): void {
+    if (this.disposed) return;
+    if (this.notifying || this.revokingSharedAuthority) { this.emitEvidence(); return; }
     if (this.pendingExpiryNotification) return;
     const notification = {};
     this.pendingExpiryNotification = notification;
@@ -124,42 +289,216 @@ export class SearchController {
       if (!this.disposed && this.pendingExpiryNotification === notification) this.emitEvidence();
     });
   }
-  private emit(): void {
-    this.pendingExpiryNotification = undefined;
-    for (const listener of this.listeners) listener();
+  private queueLifecycle(): void {
+    this.lifecyclePending = {revision:this.revision,final:this.disposed,listeners:[...this.listeners]};
   }
-  invalidate(): void {
-    this.revision++; this.revokeEvidence(); this.lastQuery = '';
-    this.pending?.resolve(failure('SUPERSEDED')); this.pending = undefined;
-    this.state = { phase: 'idle', message: 'Results cleared; search to verify current sources.', response: null }; this.emit();
+  private emit(final = false, retireHost?: RetirementTarget, requireRetirement = false): void {
+    if (this.disposed && !final) return;
+    if (!this.disposed && this.explicitRetirementPending && !this.retirement.running && !this.retirement.sourceRunning)
+      this.failRetirement();
+
+    // A newer request must never replace an unresolved trusted retirement.
+    // A reentrant retirement request is denied before it can acquire authority.
+    if (requireRetirement && (this.revokingSharedAuthority || (this.sharedAuthorityFault && this.notifying)))
+      throw new StandaloneError('INTERNAL_FAILURE');
+    if (retireHost && !this.pendingHostRetirement) this.pendingHostRetirement = retireHost;
+    this.pendingExpiryNotification = undefined;
+    // Reserve publication before the synchronous host hook. A nested transition
+    // may replace it but cannot drain or dispatch while authority is being revoked.
+    if (!this.notifying && !this.revokingSharedAuthority) this.waveAdditions = 0;
+    this.queueLifecycle();
+    this.notificationVersion++;
+    if (this.revokingSharedAuthority || this.retirement.running || this.retirement.sourceRunning || (this.sharedAuthorityFault && this.pendingHostRetirement && this.notifying)) return;
+    this.revokingSharedAuthority = true;
+    try {
+      this.revokeSharedAuthority?.();
+      const pending = this.pendingHostRetirement;
+      pending?.invalidate();
+      this.pendingHostRetirement = undefined;
+      // The previous obligation is complete; only now can this request's
+      // concrete host be retired. Failed requests never reach persistence.
+      if (retireHost && retireHost !== pending) {
+        this.pendingHostRetirement = retireHost;
+        retireHost.invalidate();
+        this.pendingHostRetirement = undefined;
+      }
+      this.retirement.sharedHookFault = false;
+    } catch (error) {
+      // A failed trusted hook is not an observer exception: no authority
+      // can be issued until a later shared transition successfully revokes it.
+      this.retirement.sharedHookFault = true;
+      if (!this.disposed) {
+        this.pending?.resolve(failure('INTERNAL_FAILURE'));
+        this.pending = undefined;
+        this.resetSharedState({phase:'error',message:'INTERNAL_FAILURE',response:null});
+      }
+      this.queueLifecycle();
+      this.notificationVersion++;
+      console.warn('SEARCH_AUTHORITY_REVOKE_FAILED');
+      if (requireRetirement) throw error;
+    } finally {
+      this.revokingSharedAuthority = false;
+      this.drainNotifications(true);
+    }
+  }
+  /** Host admission stays closed through shared revocation and lifecycle delivery,
+   * never through independent evidence-only notifications. */
+  sharedAuthorityTransition(): boolean {
+    return this.disposed || this.runtimeSettingsChanging || this.sharedAuthorityFault || this.sharedResetDepth > 0 || this.revokingSharedAuthority || this.deliveringLifecycle || !!this.lifecyclePending;
+  }
+  /** Fence admission before observers or persistence can yield. Failed retirement
+   * remains latched independently of the settings transaction's lifetime. */
+  beginRuntimeSettingsChange(retire: RetirementTarget | undefined, revokeRerankProfile: boolean): void {
+    if (this.disposed || this.explicitRetirementPending || this.retirement.running || this.revokingSharedAuthority || (this.sharedAuthorityFault && this.notifying))
+      throw new StandaloneError('INTERNAL_FAILURE');
+    this.runtimeSettingsChanging = true;
+    ++this.sourceRevision;
+    this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null});
+    if (this.disposed) return;
+    if (revokeRerankProfile) this.rerankProfiles.revoke();
+    this.emit(false, retire, true);
+    if (this.explicitRetirementPending) throw new StandaloneError('INTERNAL_FAILURE');
+  }
+  endRuntimeSettingsChange(): void { this.runtimeSettingsChanging = false; }
+  invalidate(): void { if (!this.disposed) this.invalidateState(); }
+  /** Source-event retirement can itself synchronously call abort listeners.
+   * Run it only after the same logical shared reset as lexical search. */
+  invalidateSource(obligations: readonly (() => void)[]): void {
+    if (this.disposed) return;
+    const revision = ++this.sourceRevision;
+    for (const run of obligations) this.enqueueRetirement({kind:'source',revision,run,attempted:false});
+    // Nested source work joins the running wave. If the wave belongs to an
+    // ordinary shared reset, revoke any lexical reservation made in its callbacks.
+    if (this.retirement.sourceRunning) return;
+    if (this.retirement.running) {
+      this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null});
+      return;
+    }
+    this.transitionSourceRetirement(false);
+  }
+  private enqueueRetirement(obligation: RetirementObligation): void {
+    if (obligation.owner && this.retirement.obligations.some(item => item.owner === obligation.owner)) return;
+    if (this.retirement.obligations.length >= MAX_RETIREMENT_OBLIGATIONS) {
+      this.retirement.overflow = true;
+      return;
+    }
+    this.retirement.obligations.push(obligation);
+  }
+  private drainRetirements(): void {
+    if (this.retirement.running) return;
+    this.retirement.running = true;
+    try {
+      // Each concrete obligation is attempted at most once per bounded wave.
+      // Nested work may join it, but cannot recursively retry a failure.
+      for (let count = 0; count < MAX_RETIREMENT_OBLIGATIONS; count++) {
+        const obligation = this.retirement.obligations.find(item => !item.attempted && !item.running && (item.kind !== 'role' || this.disposed));
+        if (!obligation) break;
+        obligation.attempted = true;
+        if (this.disposed && obligation.kind === 'source') continue;
+        try {
+          obligation.run();
+          const index = this.retirement.obligations.indexOf(obligation);
+          if (index >= 0) this.retirement.obligations.splice(index,1);
+        } catch {
+          obligation.failed = true;
+          console.warn('SEARCH_RETIREMENT_OBLIGATION_FAILED',obligation.kind);
+        }
+      }
+    } finally {
+      this.retirement.running = false;
+      if (this.disposed) {
+        // Terminal owners are drained independently by the plugin's existing
+        // storage, persistence and bounded operation barriers.
+        this.retirement.obligations.length = 0;
+        this.retirement.overflow = false;
+      }
+    }
+  }
+  private transitionSourceRetirement(retry: boolean): void {
+    if (this.disposed || this.retirement.running || this.retirement.sourceRunning) return;
+    this.retirement.sourceRunning = true;
+    try {
+      if (retry) for (const obligation of this.retirement.obligations) obligation.attempted = false;
+      this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null});
+    } finally {
+      this.retirement.sourceRunning = false;
+      if (!this.disposed) this.emit();
+      else this.drainNotifications();
+    }
+  }
+  private resetSharedState(state: UiState, reserve?: (revision: number) => void): number {
+    const revision = ++this.revision;
+    this.sharedResetDepth++;
+    try {
+      // Commit ownership and reserve the new job before synchronous abort
+      // callbacks. A nested reset or terminal seal can then settle that job,
+      // never be overwritten by the interrupted caller, and own publication.
+      this.lastQuery = '';
+      this.pending?.resolve(failure('SUPERSEDED')); this.pending = undefined;
+      this.state = state;
+      reserve?.(revision);
+      this.revokeEvidence();
+      if (!this.disposed && !this.retirement.running && (this.retirement.obligations.some(item => item.kind !== 'role') || this.retirement.overflow))
+        this.failRetirement();
+      return revision;
+    } finally {
+      this.sharedResetDepth--;
+      // A nested search may already have published, but dispatch must wait
+      // for the outermost abort wave to finish.
+      if (this.revision !== revision && !this.sharedResetDepth && !this.retirement.running && !this.retirement.sourceRunning) {
+        // Nested publication was reserved while callbacks were still running.
+        if (this.disposed) this.drainNotifications();
+        else this.emit();
+      }
+    }
+  }
+  private failRetirement(): void {
+    this.pending?.resolve(failure('INTERNAL_FAILURE')); this.pending = undefined;
+    this.state = {phase:'error',message:'INTERNAL_FAILURE',response:null};
+  }
+  private ownsRevision(revision: number): boolean {
+    return !this.disposed && this.revision === revision;
+  }
+  private invalidateState(final = false, retireHost?: RetirementTarget, requireRetirement = false): void {
+    const revision = this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null});
+    if (this.ownsRevision(revision)) this.emit(final, retireHost, requireRetirement);
   }
   message(error: string): void {
-    this.invalidate(); this.state = { phase: 'error', message: safeCode(error)!, response: null }; this.emit();
+    if (this.disposed) return;
+    // Publish only the committed transition; no continuation after observers.
+    const revision = this.resetSharedState({phase:'error',message:safeCode(error)!,response:null});
+    if (this.ownsRevision(revision)) this.emit();
   }
   async search(input: unknown): Promise<ApiResult<SearchResponse>> {
     let request: SearchRequest;
     try { request = parseSearch(input); } catch { return failure('INVALID_REQUEST'); }
     if (this.disposed || !this.enabled) return failure('DISABLED');
+    if (this.runtimeSettingsChanging) return failure('SUPERSEDED');
+    if (this.explicitRetirementPending) return failure('INTERNAL_FAILURE');
+    if (this.sharedAuthorityFault && this.pendingHostRetirement && this.notifying) return failure('INTERNAL_FAILURE');
     if (!this.engine) return failure(this.error ?? 'INDEX_UNAVAILABLE');
-    const revision = ++this.revision;
-    this.revokeEvidence(); this.lastQuery = '';
-    this.pending?.resolve(failure('SUPERSEDED'));
-    this.state = { phase: 'searching', message: 'Verifying original sources…', response: null }; this.emit();
-    return new Promise(resolve => {
-      this.pending = { request, revision, resolve };
-      void this.pump();
+    if (this.sharedResetDepth && this.sharedAuthorityFault) return failure('INTERNAL_FAILURE');
+    let revision!: number;
+    const result = new Promise<ApiResult<SearchResponse>>(resolve => {
+      revision = this.resetSharedState({phase:'searching',message:'Verifying original sources…',response:null},
+        owned => { this.pending = {request,revision:owned,resolve}; });
     });
+    if (this.ownsRevision(revision)) this.emit();
+    return result;
   }
   private async pump(): Promise<void> {
-    if (this.active || !this.pending) return;
-    const job = this.pending; this.pending = undefined; this.active = true;
+    if (this.notifying || this.runtimeSettingsChanging || this.sharedResetDepth || this.revokingSharedAuthority || this.sharedAuthorityFault || this.active || !this.pending) return;
+    const job = this.pending; this.pending = undefined;
+    if (this.disposed || job.revision !== this.revision || !this.engine) {
+      job.resolve(failure('SUPERSEDED')); return;
+    }
+    this.active = true;
     let result: ApiResult<SearchResponse>;
     try {
       // Public callers must never receive references into immutable engine generations.
-      const response = structuredClone(await this.engine!.search(job.request));
+      const response = structuredClone(await this.engine.search(job.request));
       result = { apiVersion: 1, ok: true, value: response };
     } catch (error) { result = failure(error instanceof StandaloneError ? error.code : 'INTERNAL_FAILURE'); }
-    this.active = false;
     if (job.revision !== this.revision || this.disposed) result = failure('SUPERSEDED');
     else {
       this.lastQuery = result.ok && result.value.status === 'ok' && result.value.executedMode === 'lexical' ? job.request.query : '';
@@ -168,14 +507,37 @@ export class SearchController {
           message: result.value.error ? safeCode(result.value.error)! : result.value.hits.length ? 'Verified at search time; checked again on open.' : 'No matching evidence.' };
       this.emit();
     }
-    job.resolve(result); void this.pump();
+    // Keep the active slot until publication finishes. A callback may have
+    // superseded this result while receiving it.
+    if (job.revision !== this.revision || this.disposed) result = failure('SUPERSEDED');
+    this.active = false; job.resolve(result); void this.pump();
   }
   private port(role: EvidenceRole): RerankPort | undefined {
     return role === 'reranking' ? this.rerankPort : this.generationPort;
   }
   prepareRerank(): RerankPreview { return this.prepareEvidence('reranking'); }
   prepareGeneration(): RerankPreview { return this.prepareEvidence('generation'); }
-  private currentPreview(role: EvidenceRole): PendingEvidencePreview | undefined {
+  /** Settings changes revoke admission itself, not just pending consent. */
+  revokeRerankProfile(): void { this.rerankProfiles.revoke(); }
+  private invalidateRerankProfile(): void {
+    if (this.cancelEvidenceState('reranking')) this.notifyExpiry();
+  }
+  private currentRerankAdmission(config: ProviderConfig, scopeId: string): RerankAdmission {
+    return this.rerankProfiles.current(config,scopeId);
+  }
+  private profileCurrent(preview: RerankPreview, checkConfig = true): boolean {
+    if (preview.role !== 'reranking') return true;
+    try {
+      const port=this.rerankPort, config=checkConfig ? port?.config() : preview.config,
+        scopeId=checkConfig ? port?.scopeId() : preview.scopeId;
+      if (config?.state !== 'configured' || scopeId !== preview.scopeId) {
+        this.rerankProfiles.revoke();return false;
+      }
+      const admission=this.currentRerankAdmission(config,scopeId);
+      return admission.bindingDigest === preview.runtimeProfileBinding && admission.profileDigest === preview.runtimeProfileDigest;
+    } catch { return false; }
+  }
+  private currentPreview(role: EvidenceRole, checkConfig = true): PendingEvidencePreview | undefined {
     const pending = this.prepared[role];
     if (!pending) return undefined;
     // performance.now covers elapsed execution (including delayed callbacks).
@@ -187,7 +549,9 @@ export class SearchController {
         && monotonic - pending.monotonicStartedMs < EVIDENCE_PREVIEW_TTL_MS
         && Number.isFinite(boot) && boot >= pending.bootStartedSeconds
         && boot < pending.bootStartedSeconds+EVIDENCE_PREVIEW_TTL_MS/1000
-        && Number.isFinite(wall) && wall < pending.preview.expiresUnixMs) return pending;
+        && Number.isFinite(wall) && wall < pending.preview.expiresUnixMs
+        && this.profileCurrent(pending.preview,checkConfig)
+        && this.prepared[role] === pending && !this.disposed) return pending;
     } catch { /* An unavailable clock cannot authorize disclosure. */ }
     this.expirePreview(role,pending);
     return undefined;
@@ -210,46 +574,121 @@ export class SearchController {
     this.notifyExpiry();
   }
   private prepareEvidence(role: EvidenceRole): RerankPreview {
-    if (this.clearPreview(role)) this.emitEvidence();
-    const port = this.port(role), pref = port?.config();
-    if (!pref || pref.state === 'disabled') throw new ProviderFailure('DISABLED');
-    if (pref.state !== 'configured') throw new ProviderFailure('CONFIG_INVALID');
-    const config = pilotConfig(pref);
-    const scopeId = port?.scopeId(), response = this.state.response;
-    if (this.disposed || !this.enabled || this.paused || this.aborts[role] || !isDigest(scopeId)
-      || !this.lastQuery.trim() || !response || response.status !== 'ok'
-      || response.executedMode !== 'lexical' || !response.hits.length
-      || this.engine?.status().generationId !== response.indexGenerationId)
-      throw new ProviderFailure('NOT_READY');
-    if (response.hits.length > config.limits.maxCandidates
-      || Buffer.byteLength(this.lastQuery) + response.hits.reduce((n, hit) => n + Buffer.byteLength(hit.originalExcerpt), 0)
-        > config.limits.maxInputBytes) throw new ProviderFailure('LIMIT_EXCEEDED');
-    const monotonicStartedMs = performance.now();
-    const bootStartedSeconds = os.uptime();
-    const expiresUnixMs = Date.now()+EVIDENCE_PREVIEW_TTL_MS;
-    if (![monotonicStartedMs,bootStartedSeconds,expiresUnixMs].every(Number.isFinite))
-      throw new ProviderFailure('NOT_READY');
-    const preview = structuredClone({role,sequence:++this.sequence,revision:this.revision,expiresUnixMs,config,scopeId,query:this.lastQuery,hits:response.hits});
-    const pending = {preview,monotonicStartedMs,bootStartedSeconds};
-    this.prepared[role] = pending;
-    this.previewTimers[role] = setTimeout(()=>this.expirePreview(role,pending),EVIDENCE_PREVIEW_TTL_MS);
-    this.emitEvidence();
-    return structuredClone(preview);
-  }
-  private revokeEvidence(role?: EvidenceRole): void {
-    for (const r of role ? [role] : ['reranking','generation'] as const) {
-      this.clearPreview(r);
-      this.aborts[r]?.abort();
+    if (this.sharedAuthorityTransition() || this.roleRetirement(role)) throw new ProviderFailure('NOT_READY');
+    // Replacing consent is a single commit. In particular no observer can
+    // prepare another preview between clearing the old timer and owning the new one.
+    const removed = this.clearPreview(role);
+    let changed = removed;
+    try {
+      const port = this.port(role), pref = port?.config();
+      if (role === 'reranking' && pref?.state !== 'configured') this.rerankProfiles.revoke();
+      if (!pref || pref.state === 'disabled') throw new ProviderFailure('DISABLED');
+      if (pref.state !== 'configured') throw new ProviderFailure('CONFIG_INVALID');
+      const config = pilotConfig(pref);
+      const scopeId = port?.scopeId(), response = this.state.response;
+      if (this.disposed || !this.enabled || this.paused || this.activeEvidence[role] || !isDigest(scopeId)
+        || !this.lastQuery.trim() || !response || response.status !== 'ok'
+        || response.executedMode !== 'lexical' || !response.hits.length
+        || this.engine?.status().generationId !== response.indexGenerationId)
+        throw new ProviderFailure('NOT_READY');
+      if (response.hits.length > config.limits.maxCandidates
+        || Buffer.byteLength(this.lastQuery) + response.hits.reduce((n, hit) => n + Buffer.byteLength(hit.originalExcerpt), 0)
+          > config.limits.maxInputBytes) throw new ProviderFailure('LIMIT_EXCEEDED');
+      const admission = role === 'reranking' ? this.currentRerankAdmission(config,scopeId) : undefined;
+      const monotonicStartedMs = performance.now();
+      const bootStartedSeconds = os.uptime();
+      const expiresUnixMs = Date.now()+EVIDENCE_PREVIEW_TTL_MS;
+      if (![monotonicStartedMs,bootStartedSeconds,expiresUnixMs].every(Number.isFinite))
+        throw new ProviderFailure('NOT_READY');
+      const preview = structuredClone({role,sequence:++this.sequence,revision:this.revision,expiresUnixMs,config,scopeId,query:this.lastQuery,hits:response.hits,
+        ...(admission ? {runtimeProfileBinding:admission.bindingDigest,runtimeProfileDigest:admission.profileDigest} : {})});
+      const pending = {preview,monotonicStartedMs,bootStartedSeconds};
+      this.prepared[role] = pending;
+      this.previewTimers[role] = setTimeout(()=>this.expirePreview(role,pending),EVIDENCE_PREVIEW_TTL_MS);
+      changed = true;
+      return structuredClone(preview);
+    } catch (error) {
+      if (role === 'reranking' && !this.disposed && !this.activeEvidence.reranking
+        && error instanceof ProviderFailure && error.code === 'NOT_READY'
+        && this.rerankPort?.config().state === 'configured') {
+        this.state = {...this.state,rerank:{phase:'error',error:error.code,hits:[]}};
+        changed = true;
+      }
+      throw error;
+    } finally {
+      if (changed) this.emitEvidence();
     }
+  }
+  private revokeEvidence(): void {
+    for (const role of ['reranking','generation'] as const) {
+      this.clearPreview(role);
+      const active = this.activeEvidence[role];
+      if (active) {
+        cancelActiveDeadline(active.context);
+        const owner = active.abort;
+        this.enqueueRetirement({kind:'evidence',revision:active.revision,owner,attempted:false,run:()=>owner.abort()});
+      }
+    }
+    // All previews and both elapsed-time budgets are retired before any
+    // physical callback. The same bounded ledger retains failed source work
+    // and pinned evidence aborts; successful unrelated work cannot clear it.
+    this.drainRetirements();
+  }
+  private roleRetirement(role: EvidenceRole): RetirementObligation | undefined {
+    return this.retirement.obligations.find(item => item.kind === 'role' && item.role === role);
+  }
+  private retireRoleAbort(role: EvidenceRole, active: ActiveEvidenceOperation | undefined, explicit: boolean): void {
+    let item = this.roleRetirement(role);
+    if (!item && active) {
+      // A shared transition already owns this abort; do not retry it from a role callback.
+      if (this.retirement.obligations.some(obligation => obligation.owner === active.abort)) return;
+      const owner = active.abort;
+      item = {kind:'role',role,revision:active.revision,owner,run:()=>owner.abort(),attempted:false};
+      this.enqueueRetirement(item);
+    }
+    if (!item || item.running || this.retirement.running ||
+        (item.attempted && (!explicit || this.notifying || this.revokingSharedAuthority))) return;
+    item.attempted = true; item.running = true;
+    try {
+      item.run();
+      const index = this.retirement.obligations.indexOf(item);
+      if (index >= 0) this.retirement.obligations.splice(index,1);
+    } catch {
+      item.failed = true;
+      console.warn('SEARCH_RETIREMENT_OBLIGATION_FAILED','role');
+    } finally { item.running = false; }
+  }
+  // Role-local revocation and explicit cancellation use the same deadline
+  // authority as the worker. A new pending preview is a distinct operation.
+  private cancelEvidenceState(role: EvidenceRole, explicit = false): boolean {
+    if (this.disposed) return false;
+    const hadPreview = !!this.prepared[role];
+    const active = this.activeEvidence[role];
+    const revision = this.revision;
+    this.clearPreview(role);
+    const key = role === 'reranking' ? 'rerank' : 'generation';
+    const previous = this.state[key];
+    const current = active?.revision === this.revision ? active : undefined;
+    if (!hadPreview && !previous && !current) {
+      const retiring = this.roleRetirement(role);
+      this.retireRoleAbort(role,active,explicit);
+      return !!retiring && !this.roleRetirement(role);
+    }
+    const error = current
+      ? cancelActiveDeadline(current.context).code
+      : !hadPreview && previous?.error === 'TIMEOUT' ? 'TIMEOUT' : 'CANCELLED';
+    if (!hadPreview && previous?.phase === 'error' && previous.error === error) {
+      // Keep historical standalone cancel notifications (and worker settlement),
+      // but a listener cleaning up this same terminal snapshot is a no-op.
+      this.retireRoleAbort(role,active,explicit);
+      return this.ownsRevision(revision) && explicit && !this.notifying;
+    }
+    this.state = {...this.state,[key]:{phase:'error',error,hits:[]}};
+    this.retireRoleAbort(role,active,explicit);
+    return this.ownsRevision(revision);
   }
   private cancelEvidence(role: EvidenceRole): void {
-    const hadPreview = !!this.prepared[role];
-    this.revokeEvidence(role);
-    const key = role === 'reranking' ? 'rerank' : 'generation';
-    if (hadPreview || this.state[key]) {
-      this.state = {...this.state,[key]:{phase:'error',error:'CANCELLED',hits:[]}};
-      this.emitEvidence();
-    }
+    if (this.cancelEvidenceState(role,true)) this.emitEvidence();
   }
   cancelRerank(): void { this.cancelEvidence('reranking'); }
   cancelGeneration(): void { this.cancelEvidence('generation'); }
@@ -260,65 +699,142 @@ export class SearchController {
     return this.confirmEvidence('generation',preview,classification,token);
   }
   private async confirmEvidence(role: EvidenceRole, preview: RerankPreview, classification: 'synthetic' | 'public', token: string): Promise<void> {
-    const approved = this.currentPreview(role)?.preview;
+    if (this.sharedAuthorityTransition() || this.roleRetirement(role)) throw new ProviderFailure('DISCLOSURE_DENIED');
+    const approved = this.currentPreview(role,false)?.preview;
     if (!approved) throw new ProviderFailure('DISCLOSURE_DENIED');
     this.clearPreview(role);
     const port = this.port(role);
-    if (!port || this.aborts[role] || !['synthetic','public'].includes(classification)
+    if (!port || this.activeEvidence[role] || !['synthetic','public'].includes(classification)
+      || role === 'reranking' && classification !== 'synthetic'
       || JSON.stringify(approved) !== JSON.stringify(preview)) { this.emitEvidence(); throw new ProviderFailure('DISCLOSURE_DENIED'); }
     const current = (): boolean => {
       const config = port.config();
       return !this.disposed && this.enabled && !this.paused && this.revision === approved.revision
+        && this.profileCurrent(approved)
         && port.scopeId() === approved.scopeId && config.state === 'configured'
         && configDigest(role,config) === configDigest(role,approved.config)
         && this.engine?.status().generationId === this.state.response?.indexGenerationId
         && this.state.response?.indexGenerationId === approved.hits[0]?.indexGenerationId;
     };
     if (!current()) { this.emitEvidence(); throw new ProviderFailure('CANCELLED'); }
-    const abort = new AbortController(); this.aborts[role] = abort;
+    const admission = role === 'reranking' ? this.currentRerankAdmission(approved.config,approved.scopeId) : undefined;
+    const abort = new AbortController();
     const key = role === 'reranking' ? 'rerank' : 'generation';
-    const deadlineUnixMs = Date.now() + approved.config.limits.timeoutMs;
-    this.state = {...this.state,[key]:{phase:'running',error:null,hits:[]}}; this.emitEvidence();
+    const context = bindActiveDeadline({signal:abort.signal,deadlineUnixMs:Date.now()+approved.config.limits.timeoutMs},approved.config.limits.timeoutMs);
+    const {deadlineUnixMs} = context;
+    const operation = {abort,context,revision:approved.revision};
+    this.activeEvidence[role] = operation;
+    this.state = {...this.state,[key]:{phase:'running',error:null,hits:[]}};
     try {
+      this.emitEvidence();
       const worker = role === 'reranking' ? this.reranker : this.generator;
       const hits = await worker.run({
         config:approved.config,scopeId:approved.scopeId,query:{text:approved.query,classification},
         candidates:approved.hits.map(hit=>({hit,classification})),
         grant:{version:1,role,configDigest:configDigest(role,approved.config),
+          ...(admission ? {runtimeProfileBinding:admission.bindingDigest} : {}),
           scopeId:approved.scopeId,expiresUnixMs:deadlineUnixMs,queryDigest:hash(approved.query),
           queryClassification:classification,sources:approved.hits.map(hit=>({sourceId:hit.sourceId,
             sourceSha256:hit.sourceSha256,excerptDigest:hash(hit.originalExcerpt),classification}))},
-      },token,{signal:abort.signal,deadlineUnixMs},hit=>port.verify(hit),current);
+      },token,context,hit=>port.verify(hit),current,admission);
       if (this.revision === approved.revision && !this.disposed) {
-        if (current() && !abort.signal.aborted) this.state = {...this.state,[key]:{phase:'results',error:null,hits}};
-        else this.state = {...this.state,[key]:{phase:'error',error:'CANCELLED',hits:[]}};
+        const valid = current();
+        remainingOperationMs(context);
+        if (!valid) throw new ProviderFailure('CANCELLED');
+        if (this.activeEvidence[role] !== operation || this.revision !== approved.revision || this.disposed) return;
+        // Retire the operation before notifying listeners: a reentrant cancel
+        // now concerns a completed result, not a still-running deadline.
+        delete this.activeEvidence[role];
+        this.state = {...this.state,[key]:{phase:'results',error:null,hits}};
         this.emitEvidence();
       }
     } catch (error) {
-      if (this.revision === approved.revision && !this.disposed) {
+      error = deadlineFailure(context) ?? error;
+      if (this.activeEvidence[role] === operation && this.revision === approved.revision && !this.disposed) {
+        delete this.activeEvidence[role];
         this.state = {...this.state,[key]:{phase:'error',error:error instanceof ProviderFailure?error.code:'NOT_READY',hits:[]}};
         this.emitEvidence();
       }
-    } finally { if (this.aborts[role] === abort) delete this.aborts[role]; }
+    } finally { if (this.activeEvidence[role] === operation) delete this.activeEvidence[role]; }
   }
   async open(index: number, expected?: EvidenceHit): Promise<ApiResult<null>> {
     const hit = this.state.response?.hits[index];
-    if (this.disposed || !this.enabled || !hit || !Number.isInteger(index)
+    if (this.sharedAuthorityTransition() || !this.enabled || !hit || !Number.isInteger(index)
       || expected && JSON.stringify(expected) !== JSON.stringify(hit)) return failure('NAVIGATION_REJECTED');
-    try { await this.navigate(structuredClone(hit)); return { apiVersion: 1, ok: true, value: null }; }
-    catch { this.message('NAVIGATION_REJECTED'); return failure('NAVIGATION_REJECTED'); }
-  }
-  control(action: 'pause' | 'cancel' | 'resume' | 'rebuild'): ApiResult<{ cancelled: boolean | null }> {
-    if (this.disposed || !this.enabled || !this.engine) return failure('DISABLED');
-    this.invalidate();
+    const revision = this.revision;
     try {
-      let cancelled: boolean | null = null;
-      if (action === 'pause' || action === 'cancel') { cancelled = this.engine.cancel(); this.paused = true; }
-      else { this.engine[action](); this.paused = false; }
-      this.emit(); return { apiVersion: 1, ok: true, value: { cancelled } };
+      await this.navigate(structuredClone(hit));
+      return this.disposed || this.revision !== revision
+        ? failure('SUPERSEDED') : { apiVersion: 1, ok: true, value: null };
+    }
+    catch {
+      if (this.disposed || this.revision !== revision) return failure('SUPERSEDED');
+      this.message('NAVIGATION_REJECTED');
+      return failure('NAVIGATION_REJECTED');
+    }
+  }
+  control(action: 'pause' | 'cancel' | 'resume' | 'rebuild', retireHost?: RetirementTarget): ApiResult<{ cancelled: boolean | null }> {
+    if (this.disposed) return failure('DISABLED');
+    if (this.sharedResetDepth || this.retirement.running || this.revokingSharedAuthority) return failure('SUPERSEDED');
+    if (this.explicitRetirementPending) {
+      // Rebuild is the explicit source-freshness recovery action; ordinary
+      // search, settings changes and observer publication cannot retry it.
+      if (action !== 'rebuild' || this.notifying || this.retirement.sourceRunning || this.sourceDrains.size || this.sourceDrainFailed || this.retirement.overflow)
+        return failure('INTERNAL_FAILURE');
+      const revision = this.revision + 1;
+      this.transitionSourceRetirement(true);
+      if (this.disposed || this.revision !== revision) return failure('SUPERSEDED');
+      if (this.sharedAuthorityFault) return failure('INTERNAL_FAILURE');
+    }
+    if (this.runtimeSettingsChanging) return failure('SUPERSEDED');
+    if (!this.enabled || !this.engine) return failure('DISABLED');
+    if (this.sharedAuthorityFault && this.pendingHostRetirement && this.notifying) return failure('INTERNAL_FAILURE');
+    const engine = this.engine, revision = this.revision + 1;
+    try { this.invalidateState(false, retireHost, true); }
+    catch { return failure('INTERNAL_FAILURE'); }
+    // The initial shared invalidation is synchronous. Do not execute a stale
+    // control command after an observer supersedes its revision or detaches.
+    if (this.disposed || this.revision !== revision || this.engine !== engine) return failure('SUPERSEDED');
+    if (this.sharedAuthorityFault) return failure('INTERNAL_FAILURE');
+    try {
+      const pause = action === 'pause' || action === 'cancel';
+      const cancelled = pause ? engine.cancel() : (engine[action](), null);
+      if (this.disposed || this.revision !== revision || this.engine !== engine) return failure('SUPERSEDED');
+      this.paused = pause;
+      this.emit();
+      if (this.disposed || this.revision !== revision || this.engine !== engine) return failure('SUPERSEDED');
+      return { apiVersion: 1, ok: true, value: { cancelled } };
     } catch { return failure('INTERNAL_FAILURE'); }
   }
-  dispose(): void { this.disposed = true; this.invalidate(); this.listeners.clear(); this.evidenceListeners.clear(); this.engine = undefined; }
+  /** Commit the terminal snapshot without calling host teardown or observers.
+   * The plugin seals all sibling authorities before any cancellation callback. */
+  sealTerminal(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.engine = undefined;
+    this.revision++;
+    this.lastQuery = '';
+    this.state = {phase:'idle',message:'Results cleared; search to verify current sources.',response:null};
+    this.clearPreview('reranking'); this.clearPreview('generation');
+    this.pendingExpiryNotification = undefined;
+    this.evidencePending = undefined;
+    this.evidenceListeners.clear();
+    this.pending?.resolve(failure('SUPERSEDED')); this.pending = undefined;
+    this.rerankProfiles.revoke();
+  }
+  dispose(): void {
+    this.sealTerminal();
+    if (this.terminalRetired) return;
+    this.terminalRetired = true;
+    // Abort can synchronously invoke listeners; every old publication right
+    // and both consent capabilities have already been revoked.
+    // Terminal disposal stops source-owner processing but must still attempt
+    // both pinned evidence aborts, even if unload reenters an active wave.
+    this.retirement.obligations = this.retirement.obligations.filter(item => item.kind !== 'source');
+    for (const item of this.retirement.obligations) item.attempted = false;
+    try { this.revokeEvidence(); }
+    finally { this.emit(true); }
+  }
 }
 /** Stable in-process API. No listener, IPC transport, or external runtime. */
 export class StandaloneApi {

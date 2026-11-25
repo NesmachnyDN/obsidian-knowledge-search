@@ -17,6 +17,14 @@ class Fixture(BaseHTTPRequestHandler):
         if self.path not in {"/v1/rerank", "/v1/chat/completions"}:
             self.send_error(404)
             return
+        if self.path == "/v1/rerank":
+            with self.server.count_lock:
+                self.server.rerank_count += 1
+                self.server.rerank_count_path.write_text(str(self.server.rerank_count), encoding="utf-8")
+        else:
+            with self.server.count_lock:
+                self.server.generation_count += 1
+                self.server.generation_count_path.write_text(str(self.server.generation_count), encoding="utf-8")
         auth = self.headers.get("Authorization")
         if auth not in {"Bearer fixture-success", "Bearer fixture-delay", "Bearer fixture-bad-citation"}:
             self.send_error(401)
@@ -117,6 +125,12 @@ if __name__ == "__main__":
     server = ThreadingHTTPServer(("127.0.0.1", 18765), Fixture)
     server.count_lock = Lock()
     server.embedding_count = 0
+    server.rerank_count = 0
+    server.rerank_count_path = Path(sys.argv[1] + ".rerank-count")
+    server.rerank_count_path.write_text("0", encoding="utf-8")
+    server.generation_count = 0
+    server.generation_count_path = Path(sys.argv[1] + ".generation-count")
+    server.generation_count_path.write_text("0", encoding="utf-8")
     server.count_path = Path(sys.argv[1] + ".count")
     server.count_path.write_text("0", encoding="utf-8")
     Path(sys.argv[1]).touch()

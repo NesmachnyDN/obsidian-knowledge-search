@@ -11,6 +11,7 @@ export type Candidate = ClassifiedText & { sourceId: string; sourceSha256: strin
 export type DisclosureGrant = {
   version: 1; role: AiRole; configDigest: string; scopeId: string; expiresUnixMs: number;
   queryDigest: string; queryClassification: Classification;
+  runtimeProfileBinding?: string;
   sources: readonly { sourceId: string; sourceSha256: string; excerptDigest: string; classification: Classification }[];
 };
 export function configDigest(role: AiRole, config: ProviderConfig): string {

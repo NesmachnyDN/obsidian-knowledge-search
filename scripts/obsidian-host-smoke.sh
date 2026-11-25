@@ -235,10 +235,13 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
     transition_state() {
       timeout 8s "$cli" eval "code=(async()=>{const p=app.plugins.plugins[\"oks-synthetic-evidence\"];await p.standalone.whenIdle();const r=await p.standalone.search({protocolVersion:2,requestId:\"transition\",query:\"REQ-OKS-SMOKE\",requestedMode:\"lexical\",limit:5});return JSON.stringify({ready:p.standalone.status().status===\"ready\",generation:p.standalone.status().generationId,denseApi:!!p.denseApi,oldWorkerStopped:globalThis.__oksTransitionParser?.stopped===true,basic:r.status===\"ok\"&&r.hits.length===1&&r.hits[0].sourceSha256===\"$first_sha\",disabled:Object.values(p.settings.ai).every(x=>x.state===\"disabled\")&&!p.settings.ingestion.enabled})})()"
     }
+    # R1 and R2 both retain the D8 API; the older D7/D8 test stays unchanged.
+    previous_dense=false
+    if [[ "${OKS_R1_R2_TRANSITION_TEST:-0}" == 1 ]]; then previous_dense=true; fi
     old_state="$(transition_state)"
     generation="$(printf "%s" "$old_state" | grep -oE "[0-9a-f]{64}" | head -1)"
     test -n "$generation"
-    [[ "$old_state" == *"\"denseApi\":false"* && "$old_state" == *"\"basic\":true"* && "$old_state" == *"\"disabled\":true"* ]]
+    [[ "$old_state" == *"\"denseApi\":$previous_dense"* && "$old_state" == *"\"basic\":true"* && "$old_state" == *"\"disabled\":true"* ]]
     transition() {
       local dir="$1" expected="$2" state asset
       timeout 8s "$cli" eval "code=(globalThis.__oksTransitionParser=app.plugins.plugins[\"oks-synthetic-evidence\"].standalone.parser,true)" >/dev/null
@@ -257,7 +260,7 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
       test "$(sha256sum "$tmp/vault/second.md" | cut -d" " -f1)" = "$fixture_sha"
     }
     transition "$package_dir" true
-    transition "$previous_package_dir" false
+    transition "$previous_package_dir" "$previous_dense"
     transition "$package_dir" true
     echo "OBSIDIAN_PACKAGE_TRANSITION_PASS: update rollback re-update; generation, original hashes, basic search, default-off AI and prior-worker shutdown verified"
   fi

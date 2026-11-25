@@ -1,6 +1,8 @@
 import { type EvidenceHit } from '../standalone/contracts';
-import { type CallContext } from './contracts';
-import { LoopbackRerankTransport } from './loopback-rerank';
+import { ProviderFailure, type CallContext } from './contracts';
+import { LoopbackRerankTransport, pilotConfig } from './loopback-rerank';
+import { bindActiveDeadline, remainingOperationMs } from './active-deadline';
+import { assertRerankAdmission, type RerankAdmission } from './rerank-profile';
 import { VerifiedEvidenceOperation, type EvidenceApproval } from './verified-evidence';
 export type { ClassifiedHit } from './verified-evidence';
 export type RerankApproval = EvidenceApproval;
@@ -9,9 +11,24 @@ export class EvidenceReranker {
   private readonly transport = new LoopbackRerankTransport();
   private readonly operation = new VerifiedEvidenceOperation();
   async run(approval: RerankApproval, token: string, context: CallContext,
-    verify: (hit: EvidenceHit) => Promise<void>, current: () => boolean): Promise<readonly RerankedHit[]> {
-    const {result,evidence} = await this.operation.run('reranking', approval, context, verify, current,
-      (config,input,call)=>this.transport.rerank(config,input,token,call));
+    verify: (hit: EvidenceHit) => Promise<void>, current: () => boolean,
+    admission?: RerankAdmission): Promise<readonly RerankedHit[]> {
+    const config = pilotConfig(approval.config), scopeId = approval.scopeId;
+    assertRerankAdmission(admission,config,scopeId);
+    if (!Array.isArray(approval.candidates) || approval.candidates.length > config.limits.maxCandidates)
+      throw new ProviderFailure('LIMIT_EXCEEDED');
+    if (approval.grant?.runtimeProfileBinding !== admission.bindingDigest
+      || approval.query?.classification !== 'synthetic'
+      || approval.candidates.some(c=>c?.classification !== 'synthetic')) throw new ProviderFailure('DISCLOSURE_DENIED');
+    context = bindActiveDeadline(context,config.limits.timeoutMs,approval.grant.expiresUnixMs);
+    const stillCurrent = (): boolean => {
+      try { assertRerankAdmission(admission,config,scopeId); return current(); } catch { return false; }
+    };
+    const {result,evidence} = await this.operation.run('reranking', approval, context, verify, stillCurrent,
+      (config,input,call)=>this.transport.rerank(config,input,token,call,admission));
+    const valid = stillCurrent();
+    remainingOperationMs(context);
+    if (!valid) throw new ProviderFailure('CANCELLED');
     return result.map((row,i)=>({evidence:evidence[row.id]!,rerankRank:i+1,rerankScore:row.score}));
   }
 }

@@ -18,6 +18,8 @@ test('UX-L10N-01: settings follow Obsidian language, not OS or stored plugin pre
   assert.equal(translateSettings('Embedding space change', 'ru'), 'Изменение пространства эмбеддингов');
   assert.equal(translateSettings('Close editor', 'ru'), 'Закрыть редактор');
   assert.equal(translateSettings('Refresh', 'en'), 'Refresh');
+  assert.equal(translateSettings('Synthetic fixture only; no actual model verified.', 'ru'), 'Только синтетические тестовые данные; реальная модель не проверена.');
+  assert.equal(translateSettings('Synthetic fixture only; no actual model verified.', 'en'), 'Synthetic fixture only; no actual model verified.');
 });
 
 test('UX-L10N-02: status and validation messages translate without modifying raw diagnostics', () => {

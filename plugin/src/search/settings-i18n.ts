@@ -125,6 +125,7 @@ const russian: Readonly<Record<string, string>> = {
   'Backend draft': 'Настройки локального сервиса',
   'Legacy synthetic probe (diagnostic only)': 'Унаследованный синтетический тест (только диагностика)',
   'Synthetic fixtures only': 'Только синтетические тестовые данные',
+  'Synthetic fixture only; no actual model verified.': 'Только синтетические тестовые данные; реальная модель не проверена.',
   'Not part of basic search. This tool does not run automatically.': 'Не относится к базовому поиску. Инструмент не запускается автоматически.',
   'Probe setup': 'Настройки теста',
   'Configure probe': 'Настроить тест',

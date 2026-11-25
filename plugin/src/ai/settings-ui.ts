@@ -20,17 +20,18 @@ const titles: Record<AiRole, string> = {
 };
 
 export type OperationStatusReader = (role: AiRole) => AiOperationStatus;
-function operationText(status?: AiOperationStatus): string {
+function operationText(status?: AiOperationStatus, role?: AiRole): string {
+  const fixture = role === 'reranking' ? ' ' + t('Synthetic fixture only; no actual model verified.') : '';
   if (!status || status.phase === 'idle') return t('No current verified operation. Authorization is required for the next operation.');
-  if (status.phase === 'permission-required') return t('Permission required: review and authorize the exact operation in Search.');
-  if (status.phase === 'busy') return t('Busy: preparing or executing the explicit operation.');
-  if (status.phase === 'complete') return t('Completed: the last authorized operation succeeded. This is not a standing readiness or consent grant.');
+  if (status.phase === 'permission-required') return t('Permission required: review and authorize the exact operation in Search.') + fixture;
+  if (status.phase === 'busy') return t('Busy: preparing or executing the explicit operation.') + fixture;
+  if (status.phase === 'complete') return t('Completed: the last authorized operation succeeded. This is not a standing readiness or consent grant.') + fixture;
   return f('Failed or cancelled: {error}. Offline search remains separate.', {error: status.error ?? 'NOT_READY'});
 }
 export function refreshProviderOperationStatus(root: HTMLElement, status?: OperationStatusReader): void {
   for (const el of root.querySelectorAll<HTMLElement>('[data-oks-operation]')) {
     const role = el.dataset.oksOperation as AiRole;
-    if (AI_ROLES.includes(role)) el.textContent = operationText(status?.(role));
+    if (AI_ROLES.includes(role)) el.textContent = operationText(status?.(role),role);
   }
 }
 
@@ -55,7 +56,7 @@ export function renderProviderSettings(root: HTMLElement, app: App, preferences:
       .setDesc(t(headline) + (known.error ? ' (' + known.error + ')' : '') +
         t('. Only an explicit connection check sends synthetic test data.'));
     const operation = new Setting(section).setName(t('Current AI operation'))
-      .setDesc(operationText(operationStatus?.(role)));
+      .setDesc(operationText(operationStatus?.(role),role));
     operation.descEl.dataset.oksOperation = role;
     const draft = drafts[role] ?? newProviderDraft(pref);
     const key = 'ai-' + role;

@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import assert from 'node:assert/strict';
 import { EvidenceReranker, type RerankApproval } from '../../plugin/src/ai/rerank-evidence';
+import { RerankRuntimeProfiles } from '../../plugin/src/ai/rerank-profile';
 import { configDigest } from '../../plugin/src/ai/disclosure';
 import { ProviderFailure, type ProviderConfig } from '../../plugin/src/ai/contracts';
 import { hash } from '../../plugin/src/standalone/contracts';
@@ -49,7 +50,7 @@ export async function fixtureTrials(captured: Captured[], host: Host): Promise<T
   try {
     const address=server.address();
     if(!address||typeof address==='string') throw Error('FIXTURE_ADDRESS');
-    const reranker=new EvidenceReranker(), results:Trial[]=[];
+    const reranker=new EvidenceReranker(), runtimeProfiles=new RerankRuntimeProfiles(), results:Trial[]=[];
     // Bounded smoke: six fixed tuning queries covering all authored categories.
     // Profile order is seeded deterministically; no held-out fixture tuning.
     const selected=captured.filter(c=>c.input.split==='tuning'&&c.input.group==='aster');
@@ -67,14 +68,15 @@ export async function fixtureTrials(captured: Captured[], host: Host): Promise<T
           if(hits.length) {
             expectedWire={model:profile+'@fixture-v1',query:c.input.query,documents:hits.map(h=>h.originalExcerpt),top_n:hits.length,max_tokens_per_query:0,max_tokens_per_doc:0};
             const deadlineUnixMs=Date.now()+3000;
+            const admission=runtimeProfiles.installSyntheticFixture(config,host.scopeId,'frozen-corpus-fixture');
             const approval:RerankApproval={config,scopeId:host.scopeId,query:{text:c.input.query,classification:'synthetic'},
               candidates:hits.map(hit=>({hit,classification:'synthetic'})),
-              grant:{version:1,role:'reranking',configDigest:configDigest('reranking',config),
+              grant:{version:1,role:'reranking',configDigest:configDigest('reranking',config),runtimeProfileBinding:admission.bindingDigest,
                 scopeId:host.scopeId,expiresUnixMs:deadlineUnixMs,queryDigest:hash(c.input.query),queryClassification:'synthetic',
                 sources:hits.map(hit=>({sourceId:hit.sourceId,sourceSha256:hit.sourceSha256,
                   excerptDigest:hash(hit.originalExcerpt),classification:'synthetic'}))}};
             try {
-              const answer=await reranker.run(approval,token,{deadlineUnixMs,signal:new AbortController().signal},host.verify,host.current);
+              const answer=await reranker.run(approval,token,{deadlineUnixMs,signal:new AbortController().signal},host.verify,host.current,admission);
               ranked=answer.map(x=>candidate(x.evidence).id);
               ordered(ranked,expected);
               for(const [idx,row] of answer.entries()) {
