@@ -3,7 +3,7 @@ import { ProviderFailure, type CallContext } from './contracts';
 
 // A host-local immutable context carries one terminal elapsed-time budget across
 // all layers. It is not serialized, persisted, refreshed, or taken from a response.
-type Budget = { readonly limitMs: number; remaining(): number; expire(): void };
+type Budget = { readonly limitMs: number; remaining(): number; expire(): void; cancel(): void };
 const budgets = new WeakMap<CallContext, Budget>();
 const timeout = (): never => { throw new ProviderFailure('TIMEOUT'); };
 
@@ -30,6 +30,11 @@ export function bindActiveDeadline(context: CallContext, maxMs: number,
   const expire = (): void => { terminal ??= 'TIMEOUT'; };
   const budget: Budget = {
     limitMs, expire,
+    cancel(): void {
+      // Fix the reason before external abort callbacks can observe it.
+      try { this.remaining(); } catch { /* existing terminal reason */ }
+      terminal ??= 'CANCELLED';
+    },
     remaining(): number {
       if (terminal) throw new ProviderFailure(terminal);
       try {
@@ -66,6 +71,10 @@ export function remainingOperationMs(context: CallContext): number {
   const remaining = context.deadlineUnixMs - Date.now();
   if (!Number.isFinite(remaining) || remaining <= 0) return timeout();
   return remaining;
+}
+export function cancelActiveDeadline(context: CallContext): ProviderFailure {
+  budgets.get(context)?.cancel();
+  return deadlineFailure(context, new ProviderFailure('CANCELLED'))!;
 }
 export function expireActiveDeadline(context: CallContext): void { budgets.get(context)?.expire(); }
 

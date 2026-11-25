@@ -2,7 +2,7 @@ import os from 'node:os';
 import { EvidenceGenerator, type GeneratedEvidenceClaim } from '../ai/generation-evidence';
 import { EvidenceReranker, type RerankedHit } from '../ai/rerank-evidence';
 import { pilotConfig } from '../ai/loopback-rerank';
-import { bindActiveDeadline, remainingOperationMs, deadlineFailure } from '../ai/active-deadline';
+import { bindActiveDeadline, remainingOperationMs, deadlineFailure, cancelActiveDeadline } from '../ai/active-deadline';
 import { RerankRuntimeProfiles, type RerankAdmission } from '../ai/rerank-profile';
 import { configDigest } from '../ai/disclosure';
 import { ProviderFailure, type ProviderConfig, type ProviderPreference, type ProviderFailureCode, type AiOperationStatus, type CallContext } from '../ai/contracts';
@@ -85,6 +85,7 @@ export class SearchController {
   private pendingExpiryNotification?: object;
   private notifying = false;
   private revokingSharedAuthority = false;
+  private sharedResetDepth = 0;
   private runtimeSettingsChanging = false;
   private pendingHostRetirement?: RetirementTarget;
   private sharedAuthorityFault = false;
@@ -281,7 +282,7 @@ export class SearchController {
   /** Host admission stays closed through shared revocation and lifecycle delivery,
    * never through independent evidence-only notifications. */
   sharedAuthorityTransition(): boolean {
-    return this.disposed || this.runtimeSettingsChanging || this.sharedAuthorityFault || this.revokingSharedAuthority || this.deliveringLifecycle || !!this.lifecyclePending;
+    return this.disposed || this.runtimeSettingsChanging || this.sharedAuthorityFault || this.sharedResetDepth > 0 || this.revokingSharedAuthority || this.deliveringLifecycle || !!this.lifecyclePending;
   }
   /** Fence admission before observers or persistence can yield. Failed retirement
    * remains latched independently of the settings transaction's lifetime. */
@@ -290,25 +291,44 @@ export class SearchController {
       throw new StandaloneError('INTERNAL_FAILURE');
     this.runtimeSettingsChanging = true;
     this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null});
+    if (this.disposed) return;
     if (revokeRerankProfile) this.rerankProfiles.revoke();
     this.emit(false, retire, true);
   }
   endRuntimeSettingsChange(): void { this.runtimeSettingsChanging = false; }
   invalidate(): void { if (!this.disposed) this.invalidateState(); }
-  private resetSharedState(state: UiState): void {
-    this.revision++; this.revokeEvidence(); this.lastQuery = '';
-    this.pending?.resolve(failure('SUPERSEDED')); this.pending = undefined;
-    this.state = state;
+  private resetSharedState(state: UiState, reserve?: (revision: number) => void): number {
+    const revision = ++this.revision;
+    this.sharedResetDepth++;
+    try {
+      // Commit ownership and reserve the new job before synchronous abort
+      // callbacks. A nested reset or terminal seal can then settle that job,
+      // never be overwritten by the interrupted caller, and own publication.
+      this.lastQuery = '';
+      this.pending?.resolve(failure('SUPERSEDED')); this.pending = undefined;
+      this.state = state;
+      reserve?.(revision);
+      this.revokeEvidence();
+      return revision;
+    } finally {
+      this.sharedResetDepth--;
+      // A nested search may already have published, but dispatch must wait
+      // for the outermost abort wave to finish.
+      if (this.revision !== revision) void this.pump();
+    }
+  }
+  private ownsRevision(revision: number): boolean {
+    return !this.disposed && this.revision === revision;
   }
   private invalidateState(final = false, retireHost?: RetirementTarget, requireRetirement = false): void {
-    this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null});
-    this.emit(final, retireHost, requireRetirement);
+    const revision = this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null});
+    if (this.ownsRevision(revision)) this.emit(final, retireHost, requireRetirement);
   }
   message(error: string): void {
     if (this.disposed) return;
     // Publish only the committed transition; no continuation after observers.
-    this.resetSharedState({phase:'error',message:safeCode(error)!,response:null});
-    this.emit();
+    const revision = this.resetSharedState({phase:'error',message:safeCode(error)!,response:null});
+    if (this.ownsRevision(revision)) this.emit();
   }
   async search(input: unknown): Promise<ApiResult<SearchResponse>> {
     let request: SearchRequest;
@@ -317,18 +337,17 @@ export class SearchController {
     if (this.runtimeSettingsChanging) return failure('SUPERSEDED');
     if (this.sharedAuthorityFault && this.pendingHostRetirement && this.notifying) return failure('INTERNAL_FAILURE');
     if (!this.engine) return failure(this.error ?? 'INDEX_UNAVAILABLE');
-    this.resetSharedState({phase:'searching',message:'Verifying original sources…',response:null});
-    const revision = this.revision;
-    // Reserve the queued job before notifying; a newer revision can resolve
-    // it synchronously, including disposal inside a lifecycle callback.
+    if (this.sharedResetDepth && this.sharedAuthorityFault) return failure('INTERNAL_FAILURE');
+    let revision!: number;
     const result = new Promise<ApiResult<SearchResponse>>(resolve => {
-      this.pending = {request,revision,resolve};
+      revision = this.resetSharedState({phase:'searching',message:'Verifying original sources…',response:null},
+        owned => { this.pending = {request,revision:owned,resolve}; });
     });
-    this.emit();
+    if (this.ownsRevision(revision)) this.emit();
     return result;
   }
   private async pump(): Promise<void> {
-    if (this.notifying || this.runtimeSettingsChanging || this.revokingSharedAuthority || this.sharedAuthorityFault || this.active || !this.pending) return;
+    if (this.notifying || this.runtimeSettingsChanging || this.sharedResetDepth || this.revokingSharedAuthority || this.sharedAuthorityFault || this.active || !this.pending) return;
     const job = this.pending; this.pending = undefined;
     if (this.disposed || job.revision !== this.revision || !this.engine) {
       job.resolve(failure('SUPERSEDED')); return;
@@ -460,11 +479,15 @@ export class SearchController {
       if (changed) this.emitEvidence();
     }
   }
-  private revokeEvidence(role?: EvidenceRole): void {
-    for (const r of role ? [role] : ['reranking','generation'] as const) {
+  private revokeEvidence(): void {
+    const aborts: AbortController[] = [];
+    for (const r of ['reranking','generation'] as const) {
       this.clearPreview(r);
-      this.activeEvidence[r]?.abort.abort();
+      const active = this.activeEvidence[r];
+      if (active) aborts.push(active.abort);
     }
+    // Clear both previews and pin the old owners before any callback.
+    for (const abort of aborts) abort.abort();
   }
   // Role-local revocation and explicit cancellation use the same deadline
   // authority as the worker. A new pending preview is a distinct operation.
@@ -472,21 +495,24 @@ export class SearchController {
     if (this.disposed) return false;
     const hadPreview = !!this.prepared[role];
     const active = this.activeEvidence[role];
-    this.revokeEvidence(role);
+    const revision = this.revision;
+    this.clearPreview(role);
     const key = role === 'reranking' ? 'rerank' : 'generation';
     const previous = this.state[key];
     const current = active?.revision === this.revision ? active : undefined;
-    if (!hadPreview && !previous && !current) return false;
+    if (!hadPreview && !previous && !current) { active?.abort.abort(); return false; }
     const error = current
-      ? deadlineFailure(current.context)?.code ?? 'CANCELLED'
+      ? cancelActiveDeadline(current.context).code
       : !hadPreview && previous?.error === 'TIMEOUT' ? 'TIMEOUT' : 'CANCELLED';
     if (!hadPreview && previous?.phase === 'error' && previous.error === error) {
       // Keep historical standalone cancel notifications (and worker settlement),
       // but a listener cleaning up this same terminal snapshot is a no-op.
-      return explicit && !this.notifying;
+      active?.abort.abort();
+      return this.ownsRevision(revision) && explicit && !this.notifying;
     }
     this.state = {...this.state,[key]:{phase:'error',error,hits:[]}};
-    return true;
+    active?.abort.abort();
+    return this.ownsRevision(revision);
   }
   private cancelEvidence(role: EvidenceRole): void {
     if (this.cancelEvidenceState(role,true)) this.emitEvidence();
@@ -576,7 +602,7 @@ export class SearchController {
   }
   control(action: 'pause' | 'cancel' | 'resume' | 'rebuild', retireHost?: RetirementTarget): ApiResult<{ cancelled: boolean | null }> {
     if (this.disposed || !this.enabled || !this.engine) return failure('DISABLED');
-    if (this.runtimeSettingsChanging || this.revokingSharedAuthority) return failure('SUPERSEDED');
+    if (this.runtimeSettingsChanging || this.sharedResetDepth || this.revokingSharedAuthority) return failure('SUPERSEDED');
     if (this.sharedAuthorityFault && this.pendingHostRetirement && this.notifying) return failure('INTERNAL_FAILURE');
     const engine = this.engine, revision = this.revision + 1;
     try { this.invalidateState(false, retireHost, true); }

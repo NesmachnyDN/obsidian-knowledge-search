@@ -1497,3 +1497,75 @@ test('B-R2-LIFE-14: abort callbacks of both active evidence roles see sealed sib
     await new Promise<void>(resolve=>server.close(()=>resolve()));
   }
 });
+
+// A synchronous abort callback is a publication boundary even when the
+// operation which caused it is not itself an unload.
+for (const role of ['generation','reranking'] as const) {
+  for (const action of ['search','cancel','invalidate','control','settings'] as const) {
+    test(`B-R2-LIFE-15: ${role} abort during ${action} cannot reopen terminal state`,async()=>{
+      const f=await fixture(),p=f.plugin,c=p.searchController;
+      const active:Promise<void>[]=[];
+      let callbacks=0,dispatches=0,saves=0;
+      try {
+        await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
+        await p.patchSettings(s=>{s.ai.generation=reloadFixtureConfig;s.ai.reranking=reloadFixtureConfig;});
+        const profiles=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof reloadFixtureConfig,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
+        profiles.rerankProfiles.installSyntheticFixture(reloadFixtureConfig,profiles.rerankPort.scopeId(),'abort-reset-fixture');
+        assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+        const g=c.prepareGeneration(),r=c.prepareRerank();
+        Object.assign(p,{verifyAiEvidence:async()=>{throw Error('synthetic stop before HTTP');}});
+        active.push(role==='generation'?c.generationConfirmed(g,'synthetic','fixture'):c.rerankConfirmed(r,'synthetic','fixture'));
+        const internals=c as unknown as {activeEvidence:Record<typeof role,{abort:AbortController}>;pending?:unknown};
+        const engine=p.standalone!,search=engine.search.bind(engine),save=p.saveData.bind(p);
+        Object.assign(engine,{search:(input:SearchRequest)=>{dispatches++;return search(input);}});
+        Object.assign(p,{saveData:(value:unknown)=>{saves++;return save(value);}});
+        internals.activeEvidence[role].abort.signal.addEventListener('abort',()=>{callbacks++;p.onunload();},{once:true});
+        if(action==='search'){
+          const result=await navigationWatchdog(c.search(uiRequest('REQ-LIFE-1',1)));
+          assert.ok(!result.ok&&result.error==='SUPERSEDED');
+        }else if(action==='cancel'){
+          if(role==='generation')c.cancelGeneration();else c.cancelRerank();
+        }else if(action==='invalidate'){c.invalidate();}
+        else if(action==='control'){assert.ok(!c.control('rebuild').ok);}
+        else {await navigationWatchdog(p.patchSettings(s=>{s.ai.generation={state:'disabled'};}));}
+        await navigationWatchdog(Promise.all(active));
+        assert.equal(callbacks,1);assert.equal(c.snapshot().phase,'idle');
+        assert.equal(c.snapshot().response,null);assert.equal(internals.pending,undefined);
+        assert.equal(c.sharedAuthorityTransition(),true);
+        assert.equal(c.isEvidencePreviewCurrent('generation',g.sequence),false);
+        assert.equal(c.isEvidencePreviewCurrent('reranking',r.sequence),false);
+        assert.equal(dispatches,0);assert.equal(saves,0);
+      }finally{await Promise.allSettled(active);await f.cleanup();}
+    });
+  }
+  test(`B-R2-LIFE-15: nested lexical search during ${role} abort wins without premature dispatch`,async()=>{
+    const f=await fixture(),p=f.plugin,c=p.searchController;
+    let operation:Promise<void>|undefined,nested:ReturnType<typeof c.search>|undefined;
+    let dispatches=0,inside=0,closed=false,otherCurrent=true,controlOk=true;
+    try {
+      await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
+      await p.patchSettings(s=>{s.ai.generation=reloadFixtureConfig;s.ai.reranking=reloadFixtureConfig;});
+      const profiles=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof reloadFixtureConfig,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
+      profiles.rerankProfiles.installSyntheticFixture(reloadFixtureConfig,profiles.rerankPort.scopeId(),'nested-abort-fixture');
+      assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+      const g=c.prepareGeneration(),r=c.prepareRerank();
+      Object.assign(p,{verifyAiEvidence:async()=>{throw Error('synthetic stop before HTTP');}});
+      operation=role==='generation'?c.generationConfirmed(g,'synthetic','fixture'):c.rerankConfirmed(r,'synthetic','fixture');
+      const engine=p.standalone!,search=engine.search.bind(engine);
+      Object.assign(engine,{search:(input:SearchRequest)=>{dispatches++;return search(input);}});
+      const internals=c as unknown as {activeEvidence:Record<typeof role,{abort:AbortController}>};
+      internals.activeEvidence[role].abort.signal.addEventListener('abort',()=>{
+        closed=c.sharedAuthorityTransition();
+        otherCurrent=c.isEvidencePreviewCurrent(role==='generation'?'reranking':'generation',role==='generation'?r.sequence:g.sequence);
+        controlOk=c.control('rebuild').ok;
+        nested=c.search(uiRequest('Synthetic',1));inside=dispatches;
+      },{once:true});
+      const outer=await navigationWatchdog(c.search(uiRequest('REQ-LIFE-1',1)));
+      assert.ok(!outer.ok&&outer.error==='SUPERSEDED');
+      assert.ok(nested);const winner=await navigationWatchdog(nested);assert.ok(winner.ok);
+      assert.equal(closed,true);assert.equal(otherCurrent,false);assert.equal(controlOk,false);
+      assert.equal(inside,0);assert.equal(dispatches,1);assert.equal(c.snapshot().phase,'results');
+      await navigationWatchdog(operation);
+    }finally{await operation;await f.cleanup();}
+  });
+}
