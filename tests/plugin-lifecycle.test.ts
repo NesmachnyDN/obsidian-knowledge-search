@@ -1300,3 +1300,100 @@ test('B-R2-LIFE-12: committed disable does not perform the obsolete duplicate id
     await assert.rejects(c.generationConfirmed(old,'synthetic','fixture'));
   }finally{restore();await f.cleanup();}
 });
+
+const reloadFixtureConfig = {state:'configured',transport:'local',origin:'http://127.0.0.1:1',
+  identity:{model:'fixture',revision:'v1'},limits:{timeoutMs:2000,maxInputBytes:4096,maxCandidates:8,
+    maxOutputTokens:32,maxConcurrent:1}} as const;
+
+for (const role of ['generation','reranking'] as const) {
+  test('B-R2-LIFE-13: reentrant retirement unload cancels undispatched '+role+' save and queued edits',async()=>{
+    const f=await fixture(),old=f.plugin,c=old.searchController;
+    let replacement:InstanceType<typeof PluginClass>|undefined,loading:Promise<void>|undefined;
+    let writes=0,reads=0,queued=0,verifies=0;
+    const save=old.saveData.bind(old);
+    try {
+      await old.onload();f.layout();await f.internal.initializing;await old.standalone!.whenIdle();
+      await old.patchSettings(s=>{s.ai.generation=reloadFixtureConfig;s.ai.reranking=reloadFixtureConfig;});
+      const host=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof reloadFixtureConfig,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
+      host.rerankProfiles.installSyntheticFixture(reloadFixtureConfig,host.rerankPort.scopeId(),'reload-fixture');
+      assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+      const generation=c.prepareGeneration(),rerank=c.prepareRerank();
+      Object.assign(old,{saveData:async(v:unknown)=>{writes++;await save(v);},
+        verifyAiEvidence:async()=>{verifies++;throw Error('unexpected verification');}});
+      let once=false;
+      c.subscribe(()=>{
+        if(once)return;once=true;old.onunload();
+        replacement=new PluginClass(old.app,old.manifest);
+        Object.assign(replacement,{app:old.app,manifest:old.manifest,loadData:async()=>{reads++;return old.loadData();}});
+        loading=replacement.onload();
+      });
+      const changing=old.patchSettings(s=>{s.ai[role]={state:'disabled'};});
+      const later=old.patchSettings(s=>{queued++;s.topK=2;});
+      await navigationWatchdog(Promise.all([changing,later]));
+      assert.ok(loading);await navigationWatchdog(loading);
+      assert.equal(writes,0);assert.equal(queued,0);assert.equal(reads,1);
+      assert.deepEqual(replacement!.settings,await old.loadData());
+      assert.equal(replacement!.settings.ai[role].state,'configured','cancelled write must not pretend to commit');
+      assert.equal(c.sharedAuthorityTransition(),true);
+      assert.equal(c.isEvidencePreviewCurrent('generation',generation.sequence),false);
+      assert.equal(c.isEvidencePreviewCurrent('reranking',rerank.sequence),false);
+      await assert.rejects(c.generationConfirmed(generation,'synthetic','fixture'));
+      await assert.rejects(c.rerankConfirmed(rerank,'synthetic','fixture'));
+      assert.equal(verifies,0);
+    }finally{replacement?.onunload();Object.assign(old,{saveData:save});await f.cleanup();}
+  });
+}
+
+for (const rejects of [false,true]) {
+  test('B-R2-LIFE-13: replacement reads dispatched '+(rejects?'write-then-reject':'successful write')+'; queued writes cannot resume',async()=>{
+    const f=await fixture(),old=f.plugin,entered=deferredDrain(),gate=deferredDrain();
+    const save=old.saveData.bind(old);
+    let replacement:InstanceType<typeof PluginClass>|undefined,reads=0,writes=0,queued=0,readbacks=0,verifies=0;
+    try {
+      await old.onload();f.layout();await f.internal.initializing;await old.standalone!.whenIdle();
+      await old.patchSettings(s=>{s.ai.generation=reloadFixtureConfig;s.ai.reranking=reloadFixtureConfig;});
+      const load=old.loadData.bind(old);
+      Object.assign(old,{loadData:async()=>{readbacks++;return load();},
+        saveData:async(v:unknown)=>{writes++;entered.release();await gate.promise;await save(v);if(rejects)throw Error('synthetic committed rejection');}});
+      const changing=old.patchSettings(s=>{s.ai.generation={state:'disabled'};s.ai.reranking={state:'disabled'};});
+      const settled=rejects?assert.rejects(changing,/synthetic committed rejection/):changing;
+      await navigationWatchdog(entered.promise);
+      const later=old.patchSettings(s=>{queued++;s.ai.generation=reloadFixtureConfig;});
+      old.onunload();
+      replacement=new PluginClass(old.app,old.manifest);
+      Object.assign(replacement,{app:old.app,manifest:old.manifest,loadData:async()=>{reads++;return load();},
+        verifyAiEvidence:async()=>{verifies++;throw Error('unexpected verification');}});
+      const loading=replacement.onload();
+      await new Promise<void>(resolve=>setImmediate(resolve));
+      assert.equal(reads,0);
+      gate.release();await settled;await later;await navigationWatchdog(loading);
+      assert.equal(writes,1);assert.equal(queued,0);assert.equal(readbacks,0);assert.equal(reads,1);
+      assert.deepEqual(replacement.settings,await load());
+      assert.equal(replacement.settings.ai.generation.state,'disabled');
+      assert.equal(replacement.settings.ai.reranking.state,'disabled');
+      f.layout();await (replacement as unknown as {initializing:Promise<void>}).initializing;
+      await replacement.standalone!.whenIdle();
+      const c=replacement.searchController;
+      assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+      assert.throws(()=>c.prepareGeneration());assert.throws(()=>c.prepareRerank());
+      assert.equal(verifies,0);
+    }finally{
+      gate.release();
+      if(replacement){await (replacement as unknown as {stopStandalone():Promise<void>}).stopStandalone();replacement.onunload();}
+      Object.assign(old,{saveData:save});await f.cleanup();
+    }
+  });
+}
+
+test('B-R2-LIFE-13: terminal unload before presentation save dispatch cancels the reserved write',async()=>{
+  const f=await fixture(),old=f.plugin,save=old.saveData.bind(old);
+  let writes=0;
+  try {
+    await old.onload();
+    Object.assign(old,{saveData:async(v:unknown)=>{writes++;await save(v);}});
+    await old.patchSettings(s=>{s.presentationMode='expert';queueMicrotask(()=>old.onunload());});
+    assert.equal(writes,0);
+    assert.equal(old.settings.presentationMode,'basic');
+    assert.equal(old.searchController.sharedAuthorityTransition(),true);
+  }finally{Object.assign(old,{saveData:save});await f.cleanup();}
+});

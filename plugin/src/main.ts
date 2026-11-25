@@ -243,7 +243,11 @@ export default class SyntheticEvidencePlugin extends Plugin {
     const key = this.settingsStorageKey();
     const prior = key === undefined ? undefined : settingsBarriers.get(key);
     // Only persistence, not the later storage-owner drain, blocks reload.
-    const writing = Promise.resolve(prior).then(() => this.saveData(settings));
+    const writing = Promise.resolve(prior).then(() => {
+      // A queued write is not an admitted write. Unload may happen while
+      // waiting for the previous barrier (or before this microtask runs).
+      if (!this.unloaded) return this.saveData(settings);
+    });
     if (key !== undefined) {
       const barrier = writing.then(() => undefined, () => undefined);
       settingsBarriers.set(key, barrier);
@@ -257,6 +261,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
       if (this.purgeInFlight) await this.purgeInFlight.catch(() => {});
       if (this.unloaded) return;
       const settings = parseSettings(change(this.settings));
+      if (this.unloaded) return;
       const recovering = this.settingsRuntimeBase !== undefined;
       const repairing = this.settingsApplyInterrupted;
       if (!recovering && JSON.stringify(settings) === JSON.stringify(this.settings)) return;
@@ -273,6 +278,10 @@ export default class SyntheticEvidencePlugin extends Plugin {
         const retiringHost = this.denseHost;
         this.searchController.beginRuntimeSettingsChange(retiringHost,
           !settings.enabled || JSON.stringify(this.settings.ai.reranking) !== JSON.stringify(settings.ai.reranking));
+        // Retirement publishes synchronous lifecycle observers. An observer
+        // can unload this instance and start a replacement before persistence
+        // has been reserved. Never start a new write after terminal unload.
+        if (this.unloaded) return;
         this.settingsRuntimeBase ??= this.settings;
         try { await this.persistSettings(settings); }
         catch (error) {
@@ -305,18 +314,21 @@ export default class SyntheticEvidencePlugin extends Plugin {
         this.standaloneError = null;
         const wasPaused = this.searchController.status().paused;
         this.searchController.configure(settings.enabled, settings.paused);
+        if (this.unloaded) return;
         if (repairing || before.ingestion.enabled !== settings.ingestion.enabled) {
           await this.stopDenseHost();
         }
         if (this.unloaded) return;
         if (repairing || JSON.stringify(before.ingestion) !== JSON.stringify(settings.ingestion))
           await this.stopIngestion();
+        if (this.unloaded) return;
         if (!repairing && !settings.ingestion.enabled && this.standalone && !this.denseHost)
           this.attachDenseHost();
         if (repairing || JSON.stringify(before.advanced) !== JSON.stringify(settings.advanced)) {
           await this.stopAdvanced();
           if (settings.advanced.enabled && this.layoutReady && !this.unloaded) await this.initializeAdvanced();
         }
+        if (this.unloaded) return;
         if (repairing || before.enabled !== settings.enabled) {
           this.lifecycleRevision++;
           await this.stopStandalone();
