@@ -48,6 +48,21 @@ Stop for an unresolved material architecture/product decision, contradictory aut
 
 Keep UI, protocol, parser, indexing, retrieval and model runtime ownership distinct. Prefer small typed cohesive modules; file size is a review signal rather than an arbitrary split mandate. Require deterministic source identity, explicit failure/partial status, no silent truncation/fallback, bounded queues, safe cancellation, atomic index publication, no production imports from tests or unreviewed copied code. Security and license review are hard gates. For each candidate review report: scope/traceability, architecture, code quality/modularity/reuse, tests/CI, privacy/operations, risks, required changes and final recommendation. Review must cover actual changed behavior and not just documentation claims.
 
+## Codex model and quota policy
+
+Maintainer decision (2026-11-25): use the least expensive adequate Codex model and reasoning tier across all OKS delivery stages, including bounded implementation, review, remediation, re-review and phase acceptance. This governs development tooling only, not plugin runtime AI providers. Check the installed CLI model catalog and supported reasoning levels before selection; catalog presence is not proof of remaining quota or service access.
+
+| Work class | Default model (current CLI catalog) | Reasoning effort |
+| --- | --- | --- |
+| Routine independent code/SDD review, bounded implementation and remediation | GPT-5.6 Terra (`gpt-5.6-terra`) | `medium` |
+| Simple documentation, mechanical checks and small low-risk edits | GPT-5.6 Luna (`gpt-5.6-luna`) | `low` or `medium` |
+| Demonstrably difficult unresolved review/implementation question | Terra or GPT-5.6 Sol (`gpt-5.6-sol`) | `medium`; `high` only with a recorded concrete reason |
+
+- Explicitly set the model and reasoning effort for each new Codex invocation; for example, `codex exec -m gpt-5.6-terra -c 'model_reasoning_effort="medium"'` with the existing bounded prompt, sandbox and timeout controls. Do not rely on a potentially expensive implicit default. Record selected model, effort and any escalation in the sanitized handoff/review evidence. If the catalog changes, select an available equivalent economical/balanced model and document the substitution.
+- Escalate only when concrete ambiguity, conflicting evidence, or a difficult correctness/security issue exceeds the selected tier. Try a focused deterministic check first. Astra/top-tier models and `xhigh`, `max`, `ultra` (or equivalent maximum/pro modes) require separate maintainer authorization; they are not routine review settings.
+- Run cheap deterministic checks with local tools rather than asking Codex to repeat them. Pin the base/head, reuse reproducible evidence, and avoid redundant sessions on unchanged candidates. Do not skip the mandatory exact-HEAD full-diff review after a change. On quota exhaustion, do not repeatedly retry or cycle through models to evade limits; use the eligible separate-chat/human review route.
+- The complete independent review, security, CI, adversarial and applicable acceptance gates are unchanged. A smaller model's uncertain or incomplete review is not APPROVE. If an eligible reviewer cannot complete the gate, leave the candidate unmerged. This policy does not authorize production Vault access, cloud egress or host-wide configuration changes.
+
 ## Workstation use
 
 Use one active writer per worktree, inspect process state before editing, and avoid parallel heavy work. Codex commands should be bounded, non-interactive with closed stdin, and monitored with explicit time/resource controls. For ChatGPT-authored changes, arrange a new independent ChatGPT chat via Remote Desktop Commander or a distinct Codex/human reviewer; never reuse the authoring conversation as its own reviewer. Review a pinned committed candidate against its explicit base. Do not copy sensitive source into prompts, public artifacts or external services; only synthetic test data. A failed transport is not evidence of a failed Git mutation: check generated state before retrying.
