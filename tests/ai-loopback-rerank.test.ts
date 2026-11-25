@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
+import os from 'node:os';
 import { LoopbackRerankTransport, servedAlias } from '../plugin/src/ai/loopback-rerank';
 import { EvidenceReranker, type RerankApproval } from '../plugin/src/ai/rerank-evidence';
 import { type ProviderConfig } from '../plugin/src/ai/contracts';
@@ -144,7 +145,7 @@ test('verified source-backed evidence survives reorder; grant and fresh source r
   });});
 });
 
-import { SearchController, uiRequest } from '../plugin/src/search/controller';
+import { SearchController, uiRequest, EVIDENCE_PREVIEW_TTL_MS } from '../plugin/src/search/controller';
 import type { ProviderPreference } from '../plugin/src/ai/contracts';
 import type { SearchResponse } from '../plugin/src/standalone/contracts';
 
@@ -236,3 +237,138 @@ test('abandoned verifier budget is bounded; late settlement permits recovery',as
     },()=>true);assert.equal(result.length,2);
   },(req,res)=>requestBody(req,body=>reply(res,good(body.model))));
 });
+
+
+test('pending evidence previews expire independently, reject late or altered consent, and release timers',async t=>{
+  let calls=0, verifies=0;
+  await fixture(async cfg=>{
+    const response:SearchResponse={protocolVersion:2,requestId:'ui',requestedMode:'lexical',
+      executedMode:'lexical',status:'ok',indexGenerationId:hash('generation'),hits,
+      capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0};
+    const port={config:()=>cfg,scopeId:()=>scopeId,verify:async()=>{verifies++;}};
+    const c=new SearchController(async()=>{},undefined,undefined,port,port);
+    c.attach({search:async()=>response,status:()=>({status:'ready',generationId:hash('generation'),
+      sources:2,records:2,busy:false,error:null,maintenanceWarning:null}),
+      cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+    t.mock.timers.enable({apis:['Date','setTimeout'],now:1000});
+    try {
+      await c.search(uiRequest(input.query,2));
+      let lifecycleEvents=0,evidenceEvents=0;
+      c.subscribe(()=>{lifecycleEvents++;});c.subscribeEvidence(()=>{evidenceEvents++;});
+      const first=c.prepareRerank();
+      assert.equal(first.expiresUnixMs,1000+EVIDENCE_PREVIEW_TTL_MS);
+      t.mock.timers.tick(1000);
+      const gen=c.prepareGeneration();
+      t.mock.timers.tick(EVIDENCE_PREVIEW_TTL_MS-1001);
+      assert.equal(c.isEvidencePreviewCurrent('reranking',first.sequence),true);
+      assert.equal(c.evidenceOperationStatus('reranking').phase,'permission-required');
+      t.mock.timers.tick(1);
+      assert.deepEqual(c.evidenceOperationStatus('reranking'),{phase:'failed',error:'CANCELLED'});
+      assert.equal(c.isEvidencePreviewCurrent('reranking',first.sequence),false);
+      assert.equal(c.isEvidencePreviewCurrent('generation',gen.sequence),true);
+      assert.deepEqual(c.snapshot().response,response);
+      await assert.rejects(c.rerankConfirmed(first,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+      // The active request deadline has not started; a modified expiry cannot renew consent.
+      const altered=c.prepareRerank();
+      await assert.rejects(c.rerankConfirmed({...altered,expiresUnixMs:altered.expiresUnixMs+1},'synthetic',token),
+        {message:'DISCLOSURE_DENIED'});
+      assert.equal(c.isEvidencePreviewCurrent('reranking',altered.sequence),false);
+      const old=c.prepareRerank();
+      t.mock.timers.tick(1);
+      const replacement=c.prepareRerank();
+      t.mock.timers.tick(EVIDENCE_PREVIEW_TTL_MS-1);
+      assert.equal(c.isEvidencePreviewCurrent('reranking',old.sequence),false);
+      assert.equal(c.isEvidencePreviewCurrent('reranking',replacement.sequence),true);
+      assert.equal(c.evidenceOperationStatus('generation').phase,'failed');
+      // Move wall time without delivering timers: confirmation must still fail closed.
+      t.mock.timers.setTime(replacement.expiresUnixMs);
+      assert.deepEqual(c.evidenceOperationStatus('reranking'),{phase:'failed',error:'CANCELLED'});
+      await assert.rejects(c.rerankConfirmed(replacement,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+      assert.equal(c.snapshot().rerank?.error,'CANCELLED');
+      const cancelled=c.prepareRerank(); c.cancelRerank();
+      const invalidated=c.prepareGeneration();
+      assert.equal(lifecycleEvents,0);assert.ok(evidenceEvents>0);
+      c.invalidate();assert.equal(lifecycleEvents,1);
+      await assert.rejects(c.rerankConfirmed(cancelled,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+      await assert.rejects(c.generationConfirmed(invalidated,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+      await c.search(uiRequest(input.query,2));
+      const disposed=c.prepareGeneration();c.dispose();
+      t.mock.timers.tick(EVIDENCE_PREVIEW_TTL_MS+1);
+      assert.equal(c.evidenceOperationStatus('generation').phase,'idle');
+      await assert.rejects(c.generationConfirmed(disposed,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+      assert.equal(verifies,0);assert.equal(calls,0);
+    } finally { c.dispose();t.mock.timers.reset(); }
+  },(req,res)=>{calls++;req.resume();reply(res,{},400);});
+});
+
+
+for (const role of ['reranking','generation'] as const) {
+  test(role+' pending consent cannot revive after expiry, clock rollback or suspended execution',async t=>{
+    let calls=0, verifies=0;
+    await fixture(async cfg=>{
+      const response:SearchResponse={protocolVersion:2,requestId:'ui',requestedMode:'lexical',
+        executedMode:'lexical',status:'ok',indexGenerationId:hash('generation'),hits,
+        capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0};
+      const port={config:()=>cfg,scopeId:()=>scopeId,verify:async()=>{verifies++;}};
+      const c=new SearchController(async()=>{},undefined,undefined,port,port);
+      c.attach({search:async()=>response,status:()=>({status:'ready',generationId:hash('generation'),
+        sources:2,records:2,busy:false,error:null,maintenanceWarning:null}),
+        cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+      const prepare=()=>role==='reranking'?c.prepareRerank():c.prepareGeneration();
+      const confirm=(p:ReturnType<typeof prepare>)=>role==='reranking'
+        ?c.rerankConfirmed(p,'synthetic',token):c.generationConfirmed(p,'synthetic',token);
+      let wall=Date.now(), mono=1000, boot=1000, events=0, lifecycle=0, reading=false;
+      t.mock.method(Date,'now',()=>wall);
+      t.mock.method(performance,'now',()=>mono);
+      t.mock.method(os,'uptime',()=>boot);
+      c.subscribe(()=>{lifecycle++;});
+      c.subscribeEvidence(()=>{assert.equal(reading,false,'reentrant expiry notification');events++;});
+      const read=()=>{reading=true;try{return c.evidenceOperationStatus(role);}finally{reading=false;}};
+      const denied=async(p:ReturnType<typeof prepare>)=>{
+        await assert.rejects(confirm(p),{message:'DISCLOSURE_DENIED'});
+        assert.equal(calls,0);assert.equal(verifies,0);
+        assert.deepEqual(read(),{phase:'failed',error:'CANCELLED'});
+      };
+      try {
+        await c.search(uiRequest(input.query,2));
+        const first=prepare(), eventCount=events;
+        // Forward wall correction is conservatively terminal even before elapsed TTL.
+        wall=first.expiresUnixMs;
+        assert.deepEqual(read(),{phase:'failed',error:'CANCELLED'});
+        assert.equal(events,eventCount,'expiry must not notify synchronously from polling');
+        wall-=EVIDENCE_PREVIEW_TTL_MS;
+        assert.deepEqual(read(),{phase:'failed',error:'CANCELLED'});
+        await denied(first);await denied(first);
+        assert.equal(events,eventCount+1,'expiry publishes once');
+        // Delayed timer and no prior polling; wall rollback cannot extend elapsed TTL.
+        const late=prepare();mono+=EVIDENCE_PREVIEW_TTL_MS;wall-=100;
+        await denied(late);
+        // Simulate OS suspend: uptime advances while renderer monotonic and wall clocks do not.
+        const suspended=prepare();boot+=EVIDENCE_PREVIEW_TTL_MS/1000;
+        await denied(suspended);
+        // Render-style current check must also be terminal, without reentrant listeners.
+        const rendered=prepare();mono+=EVIDENCE_PREVIEW_TTL_MS;
+        reading=true;
+        try {assert.equal(c.isEvidencePreviewCurrent(role,rendered.sequence),false);}
+        finally{reading=false;}
+        await denied(rendered);
+        // A deferred notification from a retired grant must not publish stale state.
+        const retired=prepare();mono+=EVIDENCE_PREVIEW_TTL_MS;
+        assert.deepEqual(read(),{phase:'failed',error:'CANCELLED'});
+        const valid=prepare(), afterPrepare=events;
+        await Promise.resolve();
+        assert.equal(events,afterPrepare,'obsolete expiry notification discarded');
+        assert.equal(read().phase,'permission-required');
+        assert.equal(c.isEvidencePreviewCurrent(role,valid.sequence),true);
+        // Still valid immediately before the monotonic deadline.
+        mono+=EVIDENCE_PREVIEW_TTL_MS-1;
+        assert.equal(read().phase,'permission-required');
+        await confirm(valid);
+        assert.equal(read().phase,'complete');assert.equal(calls,1);assert.equal(verifies,4);
+        assert.equal(lifecycle,2);assert.deepEqual(c.snapshot().response,response);
+      } finally {c.dispose();t.mock.restoreAll();}
+    },(req,res)=>{calls++;requestBody(req,body=>reply(res,role==='reranking'?good(body.model):
+      {model:body.model,usage:{completion_tokens:4},choices:[{index:0,finish_reason:'stop',
+        message:{role:'assistant',content:JSON.stringify({claims:[{kind:'quotation',text:'REQ-42',citationIds:[0]}]})}}]}));});
+  });
+}

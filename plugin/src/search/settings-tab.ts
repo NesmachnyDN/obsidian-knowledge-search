@@ -1,10 +1,45 @@
-import type { AdvancedHealth } from '../advanced/health';
+import type { AdvancedHealth, AdvancedConfig } from '../advanced/health';
 import type { IngestionStatus } from '../advanced/manager';
 import type { RetrievalStatus } from '../advanced/retrieval-manager';
-import { Modal, PluginSettingTab, Setting, Notice, type App, type Plugin } from 'obsidian';
-import { renderProviderSettings } from '../ai/settings-ui';
-import type { SearchSettings } from './settings';
+import type { ProbeConfig } from '../controller';
+import { Modal, PluginSettingTab, Setting, Notice, getLanguage, type App, type Plugin } from 'obsidian';
+import { renderProviderSettings, refreshProviderOperationStatus, type AiDrafts, type OperationStatusReader } from '../ai/settings-ui';
+import { translateSettings, formatSettings, localizeSettingsState, type SettingsDisplayState } from './settings-i18n';
+import { applySettingsLayout, restoreSettingsFocus, settingsDisclosure } from './settings-layout';
+import { advancedDraft, ingestionDraft, needsOcr, needsStructure, probeDraft, topKDraft } from './settings-draft';
+import type { IngestionConfig, SearchSettings } from './settings';
+import type { SearchResponse } from '../standalone/contracts';
+import type { SearchStatus } from './status';
+
+const t = (source: string): string => translateSettings(source, getLanguage());
+const f = (source: string, values: Record<string, string | number>): string =>
+  formatSettings(source, values, getLanguage());
+const st = (state?: SettingsDisplayState): string => localizeSettingsState(state, getLanguage());
+
+type BasicResponse = Pick<SearchResponse, 'requestedMode' | 'executedMode' | 'status'>;
+const heading = (root: HTMLElement, name: string): HTMLElement => {
+  const section = root.createEl('section');
+  section.setAttribute('aria-label', t(name));
+  section.createEl('h3', { text: t(name) });
+  return section;
+};
+const alert = (root: HTMLElement): HTMLElement => {
+  const error = root.createEl('p');
+  error.setAttribute('role', 'alert');
+  error.setAttribute('aria-live', 'polite');
+  return error;
+};
+
+/** A task-based view over the one authoritative versioned SearchSettings model. */
 export class SearchSettingsTab extends PluginSettingTab {
+  private topKInput?: string;
+  private advancedInput?: AdvancedConfig;
+  private ingestionInput?: IngestionConfig;
+  private probeInput?: ProbeConfig;
+  private readonly aiInputs: AiDrafts = {};
+  private readonly openEditors = new Set<string>();
+  private releaseProviderChecks?: () => void;
+
   constructor(app: App, plugin: Plugin, private readonly current: () => SearchSettings,
     private readonly patchSettings: (change: (s: SearchSettings) => void) => Promise<void>,
     private readonly purge: () => Promise<number>,
@@ -15,114 +50,400 @@ export class SearchSettingsTab extends PluginSettingTab {
     private readonly indexActive?: () => Promise<void>,
     private readonly openAdvanced?: () => void,
     private readonly cancelAdvanced?: () => Promise<void>,
-    private readonly rebuildActive?: () => Promise<void>) { super(app, plugin); }
-  display(): void {
-    const root = this.containerEl; root.replaceChildren();
-    const save = async (change: (s: SearchSettings) => void): Promise<void> => {
-      try { await this.patchSettings(change); }
-      catch { new Notice('OKS: settings could not be saved.'); }
-      // Reflect the committed state, including the derived-purge button guard.
-      this.display();
-    };
-    for (const [key, name, desc] of [
-      ['enabled','Enable Standalone indexing and search','Offline Markdown lexical search. Disabling stops the worker and clears results.'],
-      ['paused','Pause indexing','Sources are always freshly verified before evidence is returned or opened. Resume reconciles changes.'],
-      ['propertiesEnabled','Allow typed Property filters','Opt in to the filter controls in the search view. No automatic coercion.'],
-    ] as const) new Setting(root).setName(name).setDesc(desc).addToggle(t =>
-      t.setValue(this.current()[key]).onChange(v => save(s => { s[key] = v; })));
-    new Setting(root).setName('Default Top K (1–50)').addText(t => t.setValue(String(this.current().topK))
-      .onChange(v => save(s => { s.topK = Number(v); })));
-    new Setting(root).setName('Advanced local backend (explicit opt-in)')
-      .setDesc('Health-only local Python stdio, no document transfer. Dense/hybrid remain unavailable.')
-      .addToggle(t => t.setValue(this.current().advanced.enabled)
-        .onChange(v => save(s => { s.advanced.enabled = v; })));
-    new Setting(root).setName('Advanced profile')
-      .setDesc('Optional external local backend. Never required by Standalone.')
-      .addDropdown(d => d.addOption('none','None').addOption('local-stdio','Local stdio (trusted)')
-        .setValue(this.current().advanced.profile)
-        .onChange(v => save(s => { s.advanced.profile = v as 'none' | 'local-stdio'; })));
-    for (const [key, name] of [['interpreter','Trusted local Python executable (absolute)'],
-      ['entry','Trusted advanced health entry (absolute)']] as const)
-      new Setting(root).setName(name).addText(t => t.setValue(this.current().advanced[key])
-        .onChange(v => save(s => { s.advanced[key] = v; })));
-    const h = this.health();
-    new Setting(root).setName('Advanced transport status')
-      .setDesc(`Health-only: ${h.status}${h.error ? ' (' + h.error + ')' : ''}. Never implies dense/hybrid readiness.`)
-      .addButton(b => b.setButtonText('Recheck health')
-        .setDisabled(!this.current().advanced.enabled)
-        .onClick(async () => { await this.checkHealth(); this.display(); }));
-    new Setting(root).setName('Advanced document ingestion (separate opt-in)')
-      .setDesc('Local-only explicit source ingestion (v3). Dense and hybrid require a separate BGE-M3 index and a successful real model leg; never enabled by ingestion alone.')
-      .addToggle(t=>t.setValue(this.current().ingestion.enabled)
-        .onChange(v=>save(s=>{s.ingestion.enabled=v;})));
-    for(const [key,name] of [
-      ['interpreter','Ingestion Python interpreter (trusted absolute file)'],
-      ['entry','Ingestion backend script (advanced_ingest.py)'],
-      ['tokenizerSnapshot','Pinned local tokenizer snapshot directory'],
-      ['tessdataPath','Local RU/EN OCR tessdata directory'],
-      ['artifactsPath','Pinned local structured PDF artifacts directory'],
-    ] as const)
-      new Setting(root).setName(name).addText(t=>t.setValue(this.current().ingestion[key])
-        .onChange(v=>save(s=>{s.ingestion[key]=v;})));
-    new Setting(root).setName('PDF extraction mode')
-      .setDesc('Text-only PDF exposes layout/table limitations; OCR and structured models are explicit, never fallback.')
-      .addDropdown(d=>d.addOption('text','Native text')
-        .addOption('ocr','Scanned PDF (RU/EN Tesseract)')
-        .addOption('structured','Structured layout/table')
-        .addOption('structured-ocr','Structured + OCR')
-        .setValue(this.current().ingestion.pdfMode)
-        .onChange(v=>save(s=>{s.ingestion.pdfMode=v as SearchSettings['ingestion']['pdfMode'];})));
-    const ing=this.ingestionStatus?.();
-    const item=new Setting(root).setName('Advanced ingestion result')
-      .setDesc('Ingestion: '+(ing?.status??'disabled')+(ing?.error?' ('+ing.error+')':'')+
-        '. Status is not retrieval/model readiness. Evidence requires fresh source verification.');
-    if(this.ingestActive) item.addButton(b=>b.setButtonText('Ingest active document')
-      .setDisabled(!this.current().ingestion.enabled)
-      .onClick(async()=>{try{await this.ingestActive?.();}catch{new Notice('OKS: Advanced ingestion failed.');}this.display();}));
-    const retrieval=this.retrievalStatus?.();
-    new Setting(root).setName('Advanced retrieval (real BGE-M3)')
-      .setDesc(`State=${retrieval?.status??'disabled'}, lexical=${retrieval?.lexical??'unavailable'}, `+
-        `dense=${retrieval?.dense??'unavailable'}, sources=${retrieval?.indexedSources??0}, `+
-        `chunks=${retrieval?.indexedChunks??0}, error=${retrieval?.error??'none'}. `+
-        'Explicitly index each ingested source before dense/hybrid. No fallback.')
-      .addButton(b=>b.setButtonText('Index active source').setDisabled(!this.current().ingestion.enabled)
-        .onClick(async()=>{try{await this.indexActive?.();}catch(e){new Notice('OKS Advanced: '+
-          (e instanceof Error?e.message:'INDEX_FAILED'));}this.display();}))
-      .addButton(b=>b.setButtonText('Rebuild active').setDisabled(!this.current().ingestion.enabled)
-        .onClick(async()=>{try{await this.rebuildActive?.();}catch(e){new Notice('OKS Advanced: '+
-          (e instanceof Error?e.message:'INDEX_FAILED'));}this.display();}))
-      .addButton(b=>b.setButtonText('Search').setDisabled(!this.current().ingestion.enabled)
-        .onClick(()=>this.openAdvanced?.()))
-      .addButton(b=>b.setButtonText('Cancel').onClick(async()=>{
-        try{await this.cancelAdvanced?.();}catch{new Notice('OKS Advanced: cancel failed');}
-        this.display();}));
-    renderProviderSettings(root, this.current().ai, (role, preference) => save(s => { s.ai[role] = preference; }));
+    private readonly rebuildActive?: () => Promise<void>,
+    private readonly searchStatus?: () => SearchStatus,
+    private readonly lastBasic?: () => BasicResponse | undefined,
+    private readonly aiOperationStatus?: OperationStatusReader) {
+    super(app, plugin);
+    plugin.register(() => this.hide());
+  }
+
+  hide(): void {
+    this.releaseProviderChecks?.();
+    this.releaseProviderChecks = undefined;
+  }
+
+  private async commit(change: (s: SearchSettings) => void, error: HTMLElement): Promise<boolean> {
+    try {
+      await this.patchSettings(change);
+      error.textContent = '';
+      return true;
+    } catch {
+      // No full redraw after failure; preserve the exact draft, focus and committed state.
+      error.textContent = t('Could not save. The unsaved draft is retained; retry or cancel.');
+      return false;
+    }
+  }
+
+  private showOverview(root: HTMLElement): void {
+    const section = heading(root, 'Overview');
+    const s = this.searchStatus?.();
+    new Setting(section).setName(t('Offline Markdown search'))
+      .setDesc(s ? f('Status: {status}; {enabled}; {paused}; error: {error}.', {
+        status: st(s.status), enabled: t(s.enabled ? 'enabled' : 'disabled'),
+        paused: t(s.paused ? 'paused' : 'not paused'), error: s.error ?? t('none'),
+      }) : t('State not yet available. No AI service is required.'));
+    const roles = this.current().ai;
+    const active = (Object.keys(roles) as (keyof typeof roles)[])
+      .filter(role => roles[role].state !== 'disabled');
+    new Setting(section).setName(t('Optional AI capabilities'))
+      .setDesc(active.length ? active.map(role => f('{role}: {status}', {
+        role: t(role), status: t(roles[role].state === 'configured' ?
+          'configured, not verified' : 'invalid / unavailable'),
+      })).join('; ') + '. ' + t('Configuration is not execution authorization.') :
+        t('All optional AI roles are disabled. Basic search works without an API.'));
+    const settings = this.current();
+    const health = this.health();
+    const ingestion = this.ingestionStatus?.();
+    new Setting(section).setName(t('Optional local capabilities'))
+      .setDesc(f('Health-only backend: {backend}; document ingestion: {ingestion}; legacy synthetic probe: {probe}. Health and processing state do not imply AI readiness. Backend and probe setup: Expert.', {
+        backend: settings.advanced.enabled ?
+          f('enabled; transport state: {status}', {status: st(health.status)}) +
+          (health.error ? ' (' + health.error + ')' : '') : t('disabled'),
+        ingestion: settings.ingestion.enabled ?
+          f('enabled; processing state: {status}', {status: st(ingestion?.status ?? 'unavailable')}) : t('disabled'),
+        probe: settings.probe.fixtureMode ?
+          t('enabled for manual use; not a running-state indicator') : t('disabled'),
+      }));
+    section.createEl('p', { text: t('Basic search works offline with no Python, API key, model or download. Other formats and AI operations require their own independently accepted capability.') });
+  }
+
+  private showSearch(root: HTMLElement): void {
+    const section = heading(root, 'Search & scope');
+    for (const [key, name, explanation] of [
+      ['enabled', 'Enable offline search', 'Disable to stop indexing and clear results. Original notes remain untouched.'],
+      ['paused', 'Pause indexing', 'Resume to reconcile source changes. Evidence is always verified.'],
+      ['propertiesEnabled', 'Enable typed Properties filters', 'Explicit typed filtering in the search view.'],
+    ] as const) {
+      const status = alert(section);
+      new Setting(section).setName(t(name)).setDesc(t(explanation))
+        .addToggle(toggle => { toggle.toggleEl.setAttribute('aria-label', t(name));
+          toggle.toggleEl.dataset.oksFocus = key;
+          return toggle.setValue(this.current()[key]).onChange(async value => {
+          if (!(await this.commit(settings => { settings[key] = value; }, status)))
+            toggle.setValue(this.current()[key]);
+          else this.display(key);
+        }); });
+    }
+    this.topKInput ??= String(this.current().topK);
+    const error = alert(section);
+    new Setting(section).setName(t('Results per search'))
+      .setDesc(t('Whole number between 1 and 50. Applied only when Save is selected.'))
+      .addText(text => {
+        text.inputEl.type = 'number';
+        text.inputEl.setAttribute('aria-label', t('Results per search'));
+        text.inputEl.dataset.oksFocus = 'top-k';
+        text.inputEl.min = '1'; text.inputEl.max = '50';
+        text.setValue(this.topKInput!).onChange(value => { this.topKInput = value; error.textContent = ''; });
+      });
+    new Setting(section).setName(t('Results draft'))
+      .addButton(button => button.setButtonText(t('Save')).onClick(async () => {
+        const result = topKDraft(this.topKInput!);
+        if (!result.ok) { error.textContent = t(result.message); return; }
+        if (await this.commit(settings => { settings.topK = result.value; }, error)) {
+          this.topKInput = undefined; this.display('top-k');
+        }
+      }))
+      .addButton(button => button.setButtonText(t('Cancel')).onClick(() => {
+        this.topKInput = undefined; this.display('top-k');
+      }));
+  }
+
+  private showDocuments(root: HTMLElement): void {
+    const section = heading(root, 'Documents');
+    new Setting(section).setName(t('Local document processing (optional)'))
+      .setDesc(t('Markdown search never depends on Python, OCR or structured extraction. PDF/DOCX/OCR readiness is not claimed by turning on a preference.'));
+    const ingest = this.ingestionStatus?.();
+    new Setting(section).setName(t('Last processing state'))
+      .setDesc(f('{status}; format: {format}; error: {error}. Not proof of search readiness.', {
+        status: st(ingest?.status ?? 'disabled'), format: ingest?.lastFormat ?? t('none'),
+        error: ingest?.error ?? t('none'),
+      }));
+    const draft = this.ingestionInput ?? structuredClone(this.current().ingestion);
+    const { form: editor } = settingsDisclosure(section, this.openEditors, 'documents',
+      'Processing setup', 'Configure documents', () => { this.ingestionInput = draft; });
+    const fields: Partial<Record<keyof IngestionConfig, HTMLElement>> = {};
+    new Setting(editor).setName(t('Enable local document ingestion after Save'))
+      .addToggle(toggle => {
+        toggle.toggleEl.setAttribute('aria-label', t('Enable local document ingestion after Save'));
+        return toggle.setValue(draft.enabled).onChange(value => {
+          draft.enabled = value; this.ingestionInput = draft; syncFields();
+        });
+      });
+    const mode = new Setting(editor).setName(t('PDF processing mode'))
+      .setDesc(t('Explicit mode; no hidden OCR or structural fallback.'))
+      .addDropdown(dropdown => { dropdown.selectEl.setAttribute('aria-label', t('PDF processing mode')); return dropdown
+        .addOption('text', t('Native text PDF'))
+        .addOption('ocr', t('OCR (RU/EN Tesseract)'))
+        .addOption('structured', t('Structured layout and tables'))
+        .addOption('structured-ocr', t('Structured + OCR'))
+        .setValue(draft.pdfMode).onChange(value => {
+          draft.pdfMode = value as IngestionConfig['pdfMode'];
+          this.ingestionInput = draft; syncFields();
+        }); });
+    fields.pdfMode = mode.settingEl;
+    for (const [key, title] of [
+      ['interpreter', 'Trusted local Python interpreter'],
+      ['entry', 'Ingestion script (advanced_ingest.py)'],
+      ['tokenizerSnapshot', 'Pinned tokenizer snapshot'],
+      ['tessdataPath', 'Local OCR language assets'],
+      ['artifactsPath', 'Pinned structured extraction artifacts'],
+    ] as const) {
+      const row = new Setting(editor).setName(t(title))
+        .addText(text => { text.inputEl.setAttribute('aria-label', t(title)); return text.setValue(draft[key]).onChange(value => {
+          draft[key] = value; this.ingestionInput = draft;
+        }); });
+      fields[key] = row.settingEl;
+    }
+    function syncFields(): void {
+      for (const [key, row] of Object.entries(fields) as [keyof IngestionConfig, HTMLElement][]) {
+        row.hidden = !draft.enabled || (key === 'tessdataPath' && !needsOcr(draft.pdfMode)) ||
+          (key === 'artifactsPath' && !needsStructure(draft.pdfMode));
+      }
+    }
+    syncFields();
+    const error = alert(editor);
+    new Setting(editor).setName(t('Document setup draft'))
+      .addButton(button => button.setButtonText(t('Save setup')).onClick(async () => {
+        const result = ingestionDraft(draft);
+        if (!result.ok) { error.textContent = t(result.message); return; }
+        if (await this.commit(settings => { settings.ingestion = result.value; }, error)) {
+          this.ingestionInput = undefined; this.openEditors.delete('documents'); this.display('documents');
+        }
+      }))
+      .addButton(button => button.setButtonText(t('Cancel')).onClick(() => {
+        this.ingestionInput = undefined; this.openEditors.delete('documents'); this.display('documents');
+      }));
+    if (this.ingestActive) {
+      const result = alert(section);
+      new Setting(section).setName(t('Process active source'))
+        .setDesc(t('Manual operation on the selected source only; no bulk indexing.'))
+        .addButton(button => button.setButtonText(t('Ingest active document'))
+          .setDisabled(!this.current().ingestion.enabled).onClick(async () => {
+            try { await this.ingestActive?.(); this.display(); }
+            catch { result.textContent = t('Ingestion refused or failed. Check diagnostics.'); }
+          }));
+    }
+  }
+
+  private showIndex(root: HTMLElement): void {
+    const section = heading(root, 'Index & maintenance');
+    const basic = this.searchStatus?.();
+    new Setting(section).setName(t('Offline index'))
+      .setDesc(basic ? f('Status: {status}; indexed sources: {sources}; records: {records}; busy: {busy}; warning: {warning}; error: {error}. Counts are not an estimate of total Vault coverage.', {
+        status: st(basic.status), sources: basic.sources, records: basic.records,
+        busy: t(basic.busy ? 'yes' : 'no'), warning: basic.maintenanceWarning ?? t('none'),
+        error: basic.error ?? t('none'),
+      }) : t('Index state not available.'));
+    const last = this.lastBasic?.();
+    new Setting(section).setName(t('Last verified basic search'))
+      .setDesc(last ? f('Requested: {requested}; executed: {executed}; result: {result}.', {
+        requested: st(last.requestedMode), executed: st(last.executedMode), result: st(last.status),
+      }) : t('No current search response. Requested and executed modes appear in search results.'));
+    const embedding = this.current().ai.embedding;
+    const apiState = embedding.state === 'disabled' ? 'Provider disabled.' :
+      embedding.state === 'invalid' ? 'Unavailable: invalid saved provider preferences.' :
+        embedding.state === 'configured' && embedding.transport === 'cloud' ? 'Unavailable: cloud execution is not supported by the current local API pilot.' :
+          'Local provider configured; not verified by preferences.';
+    new Setting(section).setName(t('API dense index (selected Markdown corpus)'))
+      .setDesc(t(apiState) + ' ' + t('Index readiness and coverage are not verified in Settings. Use Open Standalone search → Optional local API dense / hybrid search → Prepare explicit dense index rebuild. Select exact corpus paths and vector dimension, then authorize the operation. No automatic rebuild.'));
+    const retrieval = this.retrievalStatus?.();
+    new Setting(section).setName(t('Legacy local BGE-M3 index (documents)'))
+      .setDesc(retrieval ? f('State: {status}; lexical: {lexical}; dense: {dense}; indexed sources: {sources}; chunks: {chunks}; error: {error}. This is not the API dense index.', {
+        status: st(retrieval.status), lexical: st(retrieval.lexical), dense: st(retrieval.dense),
+        sources: retrieval.indexedSources, chunks: retrieval.indexedChunks,
+        error: retrieval.error ?? t('none'),
+      }) : t('Unavailable / not verified. This is not the API dense index.'));
+    if (this.indexActive && this.rebuildActive && this.cancelAdvanced) {
+      const error = alert(section);
+      const action = async (task: () => Promise<void>): Promise<void> => {
+        try { await task(); this.display(); }
+        catch { error.textContent = t('Index operation failed or was refused. Check diagnostics.'); }
+      };
+      new Setting(section).setName(t('Legacy document index operations'))
+        .setDesc(t('Local BGE-M3, active document only. These actions do not rebuild the API dense index. Verified previous generations remain protected by storage contracts.'))
+        .addButton(button => button.setButtonText(t('Index legacy source'))
+          .setDisabled(!this.current().ingestion.enabled)
+          .onClick(() => action(this.indexActive!)))
+        .addButton(button => button.setButtonText(t('Rebuild legacy source'))
+          .setDisabled(!this.current().ingestion.enabled)
+          .onClick(() => action(this.rebuildActive!)))
+        .addButton(button => button.setButtonText(t('Cancel legacy operation'))
+          .onClick(() => action(this.cancelAdvanced!)));
+    }
+    if (this.openAdvanced) new Setting(section).setName(t('Legacy document search'))
+      .setDesc(t('Local BGE-M3 document search, separate from the API dense / hybrid search in Standalone.'))
+      .addButton(button => button.setButtonText(t('Open legacy search'))
+        .setDisabled(!this.current().ingestion.enabled).onClick(() => this.openAdvanced?.()));
+    this.showPurge(section);
+    new Setting(section).setName(t('Refresh status'))
+      .setDesc(t('Manually reread existing state; does not trigger indexing or network access.'))
+      .addButton(button => {
+        button.buttonEl.dataset.oksFocus = 'refresh';
+        return button.setButtonText(t('Refresh')).onClick(() => this.refreshReadOnly());
+      });
+  }
+
+  private showPurge(section: HTMLElement): void {
     const purge = this.purge;
-    new Setting(root).setName('Clear derived Standalone index')
-      .setDesc('Only while indexing is disabled. Removes recognized private index files, never notes. Rebuild after re-enabling.')
-      .addButton(button => button.setButtonText('Clear derived index')
-        .setDisabled(this.current().enabled)
-        .onClick(() => {
+    new Setting(section).setName(t('Delete derived offline index'))
+      .setDesc(t('Only when offline indexing is disabled. Removes recognized host-private index files, never notes.'))
+      .addButton(button => button.setButtonText(t('Clear derived files')).setWarning()
+        .setDisabled(this.current().enabled).onClick(() => {
           const confirm = new class extends Modal {
             onOpen(): void {
-              this.contentEl.createEl('h3', { text: 'Confirm derived index cleanup' });
-              this.contentEl.createEl('p', { text: 'Only recognized host-private index files will be deleted. Original Vault notes remain unchanged. Indexing must remain disabled.' });
+              applySettingsLayout(this.contentEl);
+              this.contentEl.createEl('h3', { text: t('Confirm derived-index cleanup') });
+              this.contentEl.createEl('p', { text: t('Only recognized host-private index files will be deleted. Original Vault notes will not be touched. Indexing must remain disabled.') });
               new Setting(this.contentEl)
-                .addButton(b => b.setButtonText('Cancel').onClick(() => this.close()))
-                .addButton(b => b.setButtonText('Delete derived files').setWarning().onClick(async () => {
-                  try { const count = await purge(); new Notice(`OKS: cleared ${count} derived files.`); }
-                  catch { new Notice('OKS: cleanup refused; check that indexing is disabled and cache contains only recognized files.'); }
+                .addButton(b => b.setButtonText(t('Cancel')).onClick(() => this.close()))
+                .addButton(b => b.setButtonText(t('Delete derived files')).setWarning().onClick(async () => {
+                  try {
+                    const count = await purge();
+                    new Notice(f('OKS: cleared {count} derived files.', {count}));
+                  } catch { new Notice(t('OKS: cleanup refused or failed.')); }
                   this.close();
                 }));
             }
           }(this.app);
           confirm.open();
         }));
-    new Setting(root).setName('Legacy manual synthetic probe')
-      .setDesc('Separate historical diagnostic. Never needed or started by Standalone. Disposable fixtures only.')
-      .addToggle(t => t.setValue(this.current().probe.fixtureMode).onChange(v => save(s => { s.probe.fixtureMode = v; })));
-    for (const [key, name] of [['interpreter','Trusted legacy Python interpreter'], ['entry','Trusted legacy probe entry']] as const)
-      new Setting(root).setName(name).addText(t => t.setValue(this.current().probe[key])
-        .onChange(v => save(s => { s.probe[key] = v; })));
+  }
+
+  private showExpert(root: HTMLElement): void {
+    const section = heading(root, 'Advanced diagnostics');
+    const health = this.health();
+    new Setting(section).setName(t('Health-only local backend'))
+      .setDesc(f('State: {status}; profile: {profile}; error: {error}. Health readiness never implies AI, OCR or document readiness.', {
+        status: st(health.status), profile: st(health.profile), error: health.error ?? t('none'),
+      }))
+      .addButton(button => button.setButtonText(t('Recheck health'))
+        .setDisabled(!this.current().advanced.enabled).onClick(async () => {
+          try { await this.checkHealth(); this.display(); }
+          catch { new Notice(t('OKS: health check failed.')); }
+        }));
+    const draft = this.advancedInput ?? structuredClone(this.current().advanced);
+    const { form: editor } = settingsDisclosure(section, this.openEditors, 'backend',
+      'Backend setup', 'Configure local backend', () => { this.advancedInput = draft; });
+    const fields: HTMLElement[] = [];
+    new Setting(editor).setName(t('Enable trusted local health backend after Save'))
+      .addToggle(toggle => { toggle.toggleEl.setAttribute('aria-label', t('Enable trusted local health backend after Save'));
+        return toggle.setValue(draft.enabled).onChange(value => {
+        draft.enabled = value; this.advancedInput = draft;
+        fields.forEach(row => { row.hidden = !draft.enabled; });
+      }); });
+    fields.push(new Setting(editor).setName(t('Backend profile')).addDropdown(dropdown => {
+      dropdown.selectEl.setAttribute('aria-label', t('Backend profile'));
+      return dropdown.addOption('none', t('None')).addOption('local-stdio',t('Trusted local stdio'))
+        .setValue(draft.profile).onChange(value => {
+          draft.profile = value as AdvancedConfig['profile']; this.advancedInput = draft;
+        });
+    }).settingEl);
+    for (const [key, name] of [
+      ['interpreter', 'Trusted absolute Python executable'],
+      ['entry', 'Trusted absolute health entry'],
+    ] as const) {
+      fields.push(new Setting(editor).setName(t(name)).addText(text => {
+        text.inputEl.setAttribute('aria-label', t(name));
+        return text.setValue(draft[key]).onChange(value => { draft[key] = value; this.advancedInput = draft; });
+      }).settingEl);
+    }
+    fields.forEach(row => { row.hidden = !draft.enabled; });
+    const error = alert(editor);
+    new Setting(editor).setName(t('Backend draft'))
+      .addButton(button => button.setButtonText(t('Save setup')).onClick(async () => {
+        const result = advancedDraft(draft);
+        if (!result.ok) { error.textContent = t(result.message); return; }
+        if (await this.commit(settings => { settings.advanced = result.value; }, error)) {
+          this.advancedInput = undefined; this.openEditors.delete('backend'); this.display('backend');
+        }
+      }))
+      .addButton(button => button.setButtonText(t('Cancel')).onClick(() => {
+        this.advancedInput = undefined; this.openEditors.delete('backend'); this.display('backend');
+      }));
+
+    const legacy = heading(section, 'Legacy synthetic probe (diagnostic only)');
+    new Setting(legacy).setName(t('Synthetic fixtures only'))
+      .setDesc(t('Not part of basic search. This tool does not run automatically.'));
+    const probe = this.probeInput ?? structuredClone(this.current().probe);
+    const { form: probeForm } = settingsDisclosure(legacy, this.openEditors, 'probe',
+      'Probe setup', 'Configure probe', () => { this.probeInput = probe; });
+    const paths: HTMLElement[] = [];
+    new Setting(probeForm).setName(t('Enable manual synthetic probe'))
+      .addToggle(toggle => { toggle.toggleEl.setAttribute('aria-label', t('Enable manual synthetic probe'));
+        return toggle.setValue(probe.fixtureMode).onChange(value => {
+        probe.fixtureMode = value; this.probeInput = probe;
+        paths.forEach(row => { row.hidden = !value; });
+      }); });
+    for (const [key, name] of [
+      ['interpreter', 'Trusted Python executable'], ['entry', 'Trusted synthetic probe entry'],
+    ] as const) paths.push(new Setting(probeForm).setName(t(name)).addText(text => {
+      text.inputEl.setAttribute('aria-label', t(name));
+      return text.setValue(probe[key]).onChange(value => { probe[key] = value; this.probeInput = probe; });
+    }).settingEl);
+    paths.forEach(row => { row.hidden = !probe.fixtureMode; });
+    const probeError = alert(probeForm);
+    new Setting(probeForm).setName(t('Probe draft'))
+      .addButton(button => button.setButtonText(t('Save setup')).onClick(async () => {
+        const result = probeDraft(probe);
+        if (!result.ok) { probeError.textContent = t(result.message); return; }
+        if (await this.commit(settings => { settings.probe = result.value; }, probeError)) {
+          this.probeInput = undefined; this.openEditors.delete('probe'); this.display('probe');
+        }
+      }))
+      .addButton(button => button.setButtonText(t('Cancel')).onClick(() => {
+        this.probeInput = undefined; this.openEditors.delete('probe'); this.display('probe');
+      }));
+  }
+
+  /** Refresh only operational rows; never replace an editor that owns an unsaved draft. */
+  private refreshReadOnly(): void {
+    const root = this.containerEl;
+    const restoreRefresh = (root.ownerDocument.activeElement as HTMLElement | null)?.dataset.oksFocus === 'refresh';
+    const redraw = (label: string, render: () => void): void => {
+      const old = [...root.children].find(child =>
+        child.getAttribute('aria-label') === t(label));
+      if (!old) return;
+      const following = old.nextSibling;
+      old.remove();
+      render();
+      const fresh = root.lastElementChild;
+      if (fresh && following) root.insertBefore(fresh, following);
+    };
+    redraw('Overview', () => this.showOverview(root));
+    redraw('Index & maintenance', () => this.showIndex(root));
+    refreshProviderOperationStatus(root, this.aiOperationStatus);
+    if (restoreRefresh) restoreSettingsFocus(root, 'refresh');
+  }
+
+  display(focusKey?: string): void {
+    this.hide();
+    const root = this.containerEl;
+    root.replaceChildren();
+    applySettingsLayout(root, true);
+    root.createEl('h2', { text: 'Obsidian Knowledge Search' });
+    const expert = this.current().presentationMode === 'expert';
+    const modeError = alert(root);
+    new Setting(root).setName(t('Settings view'))
+      .setDesc(t('Basic/Expert changes the presentation only, not providers, permissions or index activity.'))
+      .addDropdown(dropdown => { dropdown.selectEl.setAttribute('aria-label', t('Settings view')); dropdown.selectEl.dataset.oksFocus = 'view'; return dropdown.addOption('basic',t('Basic'))
+        .addOption('expert',t('Expert')).setValue(expert ? 'expert' : 'basic')
+        .onChange(async value => {
+          if (await this.commit(settings => {
+            settings.presentationMode = value as SearchSettings['presentationMode'];
+          }, modeError)) this.display('view');
+          else dropdown.setValue(this.current().presentationMode);
+        }); });
+    this.showOverview(root);
+    this.showSearch(root);
+    const ai = heading(root, 'AI capabilities (optional)');
+    ai.createEl('p', { text: t('Configure each task independently. Preferences are not readiness or permission to disclose content. Connection-check credentials are temporary and never saved.') });
+    this.releaseProviderChecks = renderProviderSettings(ai, this.app, this.current().ai, this.aiInputs, this.openEditors, expert,
+      (role, preference) => this.patchSettings(settings => { settings.ai[role] = preference; }),
+      focusKey => this.display(focusKey), this.aiOperationStatus);
+    this.showDocuments(root);
+    this.showIndex(root);
+    if (expert) this.showExpert(root);
+    if (focusKey) restoreSettingsFocus(root, focusKey);
   }
 }

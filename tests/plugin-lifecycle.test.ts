@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, copyFile, rm, writeFile, readFile, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
+import type { DenseUiController } from '../plugin/src/ai/dense-ui-controller';
 import type { ApiDenseHost } from '../plugin/src/ai/dense-host';
 import type { EmbeddingSpace } from '../plugin/src/ai/contracts';
 import type { IngestResponse } from '../plugin/src/advanced/protocol';
@@ -17,7 +18,7 @@ class HostPlugin {
   app: unknown; manifest = { id: 'oks-synthetic-evidence' }; saved: unknown = null;
   loadData(): Promise<unknown> { return Promise.resolve(this.saved); }
   async saveData(value: unknown): Promise<void> { this.saved = value; }
-  registerView(): void {} addCommand(): void {} addSettingTab(): void {} registerEvent(): void {}
+  registerView(): void {} addCommand(): void {} addSettingTab(): void {} registerEvent(): void {} register(_callback: () => void): void {}
 }
 class FileSystemAdapter { constructor(private root: string) {} getBasePath(): string { return this.root; } }
 class Empty {}
@@ -592,3 +593,199 @@ test('D6 B-LIFECYCLE-02: same host transfers CURRENT ownership, handles events a
     await f.cleanup();
   }
 });
+
+test('UX-AC02/05: presentation-only commits persist without revoking the live engine, evidence or dense host', async () => {
+  const f = await fixture();
+  try {
+    await f.plugin.onload(); f.layout(); await f.internal.initializing;
+    await f.plugin.standalone!.whenIdle();
+    const engine = f.plugin.standalone;
+    const host = (f.plugin as unknown as { denseHost: unknown }).denseHost;
+    const before = await f.plugin.api.request({ apiVersion: 1, operation: 'search', request: {
+      protocolVersion: 2, requestId: 'mode', query: 'REQ-LIFE-1', requestedMode: 'lexical', limit: 5,
+    } });
+    assert.equal(before.ok, true);
+    const generation = f.plugin.standalone!.status().generationId;
+    const searchResponse = f.plugin.searchController.snapshot().response;
+    await f.plugin.patchSettings(s => { s.presentationMode = 'expert'; });
+    assert.equal(f.plugin.settings.presentationMode, 'expert');
+    assert.equal(f.plugin.standalone, engine);
+    assert.equal((f.plugin as unknown as { denseHost: unknown }).denseHost, host);
+    assert.equal(f.plugin.standalone!.status().generationId, generation);
+    assert.deepEqual(f.plugin.searchController.snapshot().response, searchResponse);
+    const saved = (f.plugin as unknown as { saved: unknown }).saved;
+    assert.equal((saved as { presentationMode: string }).presentationMode, 'expert');
+    const decoded = (await import('../plugin/src/search/settings')).parseSettings(saved);
+    assert.equal(decoded.presentationMode, 'expert');
+    await f.plugin.patchSettings(s => { s.presentationMode = 'basic'; });
+    assert.equal(f.plugin.standalone, engine);
+    assert.equal(f.plugin.settings.ai.embedding.state, 'disabled');
+    assert.deepEqual(f.plugin.searchController.snapshot().response, searchResponse);
+  } finally { await f.cleanup(); }
+});
+
+test('UX-AC04: failed persistent writes do not commit edited draft or disrupt the existing offline engine', async () => {
+  const f = await fixture();
+  try {
+    await f.plugin.onload(); f.layout(); await f.internal.initializing;
+    await f.plugin.standalone!.whenIdle();
+    const engine = f.plugin.standalone!;
+    const saved = (f.plugin as unknown as { saved: unknown }).saved;
+    const previous = structuredClone(f.plugin.settings);
+    const original = f.plugin.saveData.bind(f.plugin);
+    Object.assign(f.plugin, { saveData: async () => { throw new Error('synthetic private storage refusal'); } });
+    try {
+      await assert.rejects(f.plugin.patchSettings(s => {
+        s.presentationMode = 'expert'; s.topK = 42;
+      }));
+    } finally { Object.assign(f.plugin, { saveData: original }); }
+    assert.deepEqual(f.plugin.settings, previous);
+    assert.deepEqual((f.plugin as unknown as { saved: unknown }).saved, saved);
+    assert.equal(f.plugin.standalone, engine);
+    assert.equal(engine.status().status, 'ready');
+  } finally { await f.cleanup(); }
+});
+
+for (const role of ['reranking','generation'] as const) {
+  test('R1 B-R1-ROLE-01: '+role+' lifecycle preserves independent dense and reciprocal evidence consent', async t => {
+    const f=await fixture();
+    const file=Object.assign(new Empty(),{path:'fixture.md'});
+    Object.assign(f.plugin.app.vault,{getMarkdownFiles:()=>[file],
+      getAbstractFileByPath:(path:string)=>path===file.path?file:null});
+    let calls=0, denseCalls=0;
+    let onDenseRequest:()=>void=()=>{};
+    let releaseDense:()=>void=()=>{};
+    let onDelayedRequest:()=>void=()=>{};
+    const server=createServer((req,res)=>{
+      let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
+        if(req.url==='/v1/embeddings'){
+          denseCalls++;
+          const payload=JSON.parse(body) as {model:string;input:string[]};
+          releaseDense=()=>{
+            res.writeHead(200,{'content-type':'application/json'});
+            res.end(JSON.stringify({model:payload.model,data:payload.input.map((_,index)=>
+              ({object:'embedding',index,embedding:[1,0,0]}))}));
+          };
+          onDenseRequest();return;
+        }
+        calls++;
+        if(req.headers.authorization==='Bearer fixture-delay'){onDelayedRequest();return;}
+        if(req.headers.authorization==='Bearer fixture-deny'){res.writeHead(401);res.end();return;}
+        const payload=JSON.parse(body) as {model:string;documents?:string[]};
+        res.writeHead(200,{'content-type':'application/json'});
+        res.end(JSON.stringify(req.url==='/v1/rerank'
+          ? {model:payload.model,results:payload.documents!.map((_,index)=>({index,relevance_score:1}))}
+          : {model:payload.model,usage:{completion_tokens:4},choices:[{index:0,finish_reason:'stop',
+            message:{role:'assistant',content:JSON.stringify({claims:[{kind:'quotation',text:'REQ-LIFE-1',citationIds:[0]}]})}}]}));
+      });
+    });
+    const denseUi=(f.plugin as unknown as {denseUi:DenseUiController}).denseUi;
+    const c=f.plugin.searchController, other=role==='reranking'?'generation':'reranking';
+    const prepare=()=>role==='reranking'?c.prepareRerank():c.prepareGeneration();
+    const prepareOther=()=>other==='reranking'?c.prepareRerank():c.prepareGeneration();
+    const cancel=()=>role==='reranking'?c.cancelRerank():c.cancelGeneration();
+    const confirm=(preview:ReturnType<typeof prepare>,token:string)=>role==='reranking'
+      ?c.rerankConfirmed(preview,'synthetic',token):c.generationConfirmed(preview,'synthetic',token);
+    try {
+      await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
+      const addr=server.address();assert.ok(addr&&typeof addr!=='string');
+      await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+      const identity={model:'fixture',revision:'v1'};
+      const cfg={state:'configured',transport:'local',origin:'http://127.0.0.1:'+addr.port,identity,
+        limits:{timeoutMs:2000,maxInputBytes:4096,maxCandidates:8,maxOutputTokens:32,maxConcurrent:1}} as const;
+      await f.plugin.patchSettings(s=>{s.ai.embedding=cfg;s.ai.reranking=cfg;s.ai.generation=cfg;});
+      await f.plugin.standalone!.whenIdle();
+      const lexical=await c.search({protocolVersion:2,requestId:'role-lexical',query:'REQ-LIFE-1',requestedMode:'lexical',limit:5});
+      assert.ok(lexical.ok&&lexical.value.hits.length>0);
+      const space:EmbeddingSpace={...identity,dimension:3,normalization:'unit-l2',
+        serializationId:'utf8-verbatim-v1',queryInstructionId:'identity-v1',documentInstructionId:'identity-v1'};
+      const request={protocolVersion:2,requestId:'role-d8',query:'REQ-LIFE-1',requestedMode:'dense',
+        matchMode:'terms',scope:['fixture.md'],limit:1} as const;
+
+      // Reproduce the review finding with an expired preview and a newly staged D8 slot.
+      t.mock.timers.enable({apis:['setTimeout']});
+      const expired=prepare();t.mock.timers.tick(300000);t.mock.timers.reset();
+      assert.deepEqual(c.evidenceOperationStatus(role),{phase:'failed',error:'CANCELLED'});
+      const staged=await f.plugin.denseApi.request({apiVersion:1,operation:'submit',request,space});
+      assert.ok(staged.ok&&staged.value&&'operationId' in staged.value);
+      const operationId=staged.value.operationId;
+      const denseStatus=()=>f.plugin.denseApi.request({apiVersion:1,operation:'status',operationId});
+      const pending=await denseStatus();
+      assert.ok(pending.ok&&pending.value&&'phase' in pending.value&&pending.value.phase==='pending');
+      const reciprocal=prepareOther();
+      const unchanged=async()=>{
+        assert.deepEqual(await denseStatus(),pending);
+        assert.equal(c.isEvidencePreviewCurrent(other,reciprocal.sequence),true);
+        assert.deepEqual(c.snapshot().response,lexical.value);
+      };
+      cancel();cancel();await unchanged();
+      await assert.rejects(confirm(expired,'fixture-success'),{message:'DISCLOSURE_DENIED'});
+      assert.equal(calls,0);await unchanged();
+      t.mock.timers.enable({apis:['setTimeout']});
+      prepare();t.mock.timers.tick(300000);t.mock.timers.reset();
+      assert.deepEqual(c.evidenceOperationStatus(role),{phase:'failed',error:'CANCELLED'});
+      await unchanged();
+      const superseded=prepare();const replacement=prepare();
+      assert.equal(c.isEvidencePreviewCurrent(role,superseded.sequence),false);
+      const successful=confirm(replacement,'fixture-success');
+      assert.equal(c.evidenceOperationStatus(role).phase,'busy');await unchanged();
+      await successful;
+      assert.equal(c.evidenceOperationStatus(role).phase,'complete');assert.equal(calls,1);await unchanged();
+      await confirm(prepare(),'fixture-deny');
+      assert.deepEqual(c.evidenceOperationStatus(role),{phase:'failed',error:'UNAUTHENTICATED'});
+      assert.equal(calls,2);await unchanged();
+      const entered=new Promise<void>(resolve=>{onDelayedRequest=resolve;});
+      const running=confirm(prepare(),'fixture-delay');
+      await Promise.race([entered,running.then(()=>{throw Error('request did not enter fixture');})]);
+      await unchanged();cancel();await running;
+      assert.deepEqual(c.evidenceOperationStatus(role),{phase:'failed',error:'CANCELLED'});
+      assert.equal(calls,3);await unchanged();
+
+      // Review the very same D8 request, then check owner-bound preview survival.
+      const owner=Symbol('machine-review');
+      const machine=(f.plugin as unknown as {denseMachine:{review(owner:symbol):Promise<void>}}).denseMachine;
+      await machine.review(owner);
+      const reviewed=denseUi.snapshot(owner);
+      assert.equal(reviewed.phase,'preview');
+      const second=prepare();await confirm(second,'fixture-success');
+      assert.equal(c.evidenceOperationStatus(role).phase,'complete');
+      assert.deepEqual(denseUi.snapshot(owner),reviewed);
+      assert.equal(c.isEvidencePreviewCurrent(other,reciprocal.sequence),true);
+      const cancelled=await f.plugin.denseApi.request({apiVersion:1,operation:'cancel',operationId});
+      assert.ok(cancelled.ok);
+
+      // Manual dense uses the same host but a distinct owner; evidence changes must not revoke it.
+      const manual=Symbol('manual-dense');
+      await denseUi.prepare(manual,{kind:'rebuild',paths:['fixture.md'],space});
+      const manualPreview=denseUi.snapshot(manual);assert.equal(manualPreview.phase,'preview');
+      await confirm(prepare(),'fixture-deny');cancel();
+      assert.deepEqual(denseUi.snapshot(manual),manualPreview);
+      assert.equal(c.isEvidencePreviewCurrent(other,reciprocal.sequence),true);
+      assert.equal(calls,5);assert.equal(denseCalls,0);
+      // A live, authorized synthetic embedding call must survive evidence-only transitions.
+      assert.ok(manualPreview.phase==='preview');
+      const denseEntered=new Promise<void>(resolve=>{onDenseRequest=resolve;});
+      const denseRunning=denseUi.confirm(manual,manualPreview.preview.nonce,'synthetic','fixture-success');
+      await Promise.race([denseEntered,denseRunning.then(()=>{throw Error('dense request did not enter fixture');})]);
+      assert.equal(denseUi.operationStatus().phase,'busy');
+      await confirm(prepare(),'fixture-success');cancel();
+      assert.equal(denseUi.operationStatus().phase,'busy');
+      assert.equal(c.isEvidencePreviewCurrent(other,reciprocal.sequence),true);
+      releaseDense();await denseRunning;
+      assert.equal(denseUi.operationStatus().phase,'complete');
+      assert.equal(denseCalls,1);assert.equal(calls,6);
+      assert.deepEqual(c.snapshot().response,lexical.value);
+      // The shared lexical/source fence must still revoke every role.
+      const final=prepare();c.invalidate();
+      assert.equal(denseUi.snapshot(manual).phase,'idle');
+      assert.equal(c.isEvidencePreviewCurrent(role,final.sequence),false);
+      assert.equal(c.isEvidencePreviewCurrent(other,reciprocal.sequence),false);
+      assert.equal(c.snapshot().response,null);
+      assert.equal(calls,6);assert.equal(denseCalls,1);
+    } finally {
+      t.mock.timers.reset();
+      server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));
+      await f.cleanup();
+    }
+  });
+}
