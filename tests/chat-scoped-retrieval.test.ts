@@ -158,3 +158,36 @@ test('06H.2-A2b1: reserve ownership before config and engine callbacks can reent
     capture.resolve(lease());await flush();
   }finally{c.dispose();}
 });
+
+test('06H.2-A2b1: source invalidation retires all three held boundaries before physical abort and drain',async()=>{
+  for(const boundary of ['capture','search','verify'] as const){
+    const c=new SearchController(async()=>{}),gate=deferred<void>(),entered=deferred<void>();
+    let signal:AbortSignal|undefined,calls=0,revokedAtAbort=false,sourceRetired=false;
+    let nested:ReturnType<SearchController['startScopedChatRetrieval']>|undefined;
+    const initial=c.sourceAuthorityRevision();
+    const hold=async(name:typeof boundary)=>{if(name===boundary){entered.resolve();await gate.promise;}};
+    try{
+      c.attach(engine(async(_value,s)=>{
+        calls++;signal=s;
+        s.addEventListener('abort',()=>{
+          revokedAtAbort=!c.sourceAuthorityCurrent(initial);
+          nested=c.startScopedChatRetrieval(selector,request);
+        });
+        await hold('capture');
+        return lease({search:async()=>{await hold('search');return response();},verify:async()=>hold('verify')});
+      }));
+      const turn=c.startScopedChatRetrieval(selector,request);await entered.promise;
+      c.invalidateSource([()=>{sourceRetired=true;}]);
+      assert.equal(c.sourceAuthorityCurrent(initial),false);
+      assert.deepEqual(await turn.result,error('SUPERSEDED'));
+      assert.equal(signal?.aborted,true);assert.equal(revokedAtAbort,true);assert.equal(sourceRetired,true);
+      assert.equal((await nested?.result)?.ok,false);
+      assert.deepEqual(await c.startScopedChatRetrieval(selector,request).result,error('BUSY'));
+      assert.equal(calls,1);gate.resolve();await flush();
+      assert.deepEqual(await turn.result,error('SUPERSEDED'));
+      assert.equal(c.snapshot().response,null);
+      assert.equal((await c.startScopedChatRetrieval(selector,request).result).ok,true);
+      assert.equal(calls,2);
+    }finally{gate.resolve();c.dispose();}
+  }
+});
