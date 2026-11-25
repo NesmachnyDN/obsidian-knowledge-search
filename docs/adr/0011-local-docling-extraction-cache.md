@@ -57,3 +57,7 @@ Synthetic acceptance gates:
 - Measure cache hit/miss, original vs cached ingestion latency, CPU/RSS/disk, OCR quality and retrieval evidence on frozen synthetic document sets. Do not claim 1.5 GiB real-Vault performance without separately authorized sampling.
 
 This is a **design decision, not implemented behavior or permission to process a production Vault**.
+
+## Prospective extension (ADR-0017; review pending)
+
+Generalize the same private cache contract to every reviewed local extraction adapter and source format, including its exact implementation/revision, detection/format options, assets, normalization and provenance mapping. Docling remains the structural candidate, not an exclusive extractor for every format. Host-local-only storage, source freshness, independent invalidation and transactional safety remain unchanged. See [ADR-0017](0017-extensible-multiformat-extraction.md).
