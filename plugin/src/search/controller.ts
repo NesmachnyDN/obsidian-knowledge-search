@@ -83,7 +83,7 @@ export class SearchController {
   private notifying = false;
   private revokingSharedAuthority = false;
   private runtimeSettingsChanging = false;
-  private pendingSettingsRetirement?: () => void;
+  private pendingHostRetirement?: () => void;
   private sharedAuthorityFault = false;
   private deliveringLifecycle = false;
   private evidencePending?: number;
@@ -229,21 +229,21 @@ export class SearchController {
   private queueLifecycle(): void {
     this.lifecyclePending = {revision:this.revision,final:this.disposed,listeners:[...this.listeners]};
   }
-  private emit(final = false, retireSettings?: () => void): void {
+  private emit(final = false, retireHost?: () => void): void {
     if (this.disposed && !final) return;
-    if (retireSettings) this.pendingSettingsRetirement = retireSettings;
+    if (retireHost) this.pendingHostRetirement = retireHost;
     this.pendingExpiryNotification = undefined;
     // Reserve publication before the synchronous host hook. A nested transition
     // may replace it but cannot drain or dispatch while authority is being revoked.
     if (!this.notifying && !this.revokingSharedAuthority) this.waveAdditions = 0;
     this.queueLifecycle();
     this.notificationVersion++;
-    if (this.revokingSharedAuthority) return;
+    if (this.revokingSharedAuthority || (this.sharedAuthorityFault && this.pendingHostRetirement && this.notifying)) return;
     this.revokingSharedAuthority = true;
     try {
       this.revokeSharedAuthority?.();
-      this.pendingSettingsRetirement?.();
-      this.pendingSettingsRetirement = undefined;
+      this.pendingHostRetirement?.();
+      this.pendingHostRetirement = undefined;
       this.sharedAuthorityFault = false;
     } catch (error) {
       // A failed trusted hook is not an observer exception: no authority
@@ -257,7 +257,7 @@ export class SearchController {
       this.queueLifecycle();
       this.notificationVersion++;
       console.warn('SEARCH_AUTHORITY_REVOKE_FAILED');
-      if (retireSettings) throw error;
+      if (retireHost) throw error;
     } finally {
       this.revokingSharedAuthority = false;
       this.drainNotifications(true);
@@ -270,10 +270,10 @@ export class SearchController {
   }
   /** Fence admission before observers or persistence can yield. Failed retirement
    * remains latched independently of the settings transaction's lifetime. */
-  beginRuntimeSettingsChange(retire: () => void): void {
+  beginRuntimeSettingsChange(retire: () => void, revokeRerankProfile: boolean): void {
     this.runtimeSettingsChanging = true;
     this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null});
-    this.rerankProfiles.revoke();
+    if (revokeRerankProfile) this.rerankProfiles.revoke();
     this.emit(false, retire);
   }
   endRuntimeSettingsChange(): void { this.runtimeSettingsChanging = false; }
@@ -283,9 +283,9 @@ export class SearchController {
     this.pending?.resolve(failure('SUPERSEDED')); this.pending = undefined;
     this.state = state;
   }
-  private invalidateState(final = false): void {
+  private invalidateState(final = false, retireHost?: () => void): void {
     this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null});
-    this.emit(final);
+    this.emit(final, retireHost);
   }
   message(error: string): void {
     if (this.disposed) return;
@@ -298,6 +298,7 @@ export class SearchController {
     try { request = parseSearch(input); } catch { return failure('INVALID_REQUEST'); }
     if (this.disposed || !this.enabled) return failure('DISABLED');
     if (this.runtimeSettingsChanging) return failure('SUPERSEDED');
+    if (this.sharedAuthorityFault && this.pendingHostRetirement && this.notifying) return failure('INTERNAL_FAILURE');
     if (!this.engine) return failure(this.error ?? 'INDEX_UNAVAILABLE');
     this.resetSharedState({phase:'searching',message:'Verifying original sources…',response:null});
     const revision = this.revision;
@@ -556,11 +557,13 @@ export class SearchController {
       return failure('NAVIGATION_REJECTED');
     }
   }
-  control(action: 'pause' | 'cancel' | 'resume' | 'rebuild'): ApiResult<{ cancelled: boolean | null }> {
+  control(action: 'pause' | 'cancel' | 'resume' | 'rebuild', retireHost?: () => void): ApiResult<{ cancelled: boolean | null }> {
     if (this.disposed || !this.enabled || !this.engine) return failure('DISABLED');
     if (this.runtimeSettingsChanging || this.revokingSharedAuthority) return failure('SUPERSEDED');
+    if (this.sharedAuthorityFault && this.pendingHostRetirement && this.notifying) return failure('INTERNAL_FAILURE');
     const engine = this.engine, revision = this.revision + 1;
-    this.invalidate();
+    try { this.invalidateState(false, retireHost); }
+    catch { return failure('INTERNAL_FAILURE'); }
     // The initial shared invalidation is synchronous. Do not execute a stale
     // control command after an observer supersedes its revision or detaches.
     if (this.disposed || this.revision !== revision || this.engine !== engine) return failure('SUPERSEDED');

@@ -235,18 +235,21 @@ export default class SyntheticEvidencePlugin extends Plugin {
       }
       this.denseSettingsChanging = true;
       try {
-        this.searchController.beginRuntimeSettingsChange(() => this.denseHost?.invalidate());
+        this.searchController.beginRuntimeSettingsChange(() => this.denseHost?.invalidate(),
+          !settings.enabled || JSON.stringify(this.settings.ai.reranking) !== JSON.stringify(settings.ai.reranking));
         await this.saveData(settings);
         if (this.unloaded) return;
-        this.searchController.beginRuntimeSettingsChange(() => this.denseHost?.invalidate());
+        // Persistence committed. Admission has remained fenced since the first
+        // retirement; publish the persisted preferences before any fallible
+        // teardown so recovery cannot resurrect the previous configuration.
         const before = this.settings;
+        this.settings = settings;
+        this.standaloneError = null;
+        this.searchController.configure(settings.enabled, settings.paused);
         if (before.ingestion.enabled !== settings.ingestion.enabled) {
           await this.stopDenseHost();
         }
         if (this.unloaded) return;
-        this.settings = settings;
-        this.standaloneError = null;
-        this.searchController.configure(settings.enabled, settings.paused);
         if (JSON.stringify(before.ingestion) !== JSON.stringify(settings.ingestion))
           await this.stopIngestion();
         if (!settings.ingestion.enabled && this.standalone && !this.denseHost)
@@ -305,9 +308,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     return purgeDerivedIndex(dir, provider.rootId, dir);
   }
   async controlSearch(action: 'pause' | 'cancel' | 'resume' | 'rebuild'): Promise<void> {
-    this.navigator?.invalidate();
-    this.denseHost?.invalidate();
-    const result = this.searchController.control(action);
+    const result = this.searchController.control(action, () => this.denseHost?.invalidate());
     if (!result.ok) { new Notice(`OKS: ${result.error}`); return; }
     try { await this.patchSettings(settings => { settings.paused = action === 'pause' || action === 'cancel'; }); }
     catch { new Notice('OKS: settings could not be saved.'); }
@@ -548,9 +549,9 @@ export default class SyntheticEvidencePlugin extends Plugin {
     });
   }
   private async stopDenseHost(): Promise<void> {
-    let failed = false;
-    try { this.revokeDenseAuthority(); }
-    catch { failed = true; console.warn('DENSE_AUTHORITY_REVOKE_FAILED'); }
+    // Callers have already retired shared authority through the controller
+    // (configure/detach/dispose). Do not retry a failed trusted hook outside
+    // that fault transaction, particularly during a persisted settings change.
     const host = this.denseHost;
     if (host) {
       // Publish the drain before losing ownership even after a failed UI hook.
@@ -561,7 +562,6 @@ export default class SyntheticEvidencePlugin extends Plugin {
     }
     // A delayed drain must not revoke a newer owner. A later synchronous
     // shared transition retries any retained retirement fence.
-    if (failed) throw new StandaloneError('INTERNAL_FAILURE');
   }
   private async stopStandalone(): Promise<void> {
     this.navigator?.dispose(); this.navigator = undefined; this.sourceReader = undefined;

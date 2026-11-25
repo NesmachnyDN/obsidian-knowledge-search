@@ -1002,8 +1002,11 @@ for (const role of ['reranking','generation'] as const) {
         verifyGate.release();
         Object.assign(f.plugin,{saveData:original});
         await f.plugin.patchSettings(s=>{s.topK=s.topK===1?2:1;});
-        provision();
         assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+        // The shared search/consent revision is retired, but an unrelated role
+        // preference cannot revoke the exact still-current reranker capability.
+        if(role==='reranking') { assert.throws(()=>c.prepareRerank());provision(); }
+        else { const freshRerank=c.prepareRerank();assert.equal(c.isEvidencePreviewCurrent('reranking',freshRerank.sequence),true); }
         const fresh=prepare();assert.equal(c.isEvidencePreviewCurrent(role,fresh.sequence),true);
         f.plugin.onunload();
         assert.equal(c.sharedAuthorityTransition(),true);
@@ -1015,3 +1018,134 @@ for (const role of ['reranking','generation'] as const) {
     });
   }
 }
+
+test('B-R2-LIFE-11 persisted disable remains committed after post-save trusted hook failure',async()=>{
+  const f=await fixture(),c=f.plugin.searchController;
+  const original=f.plugin.saveData.bind(f.plugin);
+  let fail=false;
+  const cfg={state:'configured',transport:'local',origin:'http://127.0.0.1:1',identity:{model:'fixture',revision:'v1'},
+    limits:{timeoutMs:2000,maxInputBytes:4096,maxCandidates:8,maxOutputTokens:32,maxConcurrent:1}} as const;
+  try {
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    await f.plugin.patchSettings(s=>{s.ai.generation=cfg;});
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    const preview=c.prepareGeneration();
+    const nav=(f.plugin as unknown as {navigator:SourceNavigator<unknown>}).navigator;
+    const invalidate=nav.invalidate.bind(nav);
+    Object.assign(nav,{invalidate:()=>{if(fail)throw Error('synthetic post-save retirement failure');invalidate();}});
+    Object.assign(f.plugin,{saveData:async(v:unknown)=>{await original(v);fail=true;}});
+    await f.plugin.patchSettings(s=>{s.ai.generation={state:'disabled'};});
+    assert.equal(f.plugin.settings.ai.generation.state,'disabled');
+    assert.equal((f.plugin as unknown as {saved:{ai:{generation:{state:string}}}}).saved.ai.generation.state,'disabled');
+    assert.equal(c.sharedAuthorityTransition(),true);
+    assert.equal(c.isEvidencePreviewCurrent('generation',preview.sequence),false);
+    await assert.rejects(c.generationConfirmed(preview,'synthetic','fixture'));
+    assert.equal((await c.open(0)).ok,false);
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,false);
+    fail=false;
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    assert.throws(()=>c.prepareGeneration());
+    await assert.rejects(c.generationConfirmed(preview,'synthetic','fixture'));
+  }finally{fail=false;Object.assign(f.plugin,{saveData:original});await f.cleanup();}
+});
+
+test('B-R2-LIFE-10 failed trusted retirement is not retried within its lexical observer wave',async()=>{
+  const f=await fixture(),c=f.plugin.searchController;
+  let fail=false,attempts=0;
+  const original=f.plugin.saveData.bind(f.plugin);
+  let off=()=>{};
+  try{
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    const nav=(f.plugin as unknown as {navigator:SourceNavigator<unknown>}).navigator;
+    const invalidate=nav.invalidate.bind(nav);
+    Object.assign(nav,{invalidate:()=>{attempts++;if(fail)throw Error('synthetic retirement failure');invalidate();}});
+    fail=true;
+    await assert.rejects(f.plugin.patchSettings(s=>{s.topK=s.topK===1?2:1;}));
+    const nested:Promise<unknown>[]=[];
+    off=c.subscribe(()=>{
+      const before=attempts;
+      nested.push(c.search(uiRequest('nested',1)).then(result=>assert.equal(result.ok,false)));
+      assert.equal(c.control('resume').ok,false);
+      assert.equal(attempts,before,'fault recovery must wait for a later external transition');
+    });
+    const before=attempts;
+    assert.equal((await c.search(uiRequest('retry',1))).ok,false);
+    await Promise.all(nested);
+    assert.equal(attempts,before+1);
+    assert.equal(nested.length,1);
+    assert.equal(c.sharedAuthorityTransition(),true);
+    off();fail=false;
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+  }finally{off();fail=false;Object.assign(f.plugin,{saveData:original});await f.cleanup();}
+});
+
+test('B-R2-LIFE-11 unload during a pending disable save cannot restore admission',async()=>{
+  const f=await fixture(),c=f.plugin.searchController;
+  const original=f.plugin.saveData.bind(f.plugin),entered=deferredDrain(),gate=deferredDrain();
+  const cfg={state:'configured',transport:'local',origin:'http://127.0.0.1:1',identity:{model:'fixture',revision:'v1'},
+    limits:{timeoutMs:2000,maxInputBytes:4096,maxCandidates:8,maxOutputTokens:32,maxConcurrent:1}} as const;
+  let verifies=0;
+  try{
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    await f.plugin.patchSettings(s=>{s.ai.generation=cfg;});
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    const preview=c.prepareGeneration();
+    Object.assign(f.plugin,{saveData:async(v:unknown)=>{entered.release();await gate.promise;await original(v);},
+      verifyAiEvidence:async()=>{verifies++;throw Error('unexpected verification');}});
+    const saving=f.plugin.patchSettings(s=>{s.ai.generation={state:'disabled'};});
+    await navigationWatchdog(entered.promise);
+    f.plugin.onunload();gate.release();await saving;
+    assert.equal(c.sharedAuthorityTransition(),true);
+    assert.equal(c.isEvidencePreviewCurrent('generation',preview.sequence),false);
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,false);
+    assert.equal((await c.open(0)).ok,false);
+    await assert.rejects(c.generationConfirmed(preview,'synthetic','fixture'));
+    assert.equal(verifies,0);
+  }finally{gate.release();Object.assign(f.plugin,{saveData:original});await f.cleanup();}
+});
+
+test('B-R2-LIFE-10 pause command uses the same trusted retirement fault boundary',async()=>{
+  const f=await fixture(),c=f.plugin.searchController;
+  let fail=false,attempts=0;
+  try{
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    const host=(f.plugin as unknown as {denseHost:ApiDenseHost}).denseHost;
+    const invalidate=host.invalidate.bind(host);
+    Object.assign(host,{invalidate:(path?:string)=>{attempts++;if(fail)throw Error('synthetic idle host retirement failure');invalidate(path);}});
+    fail=true;
+    await f.plugin.controlSearch('pause');
+    assert.equal(attempts,1);
+    assert.equal(f.plugin.settings.paused,false);
+    assert.equal(c.sharedAuthorityTransition(),true);
+    assert.equal((await c.open(0)).ok,false);
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,false);
+    fail=false;
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+  }finally{fail=false;await f.cleanup();}
+});
+
+test('B-R2-LIFE-11 pending presentation-only save preserves both independent previews',async()=>{
+  const f=await fixture(),c=f.plugin.searchController;
+  const original=f.plugin.saveData.bind(f.plugin),entered=deferredDrain(),gate=deferredDrain();
+  const cfg={state:'configured',transport:'local',origin:'http://127.0.0.1:1',identity:{model:'fixture',revision:'v1'},
+    limits:{timeoutMs:2000,maxInputBytes:4096,maxCandidates:8,maxOutputTokens:32,maxConcurrent:1}} as const;
+  try{
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    await f.plugin.patchSettings(s=>{s.ai.generation=cfg;s.ai.reranking=cfg;});
+    const host=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof cfg,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
+    host.rerankProfiles.installSyntheticFixture(cfg,host.rerankPort.scopeId(),'presentation-fixture');
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    const generation=c.prepareGeneration(),rerank=c.prepareRerank();
+    Object.assign(f.plugin,{saveData:async()=>{entered.release();await gate.promise;throw Error('synthetic presentation save failure');}});
+    const saving=f.plugin.patchSettings(s=>{s.presentationMode='expert';});
+    const rejected=assert.rejects(saving);
+    await navigationWatchdog(entered.promise);
+    assert.equal(c.sharedAuthorityTransition(),false);
+    assert.equal(c.isEvidencePreviewCurrent('generation',generation.sequence),true);
+    assert.equal(c.isEvidencePreviewCurrent('reranking',rerank.sequence),true);
+    gate.release();await rejected;
+    assert.equal(c.isEvidencePreviewCurrent('generation',generation.sequence),true);
+    assert.equal(c.isEvidencePreviewCurrent('reranking',rerank.sequence),true);
+  }finally{gate.release();Object.assign(f.plugin,{saveData:original});await f.cleanup();}
+});
