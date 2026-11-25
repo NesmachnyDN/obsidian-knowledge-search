@@ -14,6 +14,7 @@ export class SearchView extends ItemView {
   private unsubscribe?: () => void;
   private timer?: number;
   private disposed = true;
+  private generationOwner?:object;
   private densePanel?: {dispose():void};
   constructor(leaf: WorkspaceLeaf, private readonly controller: SearchController,
     private readonly settings: () => SearchSettings,
@@ -23,6 +24,8 @@ export class SearchView extends ItemView {
   getDisplayText(): string { return 'OKS Standalone search'; }
   async onOpen(): Promise<void> {
     this.cleanup(); this.disposed = false;
+    const generationOwner=this.controller.createGenerationViewOwner();
+    this.generationOwner=generationOwner;
     const root = this.contentEl; root.replaceChildren(); root.addClass('oks-search');
     const doc = root.ownerDocument;
     const add = <K extends keyof HTMLElementTagNameMap>(tag: K, text: string, cls?: string): HTMLElementTagNameMap[K] => {
@@ -105,18 +108,21 @@ export class SearchView extends ItemView {
       let draft=false;
       const clear=()=>{sequence=undefined;draft=false;const token=confirmation.querySelector<HTMLInputElement>('input[type=password]');
         if(token)token.value='';confirmation.replaceChildren();};
-      const cancel=()=>role==='rerank'?this.controller.cancelRerank():this.controller.cancelGeneration();
+      confirmation.addEventListener('focusout',event=>{
+        if(draft && !confirmation.contains(event.relatedTarget as Node|null))clear();
+      });
+      const cancel=()=>role==='rerank'?this.controller.cancelRerank():this.controller.cancelGeneration(generationOwner);
       const error=(e:unknown)=>{if(!this.disposed)message.textContent=label+': '+(e instanceof ProviderFailure?e.code:'NOT_READY');};
       const prepare=(token:string)=>{
         clear();
         try {
-          const preview=role==='rerank'?this.controller.prepareRerank():this.controller.prepareGeneration(token);
-          if(this.disposed||!this.controller.isEvidencePreviewCurrent(evidenceRole,preview.sequence))return;
+          const preview=role==='rerank'?this.controller.prepareRerank():this.controller.prepareGeneration(token,generationOwner);
+          if(this.disposed||!this.controller.isEvidencePreviewCurrent(evidenceRole,preview.sequence,generationOwner))return;
           sequence=preview.sequence;
           renderRerankConfirmation(confirmation,preview,(classification,token)=>{
             if(this.disposed)return;
             const request=role==='rerank'?this.controller.rerankConfirmed(preview,classification,token):
-              this.controller.generationConfirmed(preview,classification);
+              this.controller.generationConfirmed(preview,classification,generationOwner);
             void request.catch(error);
           },cancel);
         } catch(e){clear();error(e);}
@@ -143,7 +149,7 @@ export class SearchView extends ItemView {
       });
       button('Cancel '+role,prefix+'-cancel',()=>{clear();cancel();});
       const clearStale=()=>{
-        if(sequence!==undefined&&!this.controller.isEvidencePreviewCurrent(evidenceRole,sequence))clear();
+        if(sequence!==undefined&&!this.controller.isEvidencePreviewCurrent(evidenceRole,sequence,generationOwner))clear();
       };
       return {message,rows,clearStale,clearDraft:()=>{if(draft)clear();}};
     };
@@ -200,7 +206,9 @@ export class SearchView extends ItemView {
     render(); input.focus();
   }
   private cleanup(): void {
-    this.disposed = true; this.densePanel?.dispose(); this.densePanel=undefined; this.unsubscribe?.(); this.unsubscribe = undefined; this.controller.cancelRerank(); this.controller.cancelGeneration();
+    this.disposed = true; this.densePanel?.dispose(); this.densePanel=undefined; this.unsubscribe?.(); this.unsubscribe = undefined; this.controller.cancelRerank();
+    const owner=this.generationOwner;this.generationOwner=undefined;
+    if(owner)this.controller.closeGenerationViewOwner(owner);
     if (this.timer !== undefined) this.contentEl.ownerDocument.defaultView!.clearInterval(this.timer);
     this.timer = undefined;
     for(const token of this.contentEl.querySelectorAll<HTMLInputElement>('input[type=password]'))token.value='';

@@ -124,7 +124,7 @@ test('generation endpoint denial, authorization, rate limit, abort and no fallba
   },(req,res)=>{req.resume();calls++;if(calls===1)reply(res,{},403);else if(calls===2)reply(res,{},429);else received();});
 });
 
-import {SearchController,uiRequest} from '../plugin/src/search/controller';
+import {EVIDENCE_PREVIEW_TTL_MS,SearchController,uiRequest} from '../plugin/src/search/controller';
 import type {SearchResponse} from '../plugin/src/standalone/contracts';
 test('generation controller uses independent roles, one-shot preview, no lexical mutation, revoke on lifecycle',async()=>{
   let calls=0;
@@ -161,6 +161,118 @@ test('generation controller uses independent roles, one-shot preview, no lexical
     assert.equal(calls,1);
     controller.dispose();
   },(req,res)=>{calls++;req.resume();reply(res,good());});
+});
+
+test('06H.2-A2b2b2: search preview binds one exact host credential and denies stale, foreign, cancelled, changed and reentrant dispatch',async t=>{
+  const requests:string[]=[];
+  await fixture(async cfg=>{
+    const response:SearchResponse={protocolVersion:2,requestId:'ui',requestedMode:'lexical',
+      executedMode:'lexical',status:'ok',indexGenerationId:hash('generation'),hits,
+      capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0};
+    let onConfig=()=>{},onScope=()=>{};
+    const port={config:()=>{onConfig();return cfg;},scopeId:()=>{onScope();return scopeId;},verify:async(hit:EvidenceHit)=>{
+      verifySpan(hit,bytes[hits.findIndex(candidate=>candidate.sourceId===hit.sourceId)]!);
+    }};
+    const make=()=>{
+      const controller=new SearchController(async()=>{},undefined,undefined,undefined,port);
+      controller.attach({search:async()=>response,status:()=>({status:'ready' as const,generationId:hash('generation'),
+        sources:2,records:2,busy:false,error:null,maintenanceWarning:null}),cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+      return controller;
+    };
+    const controller=make(), foreign=make();
+    try {
+      await controller.search(uiRequest(input.query,2));
+      await foreign.search(uiRequest(input.query,2));
+
+      const sameOld=controller.prepareGeneration('same-token');
+      const sameNew=controller.prepareGeneration('same-token');
+      assert.notDeepEqual(sameOld.credentialStamp,sameNew.credentialStamp);
+      await assert.rejects(controller.generationConfirmed(sameOld,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      await assert.rejects(controller.generationConfirmed(sameNew,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      const differentOld=controller.prepareGeneration('different-old-token');
+      const differentNew=controller.prepareGeneration('different-new-token');
+      assert.notDeepEqual(differentOld.credentialStamp,differentNew.credentialStamp);
+      await assert.rejects(controller.generationConfirmed(differentOld,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      await assert.rejects(controller.generationConfirmed(differentNew,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      const approved=controller.prepareGeneration('approved-token');
+      assert.deepEqual(Object.keys(approved.credentialStamp ?? {}).sort(),['epoch','hostId']);
+      assert.equal(JSON.stringify(approved).includes('approved-token'),false);
+      const foreignPreview=foreign.prepareGeneration('foreign-token');
+      await assert.rejects(foreign.generationConfirmed(approved,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      assert.equal(foreign.isEvidencePreviewCurrent('generation',foreignPreview.sequence),true);
+      foreign.cancelGeneration();
+      await assert.rejects(foreign.generationConfirmed(foreignPreview,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      assert.equal(requests.length,0);
+      await controller.generationConfirmed(approved,'synthetic');
+      assert.deepEqual(requests,['Bearer approved-token']);
+
+      const cancelled=controller.prepareGeneration('cancelled-token');
+      controller.cancelGeneration();
+      await assert.rejects(controller.generationConfirmed(cancelled,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      const changed=controller.prepareGeneration('changed-token');
+      cfg.identity.revision='changed';
+      assert.equal(controller.isEvidencePreviewCurrent('generation',changed.sequence),false);
+      await assert.rejects(controller.generationConfirmed(changed,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      cfg.identity.revision='fixture-v1';
+      await controller.search(uiRequest(input.query,2));
+      const sourceChanged=controller.prepareGeneration('source-changed-token');
+      controller.invalidateSource([]);
+      await assert.rejects(controller.generationConfirmed(sourceChanged,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      await controller.search(uiRequest(input.query,2));
+
+      const expiring=controller.prepareGeneration('expired-token');
+      const wall=Date.now(),monotonic=performance.now(),boot=os.uptime();
+      t.mock.method(Date,'now',()=>wall+EVIDENCE_PREVIEW_TTL_MS);
+      t.mock.method(performance,'now',()=>monotonic+EVIDENCE_PREVIEW_TTL_MS);
+      t.mock.method(os,'uptime',()=>boot+EVIDENCE_PREVIEW_TTL_MS/1000);
+      assert.equal(controller.isEvidencePreviewCurrent('generation',expiring.sequence),false);
+      await assert.rejects(controller.generationConfirmed(expiring,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      t.mock.restoreAll();
+
+      const reentrant=controller.prepareGeneration('reentrant-token');
+      const unsubscribe=controller.subscribeEvidence(()=>{
+        if(controller.evidenceOperationStatus('generation').phase==='busy')controller.cancelGeneration();
+      });
+      await controller.generationConfirmed(reentrant,'synthetic');
+      unsubscribe();
+      assert.equal(requests.length,1);
+
+      const polling=controller.prepareGeneration('polling-token');
+      const nested:Promise<void>[]=[];
+      let polls=0;
+      onConfig=()=>{
+        polls++;
+        assert.equal(controller.isEvidencePreviewCurrent('generation',polling.sequence),false);
+        assert.throws(()=>controller.prepareGeneration('nested-token'),{message:'BUSY'});
+        nested.push(assert.rejects(controller.generationConfirmed(polling,'synthetic'),{message:'BUSY'}));
+      };
+      assert.equal(controller.isEvidencePreviewCurrent('generation',polling.sequence),true);
+      onConfig=()=>{};
+      await Promise.all(nested);assert.ok(polls>0);
+      controller.cancelGeneration();
+      const drifting=controller.prepareGeneration('drift-token');
+      onScope=()=>{cfg.identity.revision='drifted';onScope=()=>{};};
+      await assert.rejects(controller.generationConfirmed(drifting,'synthetic'),{message:'CANCELLED'});
+      cfg.identity.revision='fixture-v1';
+      const preflight=controller.prepareGeneration('preflight-token');
+      onConfig=()=>{onConfig=()=>{};controller.cancelGeneration();};
+      await assert.rejects(controller.generationConfirmed(preflight,'synthetic'),{message:'CANCELLED'});
+      assert.equal(requests.length,1);
+
+      const viewA=controller.createGenerationViewOwner(),viewB=controller.createGenerationViewOwner();
+      const viewPreview=controller.prepareGeneration('view-a-token',viewA);
+      assert.throws(()=>controller.prepareGeneration('view-b-token',viewB),{message:'BUSY'});
+      await assert.rejects(controller.generationConfirmed(viewPreview,'synthetic',viewB),{message:'DISCLOSURE_DENIED'});
+      controller.cancelGeneration(viewB);
+      controller.closeGenerationViewOwner(viewB);
+      assert.equal(controller.isEvidencePreviewCurrent('generation',viewPreview.sequence,viewA),true);
+      controller.closeGenerationViewOwner(viewA);
+      await assert.rejects(controller.generationConfirmed(viewPreview,'synthetic',viewA),{message:'DISCLOSURE_DENIED'});
+      assert.equal(requests.length,1);
+    } finally { controller.dispose();foreign.dispose(); }
+  },(req,res)=>{
+    requests.push(String(req.headers.authorization));req.resume();reply(res,good());
+  });
 });
 
 test('B-R2-ERR-01: shared generation transport preserves timeout on late socket error',async t=>{
