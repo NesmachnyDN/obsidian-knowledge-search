@@ -35,7 +35,7 @@ async function watchdog<T>(work:Promise<T>):Promise<T>{
   finally{clearTimeout(timer);}
 }
 function fixture(){
-  let reads=0,sends=0,verifies=0,revokes=0,controls=0;
+  let reads=0,sends=0,verifies=0,revokes=0,controls=0,now=Date.now();
   const dispatched:string[]=[];
   const host={
     prepare:async(input:DenseRequest,fence?:MachineFence):Promise<DensePreview>=>{
@@ -44,16 +44,16 @@ function fixture(){
     },
     confirm:async()=>{sends++;return structuredClone(result);},
     invalidate:()=>{revokes++;},
-    verifyMachineResult:async()=>{verifies++;return ()=>true;},
+    verifyMachineResult:async(_input:unknown,_fence:unknown,_result:unknown,_signal:AbortSignal)=>{verifies++;return ()=>true;},
   };
   let c:SearchController;
   const navigation=deferred<void>();
   const ui=new DenseUiController({host:()=>host,sharedFence:()=>c?.sharedAuthorityTransition()??false,
     revokeNavigation:()=>{},navigate:async()=>{}});
-  const machine=new DenseMachine(ui,{host:()=>host,preference:()=>config});
+  const machine=new DenseMachine(ui,{host:()=>host,preference:()=>config},()=>now);
   // Exact production shared hook: both owners commit before either observer channel.
   c=new SearchController(()=>navigation.promise,undefined,undefined,undefined,undefined,
-    ()=>ui.authority.revoke(()=>{machine.invalidate();ui.invalidate();}));
+    ()=>ui.authority.revoke(()=>{try{machine.invalidate(false);}finally{ui.invalidate();}}));
   const state=():EngineState=>({status:'ready',generationId,sources:1,records:1,busy:false,error:null,maintenanceWarning:null});
   const engine={search:async(r:{query:string})=>{dispatched.push(r.query);return response(r.query);},
     status:state,cancel:()=>{controls++;return true;},resume:()=>{controls++;},rebuild:()=>{controls++;}};
@@ -62,6 +62,7 @@ function fixture(){
   const request=(name:string,id:string)=>machine.request({apiVersion:1,operation:name,operationId:id});
   const stage=async()=>{const r=await machine.request(submit());if(!r.ok||!r.value||!('operationId' in r.value))throw Error('stage');return r.value.operationId;};
   return {c,ui,machine,host,owner,engine,navigation,stage,request,dispatched,
+    advance:(ms:number)=>{now+=ms;},
     counts:()=>({reads,sends,verifies,revokes,controls}),
     close:()=>{c.dispose();machine.dispose();ui.dispose();}};
 }
@@ -295,4 +296,125 @@ test('LIFE-09: failed trusted revocation at result publication does not strand a
     assert.equal((await watchdog(next)).ok,true);
     assert.equal(dispatches,2);assert.equal(c.snapshot().phase,'results');
   }finally{c.dispose();}
+});
+
+// B-R2-SYS-D8: completion owns its machine/UI retirement, but never a source
+// event, empty invalidation, terminal seal or observer reentry nested within it.
+for(const boundary of ['host','abort','observer'] as const)
+for(const command of ['result','cancel'] as const)
+for(const sourceFails of [false,true])
+test(`SYS-D8 ${command}: nested source event at ${boundary}, failure=${sourceFails}`,async()=>{
+  const f=fixture();let fault=sourceFails,sourceCalls=0,callbacks=0;
+  let unsubscribe=()=>{};
+  try{
+    const id=await f.stage();await f.machine.review(f.owner);
+    await f.ui.confirm(f.owner,'fixture-preview','synthetic','fixture-token');
+    const source=()=>{
+      callbacks++;
+      assert.equal(f.machine.owns(f.owner),false);
+      assert.equal(f.ui.occupied(),false);
+      f.c.invalidateSource([()=>{sourceCalls++;if(fault)throw Error('synthetic source fault');}]);
+    };
+    if(boundary==='host'){
+      const invalidate=f.host.invalidate;let armed=true;
+      f.host.invalidate=()=>{invalidate();if(armed){armed=false;source();}};
+    }else if(boundary==='abort'){
+      const {slot}=f.machine as unknown as {slot:{abort:AbortController}};
+      slot.abort.signal.addEventListener('abort',source,{once:true});
+    }else{
+      let armed=true;
+      unsubscribe=f.machine.subscribe(()=>{if(armed){armed=false;source();}});
+    }
+    assert.deepEqual(await watchdog(f.request(command,id)),err(command==='result'?'SOURCE_STALE':'INVALID_OPERATION'));
+    assert.equal(callbacks,1);assert.equal(sourceCalls,1);
+    assert.deepEqual(await f.request('result',id),err('INVALID_OPERATION'));
+    assert.equal(f.ui.occupied(),false);assert.equal(f.machine.pending(),false);
+    unsubscribe();
+    if(sourceFails){
+      assert.equal(f.c.sharedAuthorityTransition(),true);
+      assert.deepEqual(await f.machine.request(submit()),err('NOT_READY'));
+      // Ordinary shared retirement cannot erase source-specific obligations.
+      f.c.invalidate();assert.equal(f.c.sharedAuthorityTransition(),true);
+    }
+    fault=false;
+    assert.equal(f.c.control('rebuild').ok,true);
+    assert.equal(f.c.sharedAuthorityTransition(),false);
+    const fresh=await f.stage();assert.notEqual(fresh,id);
+    await f.machine.review(f.owner);
+    await f.ui.confirm(f.owner,'fixture-preview','synthetic','fixture-token');
+    assert.deepEqual(await watchdog(f.request('result',fresh)),{apiVersion:1,ok:true,value:result});
+    assert.deepEqual(await f.request('result',fresh),err('INVALID_OPERATION'));
+  }finally{fault=false;unsubscribe();f.close();}
+});
+
+for(const action of ['ui','machine','terminal','source'] as const)
+test(`SYS-D8 pending submit cannot inherit retirement superseded by ${action}`,async()=>{
+  const f=fixture();
+  try{
+    const old=await f.stage();f.advance(300001);
+    const {slot}=f.machine as unknown as {slot:{abort:AbortController}};
+    slot.abort.signal.addEventListener('abort',()=>{
+      if(action==='ui')f.ui.invalidate();
+      if(action==='machine'){
+        // Physical retirement is still pinned; independent empty invalidation
+        // must supersede completion even if its failed retry is caught.
+        try{f.machine.invalidate();}catch{/* same owner remains pinned */}
+      }
+      if(action==='terminal')f.ui.authority.sealTerminal();
+      if(action==='source')f.c.invalidateSource([()=>{}]);
+    },{once:true});
+    assert.deepEqual(await f.machine.request(submit()),err('INVALID_OPERATION'));
+    assert.equal(f.machine.pending(),false);
+    assert.equal((await f.request('status',old)).ok,false);
+    if(action==='terminal')assert.deepEqual(await f.machine.request(submit()),err('NOT_READY'));
+    else{
+      assert.equal(f.c.control('rebuild').ok,true);
+      assert.notEqual(await f.stage(),old);
+    }
+  }finally{f.close();}
+});
+
+test('SYS-D8 intended retirement permits result, cancel and expired-slot replacement without stale bearer reuse',async()=>{
+  const f=fixture();
+  try{
+    const expired=await f.stage();f.advance(300001);
+    const next=await f.stage();assert.notEqual(next,expired);
+    assert.deepEqual(await f.request('cancel',next),{apiVersion:1,ok:true,value:null});
+    assert.deepEqual(await f.request('cancel',next),err('INVALID_OPERATION'));
+    const complete=await f.stage();await f.machine.review(f.owner);
+    await f.ui.confirm(f.owner,'fixture-preview','synthetic','fixture-token');
+    // Evidence-only cancellation must not revoke independent dense authority.
+    f.c.cancelGeneration();f.c.cancelRerank();
+    assert.deepEqual(await f.request('result',complete),{apiVersion:1,ok:true,value:result});
+    const cancelled=await f.stage();await f.machine.review(f.owner);
+    assert.deepEqual(await f.request('cancel',cancelled),{apiVersion:1,ok:true,value:null});
+  }finally{f.close();}
+});
+
+for(const action of ['ui','machine','terminal'] as const)
+test(`SYS-D8 result rejects independent ${action} retirement before intended UI cancel`,async()=>{
+  const f=fixture();
+  try{
+    const id=await f.stage();await f.machine.review(f.owner);
+    await f.ui.confirm(f.owner,'fixture-preview','synthetic','fixture-token');
+    const {slot}=f.machine as unknown as {slot:{abort:AbortController}};
+    slot.abort.signal.addEventListener('abort',()=>{
+      if(action==='ui')f.ui.invalidate();
+      if(action==='machine'){try{f.machine.invalidate();}catch{/* pinned owner */}}
+      if(action==='terminal')f.ui.authority.sealTerminal();
+    },{once:true});
+    assert.deepEqual(await f.request('result',id),err('SOURCE_STALE'));
+  }finally{f.close();}
+});
+
+test('SYS-D8 final source-verification callback cannot reenter and publish its retired result',async()=>{
+  const f=fixture();
+  try{
+    const id=await f.stage();await f.machine.review(f.owner);
+    await f.ui.confirm(f.owner,'fixture-preview','synthetic','fixture-token');
+    f.host.verifyMachineResult=async()=>()=>{f.c.invalidateSource([()=>{}]);return true;};
+    assert.deepEqual(await f.request('result',id),err('SOURCE_STALE'));
+    assert.deepEqual(await f.request('result',id),err('INVALID_OPERATION'));
+    assert.notEqual(await f.stage(),id);
+  }finally{f.close();}
 });

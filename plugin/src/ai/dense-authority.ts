@@ -1,5 +1,8 @@
 type Listener = () => void;
 type Channel = Set<Listener>;
+/** Internal completion witness. Only explicitly owned retirement steps may
+ * advance it; an intervening independent revoke permanently supersedes it. */
+export type RetirementWitness = {epoch:number};
 
 /** Shared synchronous authority/publication boundary for dense UI and D8.
  * Authority commits are batched before either observer channel is delivered.
@@ -39,7 +42,8 @@ export class DenseAuthority {
     try { return action(); }
     finally { this.depth--; this.drain(); }
   }
-  revoke<T>(action: () => T): T {
+  revoke<T>(action: () => T, witness?: RetirementWitness): T {
+    if(witness?.epoch===this.revision)witness.epoch++;
     this.revocations++; this.revision++;
     try { return this.batch(action); }
     finally { this.revocations--; }

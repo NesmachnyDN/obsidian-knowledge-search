@@ -3,7 +3,7 @@ import type { ApiDenseHost, DensePreview, DenseRequest, MachineFence } from './d
 import type { DenseIndexResult } from './dense-index-manager';
 import type { ApiRetrievalResult } from './dense-retrieval';
 import type { EvidenceHit } from '../standalone/contracts';
-import { DenseAuthority } from './dense-authority';
+import { DenseAuthority, type RetirementWitness } from './dense-authority';
 
 type Result = DenseIndexResult | ApiRetrievalResult;
 type Classification = 'synthetic' | 'public';
@@ -72,7 +72,7 @@ export class DenseUiController {
     this.authority.batch(()=>{try{this.machineChanged?.();}finally{this.authority.publish(this.listeners);}});
   }
   private clearTimer():void {if(this.timer!==undefined)clearTimeout(this.timer);this.timer=undefined;}
-  invalidate():void {
+  invalidate(witness?:RetirementWitness):void {
     // Even an empty shared invalidation supersedes an interrupted prepare.
     ++this.revision;
     this.authority.revoke(()=>{
@@ -93,9 +93,9 @@ export class DenseUiController {
         } finally {this.emit();}
         this.retirement=undefined;
       } finally {retiring.running=false;}
-    });
+    },witness);
   }
-  cancel(owner:symbol):void {if(this.owner===owner)this.invalidate();}
+  cancel(owner:symbol,witness?:RetirementWitness):void {if(this.owner===owner)this.invalidate(witness);}
   dispose():void {
     if(this.disposed)return;
     this.disposed=true;

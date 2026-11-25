@@ -44,8 +44,11 @@ export class DenseMachine {
   }
   private emit():void{this.ui.authority.publish(this.listeners);}
   private clear(retireUi=true):number {
-    const s=this.slot;if(!s){this.ui.authority.retireMachine();return this.ui.authority.epoch();}
-    return this.ui.authority.revoke(()=>{
+    // Reserve before any abort, host, navigation or observer callback. Pass
+    // this witness only to our own UI retirement, never to nested callbacks.
+    const witness={epoch:this.ui.authority.epoch()},s=this.slot;
+    this.ui.authority.revoke(()=>{
+      if(!s){this.ui.authority.retireMachine();return;}
       this.slot=undefined;
       if(this.timer!==undefined)clearTimeout(this.timer);
       this.timer=undefined;
@@ -53,9 +56,13 @@ export class DenseMachine {
       // signaling. The actual verification drain still prevents new submit.
       s.revokeRead?.();
       try {this.ui.authority.retireMachine(()=>s.abort.abort());}
-      finally {try {if(retireUi&&s.owner)this.ui.cancel(s.owner);}finally{this.emit();}}
-      return this.ui.authority.epoch();
-    });
+      finally {try {if(retireUi&&s.owner)this.ui.cancel(s.owner,witness);}finally{this.emit();}}
+    },witness);
+    return witness.epoch;
+  }
+  private retiredCurrent(epoch:number):boolean {
+    return !this.disposed&&!this.ui.isDisposed()&&!this.ui.authority.admissionClosed()
+      &&this.ui.authority.epoch()===epoch;
   }
   invalidate(retireUi=true):void {this.clear(retireUi);}
   dispose():void {
@@ -125,7 +132,7 @@ export class DenseMachine {
         if(this.ui.authority.admissionClosed())return fail('NOT_READY');
         if(this.slot&&!this.current(this.slot)){
           const retired=this.clear();
-          if(this.ui.authority.epoch()!==retired)return fail('INVALID_OPERATION');
+          if(!this.retiredCurrent(retired))return fail('INVALID_OPERATION');
         }
         if(this.disposed||this.ui.isDisposed()||this.ui.authority.admissionClosed())return fail('NOT_READY');
         if(this.slot||this.reading||this.draining||this.ui.occupied())return fail('BUSY');
@@ -144,7 +151,10 @@ export class DenseMachine {
       if(!this.ui.authority.ownershipVisible()||!s||cmd.operationId!==s.id)return fail('INVALID_OPERATION');
       if(!this.current(s)){this.clear();return fail('INVALID_OPERATION');}
       if(cmd.operation==='status')return ok(this.status(s));
-      if(cmd.operation==='cancel'){this.clear();return ok(null);}
+      if(cmd.operation==='cancel'){
+        const retired=this.clear();
+        return this.retiredCurrent(retired)?ok(null):fail('INVALID_OPERATION');
+      }
       if(this.ui.authority.admissionClosed())return fail('NOT_READY');
       if(this.reading||this.draining)return fail('BUSY');
       if(!s.owner)return fail('NOT_READY');
@@ -155,12 +165,12 @@ export class DenseMachine {
       this.reading=true;
       try{
         const verified=result.status==='ok'?await this.verifyRead(s,result):()=>true;
-        if(!this.current(s)||!verified||!verified()){
+        if(!this.current(s)||!verified||!verified()||!this.current(s)){
           if(this.slot===s)this.clear();
           return fail('SOURCE_STALE');
         }
         const retired=this.clear();
-        return !this.disposed&&!this.ui.isDisposed()&&this.ui.authority.epoch()===retired?ok(result):fail('SOURCE_STALE');
+        return this.retiredCurrent(retired)?ok(result):fail('SOURCE_STALE');
       }catch{
         if(this.slot===s)this.clear();
         return fail('SOURCE_STALE');
