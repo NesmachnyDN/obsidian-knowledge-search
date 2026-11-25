@@ -89,15 +89,15 @@ test('06H.2-A2b1: generation preview and chat are mutually exclusive without con
   const gate=deferred<ChatScopeLease>();
   try{
     c.attach(engine(async()=>gate.promise));await c.search(uiRequest('synthetic',1));
-    const preview=c.prepareGeneration();
+    const preview=c.prepareGeneration('fixture');
     assert.deepEqual(await c.startScopedChatRetrieval(selector,request).result,error('BUSY'));
     assert.equal(c.snapshot().response?.hits.length,1);
     c.cancelGeneration();
     const turn=c.startScopedChatRetrieval(selector,request);
-    assert.throws(()=>c.prepareGeneration(),{message:'BUSY'});
-    await assert.rejects(c.generationConfirmed(preview,'synthetic','unused'),{message:'BUSY'});
+    assert.throws(()=>c.prepareGeneration('fixture'),{message:'BUSY'});
+    await assert.rejects(c.generationConfirmed(preview,'synthetic'),{message:'BUSY'});
     gate.resolve(lease());assert.equal((await turn.result).ok,true);
-    assert.equal(c.prepareGeneration().role,'generation');
+    assert.equal(c.prepareGeneration('fixture').role,'generation');
   }finally{gate.resolve(lease());c.dispose();}
 });
 
@@ -211,7 +211,7 @@ test('06H.2-A2b2a: retained owner keeps shared admission and detached evidence a
     assert.deepEqual(await c.readRetainedChatTurn(second,first.owner),error('SUPERSEDED'));
     assert.deepEqual(await c.readRetainedChatTurn(session,structuredClone(first.owner)),error('SUPERSEDED'));
     c.cancelRetainedChatTurn(second,first.owner);
-    assert.throws(()=>c.prepareGeneration(),{message:'BUSY'});
+    assert.throws(()=>c.prepareGeneration('fixture'),{message:'BUSY'});
     const view=await c.readRetainedChatTurn(session,first.owner);
     assert.equal(view.ok,true);
     if(!view.ok)throw Error('expected verified view');
@@ -343,7 +343,7 @@ test('06H.2-A2b2b1: credential epochs are host-local, replace same input and rev
     assert.equal(authority.current(turn.owner,binding,d),true);
     assert.equal(JSON.stringify(authority).includes('different-token'),false);
     assert.equal(JSON.stringify(c.snapshot()).includes('different-token'),false);
-    assert.throws(()=>c.prepareGeneration(),{message:'BUSY'});
+    assert.throws(()=>c.prepareGeneration('fixture'),{message:'BUSY'});
     c.cancelRetainedChatTurn(session,turn.owner);
     assert.equal(authority.current(turn.owner,binding,d),false);
     await assert.rejects(c.bindRetainedGenerationCredential(session,turn.owner,'synthetic-token'),{message:'CANCELLED'});

@@ -248,7 +248,7 @@ test('LIFE-09: failed trusted shared hook settles latest queued search, denies a
     assert.equal(dispatches,0);assert.equal(c.sharedAuthorityTransition(),true);
     assert.equal(c.snapshot().phase,'error');assert.deepEqual(phases,['error']);
     assert.equal((await c.open(0)).ok,false);
-    assert.throws(()=>c.prepareGeneration(),{message:'NOT_READY'});
+    assert.throws(()=>c.prepareGeneration('fixture'),{message:'NOT_READY'});
     fault=false;
     assert.equal((await watchdog(c.search(uiRequest('recovered',1)))).ok,true);
     assert.equal(dispatches,1);assert.equal(c.sharedAuthorityTransition(),false);

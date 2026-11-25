@@ -45,6 +45,10 @@ export class GenerationCredentialAuthority {
       && active.attempt.configuration===configuration && active.attempt.stamp.hostId===stamp.hostId
       && active.attempt.stamp.epoch===stamp.epoch;
   }
+  secret(owner:object,configuration:string,stamp:GenerationCredentialStamp):string {
+    if (!this.current(owner,configuration,stamp)) throw new ProviderFailure('CANCELLED');
+    return this.#active!.token!;
+  }
   revoke(owner:object):void {
     if (this.#active?.attempt.owner!==owner) return;
     try { this.advance(); } catch { /* terminal-only overflow, secret already cleared */ }
