@@ -5,6 +5,7 @@ import {
 } from './contracts';
 import { terms } from './markdown';
 import { containsLocator, verifyOriginalRange } from './selection-range';
+import { freezeScope, parseScopeSelector, resolveScope, type ScopedSearch, type ScopeSnapshot } from './chat-scope';
 import { metadataAnchor } from './metadata';
 import { verifySpan } from '../search/navigation';
 import type { MarkdownParser } from './worker';
@@ -21,6 +22,13 @@ export type SelectedCorpus = {
   rootId: string; lexicalGenerationId: string; evidence: readonly EvidenceHit[];
   current(): boolean; verify(hit: EvidenceHit): Promise<void>;
   metadataPaths(request: SearchRequest, lexicalGenerationId: string, selectedPaths: readonly string[]): readonly string[];
+};
+/** A host-local retrieval lease. It carries no generation/disclosure authority. */
+export type ChatScopeLease = {
+  snapshot: Readonly<ScopeSnapshot>;
+  current():boolean;
+  verify():Promise<void>;
+  search(request:ScopedSearch):Promise<SearchResponse>;
 };
 // Query-driven bounded audit; no recurring timer or hidden background scanner.
 // lstat-based hints detect normal misses immediately. Unchanged hints are never
@@ -294,6 +302,82 @@ export class StandaloneEngine {
     return {rootId:gen!.rootId,lexicalGenerationId:gen!.generationId,
       evidence:structuredClone(evidence),current,verify,metadataPaths};
   }
+  /** Capture explicit membership on the same authenticated lexical generation. */
+  async captureChatScope(input:unknown,signal:AbortSignal):Promise<ChatScopeLease> {
+    const selector=parseScopeSelector(input);
+    const gen=this.generation, revision=this.revision;
+    let retired=false, searching=false, verifying=false;
+    const current=():boolean=>{
+      if(!retired&&(signal.aborted||this.stopped||this.paused||this.revision!==revision
+        ||gen===null||this.generation!==gen||this.state.status!=='ready'||this.work||this.store.isPublicationUncertain()))retired=true;
+      return !retired;
+    };
+    const check=():void=>{if(!current())throw new StandaloneError(signal.aborted?'CANCELLED':'SCOPE_CHANGED');};
+    const retire=(reason:string):never=>{retired=true;throw new StandaloneError(reason);};
+    check();
+    const {sources,coverage}=resolveScope(selector,gen!.documents);
+    const snapshot=freezeScope({selector,rootId:gen!.rootId,generationId:gen!.generationId,sources,coverage});
+    const range=selector.mode==='selected'&&selector.kind==='editor-selection'?selector.range:undefined;
+    const properties=selector.mode==='selected'&&selector.kind==='properties'?selector:undefined;
+    // A previously excluded source can enter a bulk selector after an edit.
+    // Authenticate the complete bounded decision universe, not only returned IDs.
+    const decisionDocs=selector.mode==='vault-wide'||properties?gen!.documents
+      :selector.kind==='folder'?gen!.documents.filter(doc=>doc.sourceId.startsWith(selector.path+'/')):sources.map(source=>({sourceId:source.sourceId,sha256:source.sourceSha256}));
+    const membership=async():Promise<void>=>{
+      check();
+      const live=await this.provider.list();check();
+      if(live.length!==gen!.documents.length||live.some((path,i)=>path!==gen!.documents[i]?.sourceId))
+        retire('SCOPE_CHANGED');
+    };
+    const versions=new Map(sources.map(source=>[source.sourceId,source.sourceSha256]));
+    const verify=async(hits:readonly EvidenceHit[]=[]):Promise<void>=>{
+      try{
+        await membership();check();
+        for(const doc of decisionDocs){
+          check();
+          const bytes=await this.provider.read(doc.sourceId);check();
+          if(hash(bytes)!==doc.sha256)retire('SCOPE_CHANGED');
+          if(range)verifyOriginalRange(range,bytes);
+          for(const hit of hits)if(hit.sourceId===doc.sourceId)verifySpan(hit,bytes);
+        }
+        await membership();check();
+      }catch(error){
+        if(signal.aborted)retire('CANCELLED');
+        if(error instanceof StandaloneError&&error.code==='INVALID_REQUEST')retire('SCOPE_INVALID');
+        retire('SCOPE_CHANGED');
+      }
+    };
+    const search=async(input:ScopedSearch):Promise<SearchResponse>=>{
+      check();
+      if(searching||verifying)throw new StandaloneError('BUSY');
+      // Copy only the query parameters; the lease itself supplies every scope field.
+      if(!input||typeof input.query!=='string'||!input.query.trim()
+        ||Object.keys(input).some(k=>!['requestId','query','limit','matchMode'].includes(k)))
+        throw new StandaloneError('SCOPE_INVALID');
+      const request:SearchRequest={protocolVersion:PROTOCOL,requestId:input.requestId,query:input.query,
+        requestedMode:'lexical',limit:input.limit,matchMode:input.matchMode,scope:sources.map(s=>s.sourceId),
+        ...(range?{range}:{}),...(properties?{predicates:properties.predicates,metadata:properties.metadata}:{})};
+      validateRequest(request);
+      searching=true;
+      try{
+        await verify();check();
+        const response=await this.search(request);check();
+        if(response.status!=='ok'||response.executedMode!=='lexical'||response.indexGenerationId!==snapshot.generationId
+          ||response.hits.some(hit=>!versions.has(hit.sourceId)||versions.get(hit.sourceId)!==hit.sourceSha256
+            ||(range&&(hit.sourceLocators.length!==1||!containsLocator(range,hit.sourceLocators[0]!)))))
+          retire('SCOPE_CHANGED');
+        await verify(response.hits);check();
+        return structuredClone(response);
+      }finally{searching=false;}
+    };
+    await verify();check();
+    return {snapshot,current,search,verify:async()=>{
+      check();
+      if(searching||verifying)throw new StandaloneError('BUSY');
+      verifying=true;
+      try{await verify();check();}finally{verifying=false;}
+    }};
+  }
   async search(input: unknown): Promise<SearchResponse> {
     validateRequest(input);
     const req: SearchRequest = input.range ? structuredClone(input) : input;
@@ -439,8 +523,9 @@ export class StandaloneEngine {
       }
       if (range) {
         // Even a zero-hit answer must authenticate the selected source before publication.
+        const currentPaths=await this.provider.list();
         verifyOriginalRange(range,await this.provider.read(range.sourceId));
-        if (stale || this.revision !== rangeRevision || this.generation !== gen)
+        if (!currentPaths.includes(range.sourceId) || stale || this.revision !== rangeRevision || this.generation !== gen)
           throw new StandaloneError('SOURCE_STALE');
       }
       // A missed event never defeats live hash suppression; queue reconciliation for recovery.
