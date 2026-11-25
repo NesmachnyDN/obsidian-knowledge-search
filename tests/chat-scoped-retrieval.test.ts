@@ -445,3 +445,33 @@ test('06H.2-A2b2b1: resolver reentry cannot bind or admit a second turn before d
     assert.equal((await c.startRetainedChatTurn(session,selector,request).result).ok,true);
   }finally{pending.resolve(null);c.dispose();}
 });
+
+test('06H.2-A2b2b1: every changed resolver configuration/scope invalidates the old epoch before commit',async()=>{
+  for(const field of ['model','revision','origin','scope','limits'] as const){
+    const cfg:ProviderConfig={state:'configured',transport:'local',origin:'http://127.0.0.1:1',
+      identity:{model:'synthetic',revision:'v1'},limits:{timeoutMs:1000,maxInputBytes:4096,maxCandidates:3,maxOutputTokens:32,maxConcurrent:1}};
+    const pending=deferred<string|null>();let scope=root,signal:AbortSignal|undefined;
+    const c=new SearchController(async()=>{},undefined,undefined,undefined,
+      {config:()=>cfg,scopeId:()=>scope,verify:async()=>{}},undefined,
+      {resolve:async(_role,_cfg,s)=>{signal=s;return pending.promise;}});
+    try{
+      c.attach(engine(async()=>lease()));
+      const session=c.openRetainedChatSession(),turn=c.startRetainedChatTurn(session,selector,request);
+      assert.equal((await turn.result).ok,true);
+      const stamp=await c.bindRetainedGenerationCredential(session,turn.owner,'previous');
+      const authority=(c as unknown as {generationCredential:import('../plugin/src/ai/generation-credential').GenerationCredentialAuthority}).generationCredential;
+      const digest=(await import('../plugin/src/ai/disclosure')).configDigest('generation',cfg);
+      const result=assert.rejects(c.resolveRetainedGenerationCredential(session,turn.owner),{message:'CANCELLED'});
+      assert.equal(authority.current(turn.owner,digest,stamp),false);
+      if(field==='model')cfg.identity.model='changed';
+      if(field==='revision')cfg.identity.revision='v2';
+      if(field==='origin')cfg.origin='http://127.0.0.1:2';
+      if(field==='scope')scope=hash('different-root');
+      if(field==='limits')cfg.limits.maxOutputTokens=64;
+      pending.resolve('late-token');await result;await flush();
+      assert.equal(signal?.aborted,true);
+      await assert.rejects(c.bindRetainedGenerationCredential(session,turn.owner,'new-token'),{message:'CANCELLED'});
+      assert.equal(authority.current(turn.owner,digest,stamp),false);
+    }finally{pending.resolve(null);c.dispose();}
+  }
+});

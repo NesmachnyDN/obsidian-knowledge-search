@@ -593,14 +593,24 @@ export class SearchController {
           if (pref?.state!=='configured') throw new ProviderFailure('NOT_READY');
           const config=pilotConfig(pref);
           const binding=configDigest('generation',config);
-          if (JSON.stringify([binding,this.generationPort?.scopeId() ?? null])!==retained.configuration)
-            throw new StandaloneError('SCOPE_CHANGED');
-          check();
+          const verifyBinding=():void=>{
+            // retained.check also checks the pinned lease, index generation,
+            // deadline and captured configuration; explicitly compare the
+            // resolver's own exact configuration/scope at its commit boundary.
+            check();
+            const current=this.generationPort?.config();
+            const scopeId=this.generationPort?.scopeId();
+            if (current?.state!=='configured' || configDigest('generation',current)!==binding
+              || JSON.stringify([binding,scopeId ?? null])!==retained.configuration)
+              throw new StandaloneError('SCOPE_CHANGED');
+            check();
+          };
+          verifyBinding();
           const attempt=this.generationCredential.begin(owner,binding);
           const resolver=this.credentialResolver;
           if (!input && !resolver) throw new ProviderFailure('NOT_READY');
           const secret=input ? input.token : await resolver!.resolve('generation',structuredClone(config),operation.abort.signal);
-          check();
+          verifyBinding();
           // The exact original attempt, not a later resolver/input, completes.
           const stamp=this.generationCredential.complete(attempt,secret);
           resolve(stamp);
