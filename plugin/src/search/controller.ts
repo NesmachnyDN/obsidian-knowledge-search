@@ -5,7 +5,8 @@ import { pilotConfig } from '../ai/loopback-rerank';
 import { bindActiveDeadline, remainingOperationMs, deadlineFailure, cancelActiveDeadline } from '../ai/active-deadline';
 import { RerankRuntimeProfiles, type RerankAdmission } from '../ai/rerank-profile';
 import { configDigest } from '../ai/disclosure';
-import { ProviderFailure, type ProviderConfig, type ProviderPreference, type ProviderFailureCode, type AiOperationStatus, type CallContext } from '../ai/contracts';
+import { GenerationCredentialAuthority, type GenerationCredentialStamp } from '../ai/generation-credential';
+import { ProviderFailure, type ProviderConfig, type ProviderPreference, type ProviderFailureCode, type AiOperationStatus, type CallContext, type CredentialResolver } from '../ai/contracts';
 import { hash, isDigest } from '../standalone/contracts';
 import type { AdvancedHealth } from '../advanced/health';
 import type { IngestionStatus } from '../advanced/manager';
@@ -81,7 +82,8 @@ const SCOPED_RETRIEVAL_TIMEOUT_MS = 30_000;
 const MAX_CHAT_SESSIONS = 4;
 type RetainedScopedTurn = { readonly session: RetainedChatSessionOwner; readonly owner: RetainedChatTurnOwner;
   lease?: ChatScopeLease; response?: SearchResponse; check?: () => void;
-  finishRead?: (value: ApiResult<RetainedScopedView>) => void };
+  finishRead?: (value: ApiResult<RetainedScopedView>) => void;
+  rejectCredential?: (error:ProviderFailure)=>void; configuration?:string; };
 type ActiveScopedRetrieval = { readonly abort: AbortController; readonly context: CallContext;
   readonly revision: number; readonly sourceRevision: number; readonly finish: (value: ApiResult<SearchResponse>) => void;
   readonly retained?: RetainedScopedTurn;
@@ -111,6 +113,7 @@ export class SearchController {
   // Object identity is host-local: a cloned or foreign session never matches.
   private readonly retainedSessions = new Set<RetainedChatSessionOwner>();
   private generationAdmissionDepth = 0;
+  private readonly generationCredential = new GenerationCredentialAuthority();
   private readonly generator = new EvidenceGenerator();
   private readonly reranker = new EvidenceReranker();
   private readonly rerankProfiles = new RerankRuntimeProfiles(()=>this.invalidateRerankProfile());
@@ -181,7 +184,8 @@ export class SearchController {
     private readonly advancedStatus?: () => AdvancedHealth,
     private readonly ingestionStatus?: () => IngestionStatus,
     private readonly rerankPort?: RerankPort, private readonly generationPort?: RerankPort,
-    private readonly revokeSharedAuthority?: () => void) {}
+    private readonly revokeSharedAuthority?: () => void,
+    private readonly credentialResolver?: CredentialResolver) {}
   attach(engine: Engine): void {
     if (this.disposed) return;
     const replaced = this.engine !== undefined && this.engine !== engine;
@@ -549,6 +553,81 @@ export class SearchController {
     const operation = this.ownedRetainedTurn(session,owner);
     if (operation) this.retireScopedRetrieval(operation,'CANCELLED');
   }
+  /** Trusted host input boundary. No provider I/O, grant, or secret is returned.
+   * A resolver is injected by the host, never selected by a turn caller. */
+  bindRetainedGenerationCredential(session:RetainedChatSessionOwner,owner:RetainedChatTurnOwner,
+    token:string):Promise<GenerationCredentialStamp> {
+    return this.bindRetainedCredential(session,owner,{token});
+  }
+  resolveRetainedGenerationCredential(session:RetainedChatSessionOwner,owner:RetainedChatTurnOwner):Promise<GenerationCredentialStamp> {
+    return this.bindRetainedCredential(session,owner);
+  }
+  clearRetainedGenerationCredential(session:RetainedChatSessionOwner,owner:RetainedChatTurnOwner):void {
+    const operation=this.ownedRetainedTurn(session,owner);
+    if (!operation) return;
+    this.generationCredential.revoke(owner);
+    // An outstanding resolver may not be replaced until physically settled.
+    if (operation.retained?.rejectCredential) this.retireScopedRetrieval(operation,'CANCELLED');
+  }
+  private bindRetainedCredential(session:RetainedChatSessionOwner,owner:RetainedChatTurnOwner,
+    input?:{token:string}):Promise<GenerationCredentialStamp> {
+    const operation=this.ownedRetainedTurn(session,owner);
+    if (!operation) return Promise.reject(new ProviderFailure('CANCELLED'));
+    if (operation.inFlight) {
+      // Replacement of an outstanding resolver is an explicit retirement,
+      // not permission to start a second resolver against the same slot.
+      if (operation.retained?.rejectCredential) this.retireScopedRetrieval(operation,'CANCELLED');
+      return Promise.reject(new ProviderFailure('BUSY'));
+    }
+    const retained=operation.retained!;
+    if (!retained.check || !retained.lease || !retained.response) return Promise.reject(new ProviderFailure('NOT_READY'));
+    operation.inFlight=true;
+    this.generationCredential.revoke(owner);
+    const result=new Promise<GenerationCredentialStamp>((resolve,reject)=>{
+      retained.rejectCredential=reject;
+      void (async()=>{
+        try {
+          const check=retained.check!;
+          check();
+          const pref=this.generationPort?.config();
+          if (pref?.state!=='configured') throw new ProviderFailure('NOT_READY');
+          const config=pilotConfig(pref);
+          const binding=configDigest('generation',config);
+          const verifyBinding=():void=>{
+            // retained.check also checks the pinned lease, index generation,
+            // deadline and captured configuration; explicitly compare the
+            // resolver's own exact configuration/scope at its commit boundary.
+            check();
+            const current=this.generationPort?.config();
+            const scopeId=this.generationPort?.scopeId();
+            if (current?.state!=='configured' || configDigest('generation',current)!==binding
+              || JSON.stringify([binding,scopeId ?? null])!==retained.configuration)
+              throw new StandaloneError('SCOPE_CHANGED');
+            check();
+          };
+          verifyBinding();
+          const attempt=this.generationCredential.begin(owner,binding);
+          const resolver=this.credentialResolver;
+          if (!input && !resolver) throw new ProviderFailure('NOT_READY');
+          const secret=input ? input.token : await resolver!.resolve('generation',structuredClone(config),operation.abort.signal);
+          verifyBinding();
+          // The exact original attempt, not a later resolver/input, completes.
+          const stamp=this.generationCredential.complete(attempt,secret);
+          resolve(stamp);
+        } catch(error) {
+          this.generationCredential.revoke(owner);
+          const deadline=deadlineFailure(operation.context);
+          if (deadline || error instanceof StandaloneError) this.retireScopedRetrieval(operation,deadline?.code ?? (error as StandaloneError).code);
+          reject(new ProviderFailure(deadline?.code ?? (error instanceof ProviderFailure ? error.code : 'CANCELLED')));
+        } finally {
+          retained.rejectCredential=undefined;
+          operation.inFlight=false;
+          this.releaseRetiredScopedRetrieval();
+        }
+      })();
+    });
+    return result;
+  }
   /** Local-only read. A non-cancellable verification occupies the same physical
    * slot until it settles; cancellation settles the caller without transferring
    * the lease or allowing a new turn to bypass the drain. */
@@ -657,6 +736,7 @@ export class SearchController {
           retained.lease=lease;
           retained.response=structuredClone(detached);
           retained.check=()=>current(lease);
+          retained.configuration=config;
         }
         finish({apiVersion:1,ok:true,value:detached});
       } catch(error) {
@@ -696,8 +776,12 @@ export class SearchController {
     const retained = operation.retained;
     if (retained) {
       const finishRead=retained.finishRead;
+      const rejectCredential=retained.rejectCredential;
+      this.generationCredential.revoke(retained.owner);
+      retained.rejectCredential=undefined;retained.configuration=undefined;
       retained.lease=undefined;retained.response=undefined;retained.check=undefined;retained.finishRead=undefined;
       finishRead?.(result);
+      rejectCredential?.(new ProviderFailure(reason.code==='TIMEOUT' ? 'TIMEOUT' : 'CANCELLED'));
     }
     operation.finish(result);
     // Logical retirement is complete; physical abort joins the shared ledger.
@@ -1038,6 +1122,7 @@ export class SearchController {
     if (this.disposed) return;
     this.disposed = true;
     this.retainedSessions.clear();
+    this.generationCredential.seal();
     this.revokeScopedRetrieval();
     this.engine = undefined;
     this.revision++;
