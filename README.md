@@ -59,3 +59,7 @@ No model weights, personal vaults, production indexes or private source document
 ## License
 
 MIT for repository code; third-party libraries and model artifacts retain their own terms.
+
+## Planned platform and installation evolution
+
+[ADR-0016](docs/adr/0016-platform-portability-managed-runtime.md) and OKS-06F target core-first installation, optional one-action managed desktop document runtime (subject to distribution policy), Windows/macOS desktop and Android/iOS/iPadOS mobile support. Linux remains the current verified target; mobile is not supported by the current desktop package. No extra software is required for core search, and no other platform or installer is claimed ready.

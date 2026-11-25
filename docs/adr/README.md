@@ -18,3 +18,5 @@ Use states Proposed, Accepted, Superseded or Rejected. Do not mark an experiment
 - [ADR-0013 — New-Vault Cloud.ru S3 sync](0013-cloudru-s3-vault-sync.md) — Proposed separate operator deployment, requires corporate security and multi-device synthetic validation.
 - [ADR-0014 — Experimental local BGE-M3 retrieval generation](0014-offline-advanced-retrieval-generation.md) — OKS-05D proposed local-only profile; independent review pending, not a substitute for ADR-0015 API providers.
 - [ADR-0015 — API-first optional AI retrieval](0015-api-first-ai-optional-dense.md) — Product-owner target direction of 2026-11-23: autonomous basic search, local/cloud provider APIs, one active dense index, separated conditional acceptance gates; repository review pending.
+
+- [ADR-0016 — Platform portability and managed optional document runtime](0016-platform-portability-managed-runtime.md) — Product-owner direction 2026-11-25: frictionless core-first onboarding, one-action optional desktop runtime, desktop/mobile adapters and distribution-policy gate; independent review pending.
