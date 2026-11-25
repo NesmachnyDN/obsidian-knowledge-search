@@ -191,3 +191,123 @@ test('06H.2-A2b1: source invalidation retires all three held boundaries before p
     }finally{gate.resolve();c.dispose();}
   }
 });
+
+test('06H.2-A2b2a: retained owner keeps shared admission and detached evidence after retrieval',async()=>{
+  const c=new SearchController(async()=>{}),other=new SearchController(async()=>{});
+  let verifies=0, captures=0;
+  try{
+    c.attach(engine(async()=>{captures++;return lease({verify:async()=>{verifies++;}});}));
+    other.attach(engine(async()=>lease()));
+    const session=c.openRetainedChatSession(),second=c.openRetainedChatSession(),foreign=other.openRetainedChatSession();
+    const first=c.startRetainedChatTurn(session,selector,request);
+    const result=await first.result;
+    assert.equal(result.ok,true);
+    if(!result.ok)throw Error('expected verified response');
+    result.value.hits[0]!.originalExcerpt='mutated detached response';
+    assert.deepEqual(await c.startRetainedChatTurn(second,selector,request).result,error('BUSY'));
+    assert.deepEqual(await c.startScopedChatRetrieval(selector,request).result,error('BUSY'));
+    assert.deepEqual(await c.startRetainedChatTurn(foreign,selector,request).result,error('SUPERSEDED'));
+    assert.deepEqual(await other.readRetainedChatTurn(session,first.owner),error('SUPERSEDED'));
+    assert.deepEqual(await c.readRetainedChatTurn(second,first.owner),error('SUPERSEDED'));
+    assert.deepEqual(await c.readRetainedChatTurn(session,structuredClone(first.owner)),error('SUPERSEDED'));
+    c.cancelRetainedChatTurn(second,first.owner);
+    assert.throws(()=>c.prepareGeneration(),{message:'BUSY'});
+    const view=await c.readRetainedChatTurn(session,first.owner);
+    assert.equal(view.ok,true);
+    if(!view.ok)throw Error('expected verified view');
+    assert.equal(view.value.response.hits[0]!.originalExcerpt,hit.originalExcerpt);
+    assert.equal(view.value.scope.coverage.eligible,1);
+    view.value.scope.sources.length=0;
+    const again=await c.readRetainedChatTurn(session,first.owner);
+    assert.equal(again.ok&&again.value.scope.sources.length,1);
+    assert.equal(verifies,3);assert.equal(captures,1);
+    c.cancelRetainedChatTurn(session,first.owner);
+    assert.deepEqual(await c.readRetainedChatTurn(session,first.owner),error('SUPERSEDED'));
+    const next=c.startRetainedChatTurn(session,selector,request);
+    c.cancelRetainedChatTurn(session,first.owner);
+    assert.equal((await next.result).ok,true);
+    c.closeRetainedChatSession(session);
+    assert.deepEqual(await c.readRetainedChatTurn(session,next.owner),error('SUPERSEDED'));
+    assert.deepEqual(await c.startRetainedChatTurn(session,selector,request).result,error('SUPERSEDED'));
+    assert.equal((await c.startRetainedChatTurn(second,selector,request).result).ok,true);
+  }finally{c.dispose();other.dispose();}
+});
+
+test('06H.2-A2b2a: owner retirement fences reentrant callbacks and retains physical verification drain',async()=>{
+  const c=new SearchController(async()=>{}),entered=deferred<void>(),gate=deferred<void>();
+  const session=c.openRetainedChatSession(),nextSession=c.openRetainedChatSession();
+  let checks=0,signal:AbortSignal|undefined;
+  let reentry:ReturnType<SearchController['startRetainedChatTurn']>|undefined;
+  try{
+    c.attach(engine(async(_selector,s)=>{
+      signal=s;
+      s.addEventListener('abort',()=>{reentry=c.startRetainedChatTurn(nextSession,selector,request);});
+      return lease({verify:async()=>{if(++checks===2){entered.resolve();await gate.promise;}}});
+    }));
+    const turn=c.startRetainedChatTurn(session,selector,request);assert.equal((await turn.result).ok,true);
+    const reading=c.readRetainedChatTurn(session,turn.owner);await entered.promise;
+    assert.deepEqual(await c.readRetainedChatTurn(session,turn.owner),error('BUSY'));
+    c.cancelRetainedChatTurn(session,turn.owner);
+    assert.deepEqual(await reading,error('CANCELLED'));
+    assert.equal(signal?.aborted,true);
+    assert.deepEqual(await reentry?.result,error('BUSY'));
+    assert.deepEqual(await c.startRetainedChatTurn(nextSession,selector,request).result,error('BUSY'));
+    assert.equal((await c.search(uiRequest('ordinary',1))).ok,true);
+    gate.resolve();await flush();
+    assert.equal((await c.startRetainedChatTurn(nextSession,selector,request).result).ok,true);
+  }finally{gate.resolve();c.dispose();}
+});
+
+test('06H.2-A2b2a: drift, elapsed deadline and terminal sealing retire retained rights',async t=>{
+  const cfg:ProviderConfig={state:'configured',transport:'local',origin:'http://127.0.0.1:1',
+    identity:{model:'synthetic',revision:'v1'},limits:{timeoutMs:1000,maxInputBytes:4096,maxCandidates:3,maxOutputTokens:32,maxConcurrent:1}};
+  let verifies=0,networkVerifies=0,signal:AbortSignal|undefined;
+  const c=new SearchController(async()=>{},undefined,undefined,undefined,
+    {config:()=>cfg,scopeId:()=>root,verify:async()=>{networkVerifies++;}});
+  try{
+    c.attach(engine(async(_selector,s)=>{signal=s;return lease({verify:async()=>{verifies++;}});}));
+    const session=c.openRetainedChatSession();
+    const first=c.startRetainedChatTurn(session,selector,request);assert.equal((await first.result).ok,true);
+    cfg.identity.revision='v2';
+    assert.deepEqual(await c.readRetainedChatTurn(session,first.owner),error('SCOPE_CHANGED'));
+    assert.equal(verifies,1);assert.equal(signal?.aborted,true);
+    const second=c.startRetainedChatTurn(session,selector,request);assert.equal((await second.result).ok,true);
+    c.invalidateSource([]);
+    assert.deepEqual(await c.readRetainedChatTurn(session,second.owner),error('SUPERSEDED'));
+    const third=c.startRetainedChatTurn(session,selector,request);assert.equal((await third.result).ok,true);
+    c.attach(engine(async()=>lease()));
+    assert.deepEqual(await c.readRetainedChatTurn(session,third.owner),error('SUPERSEDED'));
+    const start=Date.now();t.mock.method(Date,'now',()=>start);
+    const fourth=c.startRetainedChatTurn(session,selector,request);assert.equal((await fourth.result).ok,true);
+    t.mock.method(Date,'now',()=>start+31000);
+    assert.deepEqual(await c.readRetainedChatTurn(session,fourth.owner),error('TIMEOUT'));
+    t.mock.restoreAll();
+    const fifth=c.startRetainedChatTurn(session,selector,request);assert.equal((await fifth.result).ok,true);
+    c.sealTerminal();
+    assert.deepEqual(await c.readRetainedChatTurn(session,fifth.owner),error('SUPERSEDED'));
+    assert.deepEqual(await c.startRetainedChatTurn(session,selector,request).result,error('DISABLED'));
+    assert.throws(()=>c.openRetainedChatSession(),{message:'DISABLED'});
+    assert.equal(networkVerifies,0);
+  }finally{c.dispose();}
+});
+
+test('06H.2-A2b2a: sessions bounded and failed retirement blocks fresh admission',async t=>{
+  const c=new SearchController(async()=>{});let signal:AbortSignal|undefined;
+  try{
+    c.attach(engine(async(_selector,s)=>{signal=s;return lease();}));
+    const sessions=Array.from({length:4},()=>c.openRetainedChatSession());
+    assert.throws(()=>c.openRetainedChatSession(),{message:'LIMIT_EXCEEDED'});
+    c.closeRetainedChatSession(sessions[3]!);
+    const other=c.openRetainedChatSession();
+    const turn=c.startRetainedChatTurn(sessions[0]!,selector,request);assert.equal((await turn.result).ok,true);
+    const abort=t.mock.method(AbortController.prototype,'abort',()=>{throw Error('synthetic fault');});
+    c.cancelRetainedChatTurn(sessions[0]!,turn.owner);
+    assert.equal(signal?.aborted,false);
+    assert.deepEqual(await c.readRetainedChatTurn(sessions[0]!,turn.owner),error('SUPERSEDED'));
+    assert.equal((await c.startRetainedChatTurn(other,selector,request).result).ok,false);
+    abort.mock.restore();
+    assert.equal(c.control('rebuild').ok,true);
+    assert.equal(signal?.aborted,true);
+    assert.equal((await c.startRetainedChatTurn(other,selector,request).result).ok,true);
+  }finally{c.dispose();}
+});

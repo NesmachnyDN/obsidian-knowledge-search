@@ -12,7 +12,7 @@ import type { IngestionStatus } from '../advanced/manager';
 import { isRecord, StandaloneError, validateRequest, validProperty, BOUNDS,
   type SearchRequest, type SearchResponse, type Predicate, type EvidenceHit, type SearchMetadata } from '../standalone/contracts';
 import type { StandaloneEngine, ChatScopeLease } from '../standalone/engine';
-import { parseScopeSelector, type ScopeSelector, type ScopedSearch } from '../standalone/chat-scope';
+import { parseScopeSelector, type ScopeSelector, type ScopedSearch, type ScopeSnapshot } from '../standalone/chat-scope';
 import { diagnostics, safeCode, statusSnapshot, type SearchStatus } from './status';
 
 export type ApiError = { apiVersion: 1; ok: false; error: string };
@@ -71,10 +71,21 @@ export type RerankPreview = { role: EvidenceRole; sequence: number; revision: nu
 type ActiveEvidenceOperation = { abort: AbortController; context: CallContext; revision: number };
 type PendingEvidencePreview = { preview: RerankPreview; monotonicStartedMs: number; bootStartedSeconds: number };
 export type ScopedRetrievalTurn = Readonly<{ result: Promise<ApiResult<SearchResponse>>; cancel(): void }>;
+/** Opaque host identities. They only select host-owned state; they never carry
+ * a lease, grant, configuration, credential, or transport capability. */
+export type RetainedChatSessionOwner = object;
+export type RetainedChatTurnOwner = object;
+export type RetainedScopedRetrievalTurn = Readonly<{ owner: RetainedChatTurnOwner; result: Promise<ApiResult<SearchResponse>> }>;
+export type RetainedScopedView = { scope: ScopeSnapshot; response: SearchResponse };
 const SCOPED_RETRIEVAL_TIMEOUT_MS = 30_000;
+const MAX_CHAT_SESSIONS = 4;
+type RetainedScopedTurn = { readonly session: RetainedChatSessionOwner; readonly owner: RetainedChatTurnOwner;
+  lease?: ChatScopeLease; response?: SearchResponse; check?: () => void;
+  finishRead?: (value: ApiResult<RetainedScopedView>) => void };
 type ActiveScopedRetrieval = { readonly abort: AbortController; readonly context: CallContext;
   readonly revision: number; readonly sourceRevision: number; readonly finish: (value: ApiResult<SearchResponse>) => void;
-  timer?: ReturnType<typeof setTimeout>; retired: boolean };
+  readonly retained?: RetainedScopedTurn;
+  timer?: ReturnType<typeof setTimeout>; retired: boolean; inFlight: boolean };
 export type RerankState = { phase: 'running' | 'results' | 'error'; error: ProviderFailureCode | null; hits: readonly RerankedHit[] };
 export type RerankPort = {
   config(): ProviderPreference; scopeId(): string | undefined; verify(hit: EvidenceHit): Promise<void>;
@@ -97,6 +108,8 @@ export class SearchController {
   // This is deliberately not a caller-visible handle. Only this host can cancel,
   // retire, or publish a scoped retrieval turn.
   private scopedRetrieval?: ActiveScopedRetrieval;
+  // Object identity is host-local: a cloned or foreign session never matches.
+  private readonly retainedSessions = new Set<RetainedChatSessionOwner>();
   private generationAdmissionDepth = 0;
   private readonly generator = new EvidenceGenerator();
   private readonly reranker = new EvidenceReranker();
@@ -421,6 +434,7 @@ export class SearchController {
       }
     } finally {
       this.retirement.running = false;
+      this.releaseRetiredScopedRetrieval();
       if (this.disposed) {
         // Terminal owners are drained independently by the plugin's existing
         // storage, persistence and bounded operation barriers.
@@ -507,6 +521,67 @@ export class SearchController {
    * neither a lease nor generation/disclosure permission leaves the controller.
    */
   startScopedChatRetrieval(selector: unknown, input: unknown): ScopedRetrievalTurn {
+    return this.beginScopedRetrieval(selector,input);
+  }
+  openRetainedChatSession(): RetainedChatSessionOwner {
+    if (this.disposed) throw new ProviderFailure('DISABLED');
+    if (this.retainedSessions.size >= MAX_CHAT_SESSIONS) throw new ProviderFailure('LIMIT_EXCEEDED');
+    const session = Object.freeze({});
+    this.retainedSessions.add(session);
+    return session;
+  }
+  closeRetainedChatSession(session: RetainedChatSessionOwner): void {
+    if (!this.retainedSessions.delete(session)) return;
+    const operation = this.scopedRetrieval;
+    if (operation?.retained?.session === session) this.retireScopedRetrieval(operation,'CANCELLED');
+  }
+  startRetainedChatTurn(session: RetainedChatSessionOwner, selector: unknown, input: unknown): RetainedScopedRetrievalTurn {
+    const owner = Object.freeze({});
+    const turn = this.beginScopedRetrieval(selector,input,{session,owner});
+    return Object.freeze({owner,result:turn.result});
+  }
+  private ownedRetainedTurn(session: RetainedChatSessionOwner, owner: RetainedChatTurnOwner): ActiveScopedRetrieval | undefined {
+    const operation = this.scopedRetrieval;
+    return !this.disposed && this.retainedSessions.has(session) && operation && !operation.retired
+      && operation.retained?.session === session && operation.retained.owner === owner ? operation : undefined;
+  }
+  cancelRetainedChatTurn(session: RetainedChatSessionOwner, owner: RetainedChatTurnOwner): void {
+    const operation = this.ownedRetainedTurn(session,owner);
+    if (operation) this.retireScopedRetrieval(operation,'CANCELLED');
+  }
+  /** Local-only read. A non-cancellable verification occupies the same physical
+   * slot until it settles; cancellation settles the caller without transferring
+   * the lease or allowing a new turn to bypass the drain. */
+  readRetainedChatTurn(session: RetainedChatSessionOwner, owner: RetainedChatTurnOwner): Promise<ApiResult<RetainedScopedView>> {
+    const operation = this.ownedRetainedTurn(session,owner);
+    if (!operation) return Promise.resolve(failure('SUPERSEDED'));
+    if (operation.inFlight) return Promise.resolve(failure('BUSY'));
+    const retained = operation.retained!;
+    const {lease,response,check} = retained;
+    if (!lease || !response || !check) return Promise.resolve(failure('INTERNAL_FAILURE'));
+    operation.inFlight = true;
+    const result = new Promise<ApiResult<RetainedScopedView>>(resolve=>{retained.finishRead=resolve;});
+    void (async()=>{
+      try {
+        check();
+        await lease.verify();
+        check();
+        const detached = structuredClone({scope:lease.snapshot,response});
+        check();
+        retained.finishRead?.({apiVersion:1,ok:true,value:detached});
+      } catch(error) {
+        const code = deadlineFailure(operation.context)?.code ?? (error instanceof StandaloneError || error instanceof ProviderFailure
+          ? error.code : 'INTERNAL_FAILURE');
+        this.retireScopedRetrieval(operation,code);
+      } finally {
+        retained.finishRead=undefined;
+        operation.inFlight=false;
+        this.releaseRetiredScopedRetrieval();
+      }
+    })();
+    return result;
+  }
+  private beginScopedRetrieval(selector: unknown, input: unknown, retained?: RetainedScopedTurn): ScopedRetrievalTurn {
     const rejected = (code:string):ScopedRetrievalTurn =>
       Object.freeze({result:Promise.resolve(failure(code)),cancel:()=>{}});
     let request: ScopedSearch, selection: ScopeSelector;
@@ -519,6 +594,7 @@ export class SearchController {
       selection = parseScopeSelector(selector);
     } catch(error) { return rejected(error instanceof StandaloneError ? error.code : 'INVALID_REQUEST'); }
     if (this.disposed || !this.enabled) return rejected('DISABLED');
+    if (retained && !this.retainedSessions.has(retained.session)) return rejected('SUPERSEDED');
     if (this.paused) return rejected('PAUSED');
     if (this.sharedAuthorityTransition()) return rejected('SUPERSEDED');
     const engine = this.engine;
@@ -533,12 +609,14 @@ export class SearchController {
     } catch { return rejected('TIMEOUT'); }
     let finish!: ActiveScopedRetrieval['finish'];
     const result = new Promise<ApiResult<SearchResponse>>(resolve=>{finish=resolve;});
-    const operation: ActiveScopedRetrieval = {abort,context,revision:this.revision,sourceRevision:this.sourceRevision,finish,retired:false};
+    const operation: ActiveScopedRetrieval = {abort,context,revision:this.revision,sourceRevision:this.sourceRevision,finish,
+      retained,retired:false,inFlight:true};
     // Reserve before any engine or settings callback can reenter.
     this.scopedRetrieval = operation;
     const owned = ():boolean => this.scopedRetrieval === operation && !operation.retired && !this.disposed
       && this.enabled && !this.paused && this.revision === operation.revision
       && this.sourceRevision === operation.sourceRevision && this.engine === engine
+      && (!retained || this.retainedSessions.has(retained.session))
       && !this.sharedAuthorityTransition() && !abort.signal.aborted;
     const check = ():void => {
       remainingOperationMs(context);
@@ -549,11 +627,7 @@ export class SearchController {
       return JSON.stringify([pref?.state === 'configured' ? configDigest('generation',pref) : pref?.state ?? null,
         this.generationPort?.scopeId() ?? null]);
     };
-    const retire = (code:string):void => {
-      if (this.scopedRetrieval !== operation || operation.retired) return;
-      this.revokeScopedRetrieval(operation,code);
-      this.drainRetirements();
-    };
+    const retire = (code:string):void => this.retireScopedRetrieval(operation,code);
     operation.timer = setTimeout(()=>retire('TIMEOUT'),SCOPED_RETRIEVAL_TIMEOUT_MS);
     void (async()=>{
       try {
@@ -576,29 +650,56 @@ export class SearchController {
         if (response.indexGenerationId !== generation || response.requestId !== request.requestId
           || response.requestedMode !== 'lexical' || response.executedMode !== 'lexical')
           throw new StandaloneError('SCOPE_CHANGED');
-        const detached = structuredClone(response);check();
+        const detached = structuredClone(response);current(lease);
+        if (retained) {
+          // Reserve the exact verified response and lease before publishing a
+          // detached copy; the shared admission slot remains continuously owned.
+          retained.lease=lease;
+          retained.response=structuredClone(detached);
+          retained.check=()=>current(lease);
+        }
         finish({apiVersion:1,ok:true,value:detached});
       } catch(error) {
         if (!operation.retired) {
           const expired = deadlineFailure(context);
-          finish(failure(expired?.code ?? (error instanceof StandaloneError || error instanceof ProviderFailure
-            ? error.code : 'INTERNAL_FAILURE')));
+          const code=expired?.code ?? (error instanceof StandaloneError || error instanceof ProviderFailure
+            ? error.code : 'INTERNAL_FAILURE');
+          if (retained) retire(code); else finish(failure(code));
         }
       } finally {
-        clearTimeout(operation.timer);
-        // Physical slot remains reserved even after logical cancellation until
-        // the outstanding capture/search/verification actually settles.
-        if (this.scopedRetrieval === operation) this.scopedRetrieval=undefined;
+        operation.inFlight=false;
+        // A successful retained turn keeps the exact slot and elapsed deadline;
+        // legacy retrieval-only callers still release immediately on settlement.
+        if (!retained || operation.retired || !retained.response) {
+          clearTimeout(operation.timer);
+          if (this.scopedRetrieval === operation) this.scopedRetrieval=undefined;
+        }
       }
     })();
     return Object.freeze({result,cancel:()=>retire('CANCELLED')});
+  }
+  private releaseRetiredScopedRetrieval(): void {
+    const operation=this.scopedRetrieval;
+    if (operation?.retired && !operation.inFlight && !this.retirement.running) this.scopedRetrieval=undefined;
+  }
+  private retireScopedRetrieval(operation: ActiveScopedRetrieval, code: string): void {
+    if (this.scopedRetrieval !== operation || operation.retired) return;
+    this.revokeScopedRetrieval(operation,code);
+    this.drainRetirements();
   }
   private revokeScopedRetrieval(operation = this.scopedRetrieval, code = 'SUPERSEDED'): void {
     if (!operation || this.scopedRetrieval !== operation || operation.retired) return;
     operation.retired=true;
     clearTimeout(operation.timer);
     const reason=cancelActiveDeadline(operation.context);
-    operation.finish(failure(reason.code === 'TIMEOUT' ? 'TIMEOUT' : code));
+    const result = failure(reason.code === 'TIMEOUT' ? 'TIMEOUT' : code);
+    const retained = operation.retained;
+    if (retained) {
+      const finishRead=retained.finishRead;
+      retained.lease=undefined;retained.response=undefined;retained.check=undefined;retained.finishRead=undefined;
+      finishRead?.(result);
+    }
+    operation.finish(result);
     // Logical retirement is complete; physical abort joins the shared ledger.
     this.enqueueRetirement({kind:'evidence',revision:operation.revision,owner:operation.abort,
       attempted:false,run:()=>operation.abort.abort()});
@@ -936,6 +1037,7 @@ export class SearchController {
   sealTerminal(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.retainedSessions.clear();
     this.revokeScopedRetrieval();
     this.engine = undefined;
     this.revision++;
