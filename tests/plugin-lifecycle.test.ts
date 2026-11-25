@@ -1149,3 +1149,154 @@ test('B-R2-LIFE-11 pending presentation-only save preserves both independent pre
     assert.equal(c.isEvidencePreviewCurrent('reranking',rerank.sequence),true);
   }finally{gate.release();Object.assign(f.plugin,{saveData:original});await f.cleanup();}
 });
+
+test('B-R2-LIFE-12: a write-then-reject disable remains fenced until durable settings are reconciled',async()=>{
+  const f=await fixture(),c=f.plugin.searchController;
+  const original=f.plugin.saveData.bind(f.plugin);
+  const cfg={state:'configured',transport:'local',origin:'http://127.0.0.1:1',identity:{model:'fixture',revision:'v1'},
+    limits:{timeoutMs:2000,maxInputBytes:4096,maxCandidates:8,maxOutputTokens:32,maxConcurrent:1}} as const;
+  let verifies=0;
+  try {
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    await f.plugin.patchSettings(s=>{s.ai.generation=cfg;});
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    const old=c.prepareGeneration();
+    Object.assign(f.plugin,{verifyAiEvidence:async()=>{verifies++;throw Error('synthetic stop before HTTP');},
+      saveData:async(v:unknown)=>{await original(v);throw Error('synthetic ambiguous persistence');}});
+    await assert.rejects(f.plugin.patchSettings(s=>{s.ai.generation={state:'disabled'};}),/synthetic ambiguous persistence/);
+    assert.equal(f.plugin.settings.ai.generation.state,'disabled');
+    assert.equal(c.sharedAuthorityTransition(),true);
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,false);
+    assert.equal(c.isEvidencePreviewCurrent('generation',old.sequence),false);
+    await assert.rejects(c.generationConfirmed(old,'synthetic','fixture'));
+    assert.throws(()=>c.prepareGeneration());
+    Object.assign(f.plugin,{saveData:original});
+    await f.plugin.patchSettings(s=>{s.topK=s.topK===1?2:1;});
+    assert.equal(f.plugin.settings.ai.generation.state,'disabled');
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    assert.throws(()=>c.prepareGeneration());
+    assert.equal(verifies,0);
+  } finally {Object.assign(f.plugin,{saveData:original});await f.cleanup();}
+});
+
+test('B-R2-LIFE-12: recovery retires the original failed host before a replacement',async()=>{
+  const f=await fixture(),c=f.plugin.searchController;
+  const internal=f.plugin as unknown as {denseHost:ApiDenseHost};
+  let old:ApiDenseHost|undefined,fail=true,originalAttempts=0,replacementAttempts=0;
+  try {
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    old=internal.denseHost;assert.ok(old);
+    const invalidate=old.invalidate.bind(old);
+    Object.assign(old,{invalidate:(path?:string)=>{originalAttempts++;if(fail)throw Error('synthetic original owner');invalidate(path);}});
+    await assert.rejects(f.plugin.patchSettings(s=>{s.topK=2;}),/synthetic original owner/);
+    const replacement={invalidate:()=>{replacementAttempts++;}} as unknown as ApiDenseHost;
+    internal.denseHost=replacement;
+    await assert.rejects(f.plugin.patchSettings(s=>{s.topK=3;}),/synthetic original owner/);
+    assert.equal(originalAttempts,2);
+    assert.equal(replacementAttempts,0);
+    assert.equal(c.sharedAuthorityTransition(),true);
+    fail=false;
+    await f.plugin.patchSettings(s=>{s.topK=3;});
+    assert.equal(originalAttempts,3);
+    assert.equal(replacementAttempts,1);
+    assert.equal(c.sharedAuthorityTransition(),false);
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+  } finally {fail=false;if(old)internal.denseHost=old;await f.cleanup();}
+});
+
+test('B-R2-LIFE-12: a persisted runtime change with failed application requires explicit repair',async()=>{
+  const f=await fixture(),c=f.plugin.searchController;
+  const cfg={state:'configured',transport:'local',origin:'http://127.0.0.1:1',identity:{model:'fixture',revision:'v1'},
+    limits:{timeoutMs:2000,maxInputBytes:4096,maxCandidates:8,maxOutputTokens:32,maxConcurrent:1}} as const;
+  let restore=()=>{};
+  try {
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    await f.plugin.patchSettings(s=>{s.ai.generation=cfg;});
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    const old=c.prepareGeneration(),engine=f.plugin.standalone!;
+    const cancel=engine.cancel.bind(engine);
+    restore=()=>{Object.assign(engine,{cancel});};
+    Object.assign(engine,{cancel:()=>{throw Error('synthetic apply failure');}});
+    await assert.rejects(f.plugin.patchSettings(s=>{s.ai.generation={state:'disabled'};s.paused=true;}),/synthetic apply failure/);
+    assert.equal(f.plugin.settings.ai.generation.state,'disabled');
+    assert.equal(c.sharedAuthorityTransition(),true);
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,false);
+    await assert.rejects(c.generationConfirmed(old,'synthetic','fixture'));
+    restore();
+    await f.plugin.updateSettings(structuredClone(f.plugin.settings));
+    assert.equal(c.sharedAuthorityTransition(),false);
+    assert.equal(f.plugin.settings.ai.generation.state,'disabled');
+    assert.throws(()=>c.prepareGeneration());
+  } finally {restore();await f.cleanup();}
+});
+
+test('B-R2-LIFE-12: replacement plugin cannot load stale settings during an old pending write',async()=>{
+  const f=await fixture(),entered=deferredDrain(),gate=deferredDrain();
+  const original=f.plugin.saveData.bind(f.plugin);
+  const cfg={state:'configured',transport:'local',origin:'http://127.0.0.1:1',identity:{model:'fixture',revision:'v1'},
+    limits:{timeoutMs:2000,maxInputBytes:4096,maxCandidates:8,maxOutputTokens:32,maxConcurrent:1}} as const;
+  let replacement:InstanceType<typeof PluginClass>|undefined,loads=0;
+  try {
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    await f.plugin.patchSettings(s=>{s.ai.generation=cfg;});
+    Object.assign(f.plugin,{saveData:async(v:unknown)=>{entered.release();await gate.promise;await original(v);}});
+    const saving=f.plugin.patchSettings(s=>{s.ai.generation={state:'disabled'};});
+    await navigationWatchdog(entered.promise);
+    f.plugin.onunload();
+    replacement=new PluginClass(f.plugin.app,{id:'oks-synthetic-evidence'} as never);
+    Object.assign(replacement,{app:f.plugin.app,manifest:{id:'oks-synthetic-evidence'},
+      loadData:async()=>{loads++;return f.plugin.loadData();}});
+    const loading=replacement.onload();
+    await new Promise<void>(resolve=>setImmediate(resolve));
+    assert.equal(loads,0,'replacement must not read during the previous write');
+    gate.release();await saving;await navigationWatchdog(loading);
+    assert.equal(loads,1);
+    assert.equal(replacement.settings.ai.generation.state,'disabled');
+    assert.throws(()=>replacement!.searchController.prepareGeneration());
+  } finally {gate.release();replacement?.onunload();Object.assign(f.plugin,{saveData:original});await f.cleanup();}
+});
+
+test('B-R2-LIFE-12: a rejected write with unavailable readback retains the requested disable for explicit retry',async()=>{
+  const f=await fixture(),c=f.plugin.searchController;
+  const save=f.plugin.saveData.bind(f.plugin),load=f.plugin.loadData.bind(f.plugin);
+  const cfg={state:'configured',transport:'local',origin:'http://127.0.0.1:1',identity:{model:'fixture',revision:'v1'},
+    limits:{timeoutMs:2000,maxInputBytes:4096,maxCandidates:8,maxOutputTokens:32,maxConcurrent:1}} as const;
+  try {
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    await f.plugin.patchSettings(s=>{s.ai.generation=cfg;});
+    Object.assign(f.plugin,{saveData:async()=>{throw Error('synthetic write failure');},
+      loadData:async()=>{throw Error('synthetic readback failure');}});
+    await assert.rejects(f.plugin.patchSettings(s=>{s.ai.generation={state:'disabled'};}),/synthetic write failure/);
+    assert.equal(f.plugin.settings.ai.generation.state,'disabled');
+    assert.equal(c.sharedAuthorityTransition(),true);
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,false);
+    Object.assign(f.plugin,{saveData:save,loadData:load});
+    await f.plugin.updateSettings(structuredClone(f.plugin.settings));
+    assert.equal(f.plugin.settings.ai.generation.state,'disabled');
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    assert.throws(()=>c.prepareGeneration());
+  }finally{Object.assign(f.plugin,{saveData:save,loadData:load});await f.cleanup();}
+});
+
+test('B-R2-LIFE-12: committed disable does not perform the obsolete duplicate idle-host retirement',async()=>{
+  const f=await fixture(),c=f.plugin.searchController;
+  const cfg={state:'configured',transport:'local',origin:'http://127.0.0.1:1',identity:{model:'fixture',revision:'v1'},
+    limits:{timeoutMs:2000,maxInputBytes:4096,maxCandidates:8,maxOutputTokens:32,maxConcurrent:1}} as const;
+  let attempts=0,restore=()=>{};
+  try{
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    await f.plugin.patchSettings(s=>{s.ai.generation=cfg;});
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    const old=c.prepareGeneration();
+    const host=(f.plugin as unknown as {denseHost:ApiDenseHost}).denseHost;
+    const invalidate=host.invalidate.bind(host);
+    restore=()=>{Object.assign(host,{invalidate});};
+    Object.assign(host,{invalidate:(path?:string)=>{attempts++;if(attempts===2)throw Error('synthetic second retirement failure');invalidate(path);}});
+    await f.plugin.patchSettings(s=>{s.ai.generation={state:'disabled'};});
+    assert.equal(attempts,1);
+    assert.equal(f.plugin.settings.ai.generation.state,'disabled');
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    assert.throws(()=>c.prepareGeneration());
+    await assert.rejects(c.generationConfirmed(old,'synthetic','fixture'));
+  }finally{restore();await f.cleanup();}
+});

@@ -45,6 +45,12 @@ const ingestionBarrierKey = Symbol.for('oks.ingestion.close-barriers.v1');
 const ingestionHost = globalThis as typeof globalThis & { [ingestionBarrierKey]?: Map<string, Promise<void>> };
 const ingestionBarriers = ingestionHost[ingestionBarrierKey] ??= new Map<string, Promise<void>>();
 
+// A reload must not read a settings snapshot while the old instance can
+// still persist a different configuration. Scope to the same Vault/plugin.
+const settingsBarrierKey = Symbol.for('oks.settings.close-barriers.v1');
+const settingsHost = globalThis as typeof globalThis & { [settingsBarrierKey]?: Map<string, Promise<void>> };
+const settingsBarriers = settingsHost[settingsBarrierKey] ??= new Map<string, Promise<void>>();
+
 class ResultModal extends Modal {
   constructor(app: App, private readonly response: Response) { super(app); }
   onOpen(): void {
@@ -62,6 +68,10 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private sourceReader?: BoundedVaultReader;
   private denseHost?: ApiDenseHost;
   private denseSettingsChanging = false;
+  // Retain the last completely applied runtime configuration until a
+  // successful save and application reconcile any interrupted transaction.
+  private settingsRuntimeBase?: SearchSettings;
+  private settingsApplyInterrupted = false;
   private readonly denseUi = new DenseUiController({
     host: () => this.unloaded || this.denseSettingsChanging ? undefined : this.denseHost,
     sharedFence: () => this.unloaded || this.denseSettingsChanging || (this.searchController?.sharedAuthorityTransition() ?? false),
@@ -129,7 +139,12 @@ export default class SyntheticEvidencePlugin extends Plugin {
     if (this.loaded || this.unloaded) return;
     this.loaded = true;
     let saved: unknown;
-    try { saved = await this.loadData(); }
+    try {
+      const key = this.settingsStorageKey();
+      if (key !== undefined) await settingsBarriers.get(key);
+      if (this.unloaded) return;
+      saved = await this.loadData();
+    }
     catch { saved = { version: -1 }; } // Invalid/unreadable settings stay disabled and repairable in settings UI.
     if (this.unloaded) return;
     try { this.settings = parseSettings(saved); }
@@ -219,56 +234,104 @@ export default class SyntheticEvidencePlugin extends Plugin {
   patchSettings(change: (s: SearchSettings) => void): Promise<void> {
     return this.queueSettings(current => { const next = structuredClone(current); change(next); return next; });
   }
+  private settingsStorageKey(): string | undefined {
+    const adapter = this.app.vault.adapter;
+    return adapter instanceof FileSystemAdapter
+      ? JSON.stringify([resolve(adapter.getBasePath()), this.manifest.id]) : undefined;
+  }
+  private persistSettings(settings: SearchSettings): Promise<void> {
+    const key = this.settingsStorageKey();
+    const prior = key === undefined ? undefined : settingsBarriers.get(key);
+    // Only persistence, not the later storage-owner drain, blocks reload.
+    const writing = Promise.resolve(prior).then(() => this.saveData(settings));
+    if (key !== undefined) {
+      const barrier = writing.then(() => undefined, () => undefined);
+      settingsBarriers.set(key, barrier);
+      void barrier.then(() => { if (settingsBarriers.get(key) === barrier) settingsBarriers.delete(key); });
+    }
+    return writing;
+  }
   private queueSettings(change: (current: SearchSettings) => SearchSettings): Promise<void> {
+    if (this.unloaded) return Promise.resolve();
     const task = this.settingsQueue.then(async () => {
       if (this.purgeInFlight) await this.purgeInFlight.catch(() => {});
       if (this.unloaded) return;
       const settings = parseSettings(change(this.settings));
-      if (JSON.stringify(settings) === JSON.stringify(this.settings)) return;
+      const recovering = this.settingsRuntimeBase !== undefined;
+      const repairing = this.settingsApplyInterrupted;
+      if (!recovering && JSON.stringify(settings) === JSON.stringify(this.settings)) return;
       // A view preference never revokes live requests, grants or index state.
       const {presentationMode: _oldMode, ...beforeRuntime} = this.settings;
       const {presentationMode: _newMode, ...afterRuntime} = settings;
-      if (JSON.stringify(beforeRuntime) === JSON.stringify(afterRuntime)) {
-        await this.saveData(settings);
+      if (!recovering && JSON.stringify(beforeRuntime) === JSON.stringify(afterRuntime)) {
+        await this.persistSettings(settings);
         if (!this.unloaded) this.settings = settings;
         return;
       }
       this.denseSettingsChanging = true;
       try {
-        this.searchController.beginRuntimeSettingsChange(() => this.denseHost?.invalidate(),
+        const retiringHost = this.denseHost;
+        this.searchController.beginRuntimeSettingsChange(retiringHost,
           !settings.enabled || JSON.stringify(this.settings.ai.reranking) !== JSON.stringify(settings.ai.reranking));
-        await this.saveData(settings);
+        this.settingsRuntimeBase ??= this.settings;
+        try { await this.persistSettings(settings); }
+        catch (error) {
+          // A rejection is not proof of rollback. Read the durable snapshot
+          // while the admission fence is still closed; future edits start
+          // from that snapshot, not from superseded role preferences.
+          if (!this.unloaded) {
+            try {
+              const durable = parseSettings(await this.loadData());
+              if (!this.unloaded) {
+                if (!durable.enabled || JSON.stringify(this.settings.ai.reranking) !== JSON.stringify(durable.ai.reranking))
+                  this.searchController.revokeRerankProfile();
+                this.settings = durable;
+              }
+            } catch {
+              // An unreadable/ambiguous store cannot authorize the old
+              // runtime. Retain the requested snapshot for explicit retry.
+              if (!this.unloaded) this.settings = settings;
+            }
+          }
+          throw error;
+        }
         if (this.unloaded) return;
         // Persistence committed. Admission has remained fenced since the first
         // retirement; publish the persisted preferences before any fallible
         // teardown so recovery cannot resurrect the previous configuration.
-        const before = this.settings;
+        const before = this.settingsRuntimeBase;
+        this.settingsApplyInterrupted = true;
         this.settings = settings;
         this.standaloneError = null;
+        const wasPaused = this.searchController.status().paused;
         this.searchController.configure(settings.enabled, settings.paused);
-        if (before.ingestion.enabled !== settings.ingestion.enabled) {
+        if (repairing || before.ingestion.enabled !== settings.ingestion.enabled) {
           await this.stopDenseHost();
         }
         if (this.unloaded) return;
-        if (JSON.stringify(before.ingestion) !== JSON.stringify(settings.ingestion))
+        if (repairing || JSON.stringify(before.ingestion) !== JSON.stringify(settings.ingestion))
           await this.stopIngestion();
-        if (!settings.ingestion.enabled && this.standalone && !this.denseHost)
+        if (!repairing && !settings.ingestion.enabled && this.standalone && !this.denseHost)
           this.attachDenseHost();
-        if (JSON.stringify(before.advanced) !== JSON.stringify(settings.advanced)) {
+        if (repairing || JSON.stringify(before.advanced) !== JSON.stringify(settings.advanced)) {
           await this.stopAdvanced();
           if (settings.advanced.enabled && this.layoutReady && !this.unloaded) await this.initializeAdvanced();
         }
-        if (before.enabled !== settings.enabled) {
+        if (repairing || before.enabled !== settings.enabled) {
           this.lifecycleRevision++;
           await this.stopStandalone();
           await this.initializing;
           if (settings.enabled && this.layoutReady && !this.unloaded) await this.initializeStandalone();
-        } else if (this.standalone && before.paused !== settings.paused) {
+        } else if (this.standalone && (wasPaused !== settings.paused || before.paused !== settings.paused)) {
           if (settings.paused) this.standalone.cancel(); else this.standalone.resume();
         }
+        this.settingsRuntimeBase = undefined;
+        this.settingsApplyInterrupted = false;
       } finally {
-        this.denseSettingsChanging = false;
-        this.searchController.endRuntimeSettingsChange();
+        // A successful host retirement alone cannot reconcile a failed save
+        // or partially applied runtime. Keep authority closed until retry.
+        this.denseSettingsChanging = this.settingsRuntimeBase !== undefined;
+        if (!this.denseSettingsChanging) this.searchController.endRuntimeSettingsChange();
       }
     });
     this.settingsQueue = task.catch(() => {});
@@ -308,7 +371,8 @@ export default class SyntheticEvidencePlugin extends Plugin {
     return purgeDerivedIndex(dir, provider.rootId, dir);
   }
   async controlSearch(action: 'pause' | 'cancel' | 'resume' | 'rebuild'): Promise<void> {
-    const result = this.searchController.control(action, () => this.denseHost?.invalidate());
+    const retiringHost = this.denseHost;
+    const result = this.searchController.control(action, retiringHost);
     if (!result.ok) { new Notice(`OKS: ${result.error}`); return; }
     try { await this.patchSettings(settings => { settings.paused = action === 'pause' || action === 'cancel'; }); }
     catch { new Notice('OKS: settings could not be saved.'); }
