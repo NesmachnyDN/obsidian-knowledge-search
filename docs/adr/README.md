@@ -20,3 +20,5 @@ Use states Proposed, Accepted, Superseded or Rejected. Do not mark an experiment
 - [ADR-0015 — API-first optional AI retrieval](0015-api-first-ai-optional-dense.md) — Product-owner target direction of 2026-11-23: autonomous basic search, local/cloud provider APIs, one active dense index, separated conditional acceptance gates; repository review pending.
 
 - [ADR-0016 — Platform portability and managed optional document runtime](0016-platform-portability-managed-runtime.md) — Product-owner direction 2026-11-25: frictionless core-first onboarding, one-action optional desktop runtime, desktop/mobile adapters and distribution-policy gate; independent review pending.
+
+- [ADR-0017 — Extensible local multi-format attachment extraction](0017-extensible-multiformat-extraction.md) — Product-owner format coverage, registry, canonical content indexing and source navigation; candidates require benchmark, independent review pending.

@@ -19,3 +19,7 @@
 ## Acceptance and sequencing
 
 See OKS-06F.1–06F.5 in the roadmap. Design first; measure clean-install, offline startup, missing/failed/declined optional install, network interruption, tampering, version mismatch, resource exhaustion, rollback, restart, uninstall and no-egress behavior. Test real Linux/Windows/macOS hosts and Android/iOS devices as applicable, including ARM/x86 where claimed. Freeze platform-specific support matrix and budgets before acceptance. Separate private distribution and Community Directory compliance decisions; no claim of directory approval. No production Vault operations, downloads or installation authorized by this ADR.
+
+## Multi-format runtime scope extension (ADR-0017; review pending)
+
+06F.1 and 06G.1 coordinate the dependency selection before runtime packaging. The optional managed document runtime must automatically provision all selected verified extraction adapters and dependencies together in the same single-action flow, including an isolated Java runtime or LibreOffice only if justified by benchmark and policy. Never introduce separate manual dependency setup or force those components into core/mobile. See [ADR-0017](0017-extensible-multiformat-extraction.md).
