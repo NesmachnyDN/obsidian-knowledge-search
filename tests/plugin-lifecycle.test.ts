@@ -1397,3 +1397,103 @@ test('B-R2-LIFE-13: terminal unload before presentation save dispatch cancels th
     assert.equal(old.searchController.sharedAuthorityTransition(),true);
   }finally{Object.assign(old,{saveData:save});await f.cleanup();}
 });
+
+test('B-R2-LIFE-14: terminal callbacks see one closed search snapshot, never re-admit consent, D8 or navigation',async()=>{
+  const f=await fixture(),p=f.plugin,c=p.searchController;
+  const internals=p as unknown as {denseUi:DenseUiController;denseMachine:import('../plugin/src/ai/dense-machine').DenseMachine};
+  const {denseUi,denseMachine}=internals;
+  const file=Object.assign(new Empty(),{path:'fixture.md'});
+  Object.assign(p.app.vault,{getMarkdownFiles:()=>[file],getAbstractFileByPath:(path:string)=>path===file.path?file:null});
+  const owner=Symbol('terminal-review'),observations:string[]=[];
+  const replies:Promise<unknown>[]=[];
+  let dispatches=0,reads=0,navReads=0,evidenceNotifications=0,throwing=0;
+  try{
+    await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
+    await p.patchSettings(s=>{s.ai.generation=reloadFixtureConfig;s.ai.reranking=reloadFixtureConfig;s.ai.embedding=reloadFixtureConfig;});
+    const profiles=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof reloadFixtureConfig,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
+    profiles.rerankProfiles.installSyntheticFixture(reloadFixtureConfig,profiles.rerankPort.scopeId(),'terminal-fixture');
+    const lexical=await c.search(uiRequest('REQ-LIFE-1',1));assert.ok(lexical.ok&&lexical.value.hits.length>0);
+    const g=c.prepareGeneration(),r=c.prepareRerank();
+    const space:EmbeddingSpace={...reloadFixtureConfig.identity,dimension:3,normalization:'unit-l2',
+      serializationId:'utf8-verbatim-v1',queryInstructionId:'identity-v1',documentInstructionId:'identity-v1'};
+    const submit={apiVersion:1,operation:'submit',request:{protocolVersion:2,requestId:'terminal-d8',
+      query:'REQ-LIFE-1',requestedMode:'dense',matchMode:'terms',scope:['fixture.md'],limit:1},space};
+    const staged=await p.denseApi.request(submit);
+    assert.ok(staged.ok&&staged.value&&'operationId' in staged.value);
+    const operationId=staged.value.operationId;
+    await denseMachine.review(owner);assert.equal(denseUi.snapshot(owner).phase,'preview');
+    const engine=p.standalone!,search=engine.search.bind(engine);
+    Object.assign(engine,{search:(input:SearchRequest)=>{dispatches++;return search(input);}});
+    Object.assign(p,{verifyAiEvidence:async()=>{reads++;throw Error('unexpected verification');}});
+    const nav=new SourceNavigator({read:async()=>{navReads++;return Buffer.from('unexpected');}},
+      {exact:()=>{navReads++;return file;},open:async()=>{throw Error('unexpected navigation');}});
+    Object.assign(p,{navigator:nav});
+    const denied=(action:()=>unknown):boolean=>{try{action();return false;}catch{return true;}};
+    const observe=(source:string):void=>{
+      observations.push(source);
+      const closed=c.sharedAuthorityTransition()&&!c.isEvidencePreviewCurrent('generation',g.sequence)
+        &&!c.isEvidencePreviewCurrent('reranking',r.sequence)&&denied(()=>c.prepareGeneration())&&denied(()=>c.prepareRerank())
+        &&c.snapshot().response===null&&c.evidenceOperationStatus('generation').phase==='idle'
+        &&c.evidenceOperationStatus('reranking').phase==='idle'&&!denseMachine.pending()&&!denseMachine.owns(owner)
+        &&denseUi.snapshot(owner).phase==='idle'&&denseUi.operationStatus().phase==='idle'&&!denseUi.occupied()
+        &&!c.control('rebuild').ok;
+      if(!closed)observations.push('PARTIAL_TERMINAL_STATE');
+      replies.push(c.generationConfirmed(g,'synthetic','fixture').then(()=>true,()=>false),
+        c.rerankConfirmed(r,'synthetic','fixture').then(()=>true,()=>false),
+        c.search(uiRequest('REQ-LIFE-1',1)).then(v=>v.ok),c.open(0).then(v=>v.ok),
+        nav.open(lexical.value.hits[0]!).then(()=>true,()=>false),
+        p.denseApi.request(submit).then(v=>v.ok),
+        p.denseApi.request({apiVersion:1,operation:'status',operationId}).then(v=>v.ok));
+      p.onunload(); // terminal teardown must be reentrantly idempotent
+    };
+    denseMachine.subscribe(()=>{throwing++;throw Error('synthetic terminal observer failure');});
+    denseMachine.subscribe(()=>observe('D8'));denseUi.subscribe(()=>observe('dense'));
+    c.subscribe(()=>observe('lexical'));c.subscribeEvidence(()=>{evidenceNotifications++;});
+    Object.assign(p,{resultModal:{close:()=>observe('modal')}});
+    Object.assign(p.app.workspace,{detachLeavesOfType:()=>observe('detach')});
+    p.onunload();p.onunload();
+    assert.deepEqual([...new Set(observations)].sort(),['D8','dense','detach','lexical','modal']);
+    assert.equal(throwing,1);assert.equal(evidenceNotifications,0);
+    assert.ok((await Promise.all(replies)).every(v=>v===false));
+    assert.equal(dispatches,0);assert.equal(reads,0);assert.equal(navReads,0);
+  }finally{await f.cleanup();}
+});
+
+test('B-R2-LIFE-14: abort callbacks of both active evidence roles see sealed sibling authorities',async()=>{
+  const f=await fixture(),p=f.plugin,c=p.searchController;
+  const {denseUi,denseMachine}=p as unknown as {denseUi:DenseUiController;denseMachine:import('../plugin/src/ai/dense-machine').DenseMachine};
+  const gate=deferredDrain(),entered=deferredDrain();
+  let reads=0,http=0;
+  const server=createServer((_req,res)=>{http++;res.writeHead(500);res.end();});
+  const observations:boolean[]=[],newReplies:Promise<boolean>[]=[];
+  const active:Promise<void>[]=[];
+  try{
+    await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
+    const addr=server.address();assert.ok(addr&&typeof addr!=='string');
+    const cfg={...reloadFixtureConfig,origin:'http://127.0.0.1:'+addr.port};
+    await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
+    await p.patchSettings(s=>{s.ai.generation=cfg;s.ai.reranking=cfg;s.ai.embedding=cfg;});
+    const profiles=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof cfg,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
+    profiles.rerankProfiles.installSyntheticFixture(cfg,profiles.rerankPort.scopeId(),'terminal-active-fixture');
+    assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    const g=c.prepareGeneration(),r=c.prepareRerank();
+    Object.assign(p,{verifyAiEvidence:async()=>{reads++;if(reads===2)entered.release();await gate.promise;}});
+    active.push(c.generationConfirmed(g,'synthetic','fixture'),c.rerankConfirmed(r,'synthetic','fixture'));
+    await navigationWatchdog(entered.promise);
+    const authority=c as unknown as {activeEvidence:Record<'generation'|'reranking',{abort:AbortController}>};
+    for(const role of ['generation','reranking'] as const){
+      authority.activeEvidence[role].abort.signal.addEventListener('abort',()=>{
+        observations.push(c.sharedAuthorityTransition()&&c.snapshot().response===null
+          &&c.evidenceOperationStatus('generation').phase==='idle'&&c.evidenceOperationStatus('reranking').phase==='idle'
+          &&denseUi.isDisposed()&&!denseMachine.pending());
+        newReplies.push(c.search(uiRequest('late',1)).then(v=>v.ok));
+      },{once:true});
+    }
+    p.onunload();gate.release();await navigationWatchdog(Promise.all(active));
+    assert.deepEqual(observations,[true,true]);assert.deepEqual(await Promise.all(newReplies),[false,false]);
+    assert.equal(reads,2);assert.equal(http,0);
+  }finally{
+    gate.release();await Promise.allSettled(active);await f.cleanup();
+    await new Promise<void>(resolve=>server.close(()=>resolve()));
+  }
+});

@@ -68,6 +68,7 @@ export class SearchController {
   private paused = false;
   private error: string | null = null;
   private disposed = false;
+  private terminalRetired = false;
   private revision = 0;
   private lastQuery = '';
   private sequence = 0;
@@ -593,10 +594,30 @@ export class SearchController {
       return { apiVersion: 1, ok: true, value: { cancelled } };
     } catch { return failure('INTERNAL_FAILURE'); }
   }
-  dispose(): void {
+  /** Commit the terminal snapshot without calling host teardown or observers.
+   * The plugin seals all sibling authorities before any cancellation callback. */
+  sealTerminal(): void {
     if (this.disposed) return;
-    this.disposed = true; this.rerankProfiles.revoke(); this.engine = undefined;
-    this.evidenceListeners.clear(); this.invalidateState(true);
+    this.disposed = true;
+    this.engine = undefined;
+    this.revision++;
+    this.lastQuery = '';
+    this.state = {phase:'idle',message:'Results cleared; search to verify current sources.',response:null};
+    this.clearPreview('reranking'); this.clearPreview('generation');
+    this.pendingExpiryNotification = undefined;
+    this.evidencePending = undefined;
+    this.evidenceListeners.clear();
+    this.pending?.resolve(failure('SUPERSEDED')); this.pending = undefined;
+    this.rerankProfiles.revoke();
+  }
+  dispose(): void {
+    this.sealTerminal();
+    if (this.terminalRetired) return;
+    this.terminalRetired = true;
+    // Abort can synchronously invoke listeners; every old publication right
+    // and both consent capabilities have already been revoked.
+    try { this.revokeEvidence(); }
+    finally { this.emit(true); }
   }
 }
 /** Stable in-process API. No listener, IPC transport, or external runtime. */

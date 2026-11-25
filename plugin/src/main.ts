@@ -121,10 +121,11 @@ export default class SyntheticEvidencePlugin extends Plugin {
     });
   }
   private async verifyAiEvidence(hit: EvidenceHit): Promise<void> {
+    if (this.unloaded) throw new StandaloneError('SOURCE_REJECTED');
     const reader = this.sourceReader, file = this.app.vault.getAbstractFileByPath(hit.sourceId);
     if (!reader || !(file instanceof TFile) || file.path !== hit.sourceId) throw new StandaloneError('SOURCE_REJECTED');
     verifySpan(hit, await reader.read(hit.sourceId));
-    if (this.sourceReader !== reader || this.app.vault.getAbstractFileByPath(hit.sourceId) !== file)
+    if (this.unloaded || this.sourceReader !== reader || this.app.vault.getAbstractFileByPath(hit.sourceId) !== file)
       throw new StandaloneError('SOURCE_CHANGED');
   }
   readonly api = new StandaloneApi(this.searchController);
@@ -150,6 +151,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     try { this.settings = parseSettings(saved); }
     catch { this.settings = { ...defaultSettings(), enabled: false }; this.standaloneError = 'SETTINGS_INVALID'; }
     this.searchController.configure(this.settings.enabled, this.settings.paused, this.standaloneError);
+    if (this.unloaded) return;
     this.registerView(SEARCH_VIEW, leaf => new SearchView(leaf, this.searchController,
       () => this.settings, action => this.controlSearch(action), this.denseUi, this.denseMachine));
     this.addCommand({ id: 'open-standalone-search', name: 'Open Standalone search', callback: () => { void this.openSearch(); } });
@@ -158,8 +160,8 @@ export default class SyntheticEvidencePlugin extends Plugin {
       this.addCommand({ id: `${action}-standalone`, name: `${action[0]!.toUpperCase() + action.slice(1)} Standalone indexing`,
         callback: () => { void this.controlSearch(action); } });
     this.controller = new ProbeController(new Supervisor(), {
-      status: value => { this.resultModal?.close(); new Notice(`Synthetic probe: ${value}`); },
-      result: response => { this.resultModal?.close(); this.resultModal = new ResultModal(this.app, response); this.resultModal.open(); },
+      status: value => { if (this.unloaded) return; this.resultModal?.close(); new Notice(`Synthetic probe: ${value}`); },
+      result: response => { if (this.unloaded) return; this.resultModal?.close(); this.resultModal = new ResultModal(this.app, response); this.resultModal.open(); },
     });
     this.addSettingTab(new SearchSettingsTab(this.app, this, () => this.settings, change => this.patchSettings(change), () => this.purgeIndex(),
       () => this.advancedHealth.snapshot(), () => this.checkAdvancedHealth(),
@@ -187,6 +189,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     this.addCommand({ id: 'run-synthetic-evidence-probe' , name: 'Run synthetic evidence probe', callback: () => { void this.runProbe(); } });
     this.addCommand({ id: 'cancel-synthetic-evidence-probe', name: 'Cancel synthetic evidence probe', callback: () => this.controller?.cancel() });
     const invalidate = (file: TAbstractFile, oldPath?: string): void => {
+      if (this.unloaded) return;
       const affectsFixture = (path: string): boolean => path === FIXTURE_PATH || FIXTURE_PATH.startsWith(path + '/');
       if (affectsFixture(file.path) || (oldPath !== undefined && affectsFixture(oldPath))) {
         this.controller?.cancel(); this.resultModal?.close();
@@ -198,6 +201,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     // Changes can arrive before the asynchronous core has opened; startup does
     // a full authoritative reconciliation after the event handlers are registered.
     const nativeChange = (file: TAbstractFile, oldPath?: string): void => {
+      if (this.unloaded) return;
       this.navigator?.invalidate();
       this.denseHost?.invalidate(file.path);
       if (oldPath !== undefined) this.denseHost?.invalidate(oldPath);
@@ -653,11 +657,13 @@ export default class SyntheticEvidencePlugin extends Plugin {
     await drain;
   }
   private async runProbe(): Promise<void> {
+    if (this.unloaded) return;
     const adapter = this.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter)) { new Notice('Synthetic probe: UNSUPPORTED_FILESYSTEM'); return; }
     await this.controller?.run({ ...this.settings.probe }, {
       root: adapter.getBasePath(),
       verifyNote: () => {
+        if (this.unloaded) throw new Error('FIXTURE_REJECTED');
         const file = this.app.vault.getAbstractFileByPath(FIXTURE_PATH);
         if (!(file instanceof TFile)) throw new Error('FIXTURE_REJECTED');
         if (file.path !== FIXTURE_PATH) throw new Error('FIXTURE_REJECTED');
@@ -665,19 +671,25 @@ export default class SyntheticEvidencePlugin extends Plugin {
     });
   }
   onunload(): void {
+    if (this.unloaded) return;
+    // Commit one irreversible terminal boundary across all search authorities
+    // before any host, abort, view or observer callback is allowed to run.
     this.unloaded = true;
+    this.lifecycleRevision++;
+    this.denseUi.authority.sealTerminal();
+    this.searchController.sealTerminal();
     const cleanup = (action: () => void): void => {
       try { action(); } catch { console.warn('PLUGIN_UNLOAD_CLEANUP_FAILED'); }
     };
+    cleanup(() => this.navigator?.dispose());
+    this.denseUi.authority.batch(() => {
+      cleanup(() => this.denseMachine.dispose());
+      cleanup(() => this.denseUi.dispose());
+      cleanup(() => this.searchController.dispose());
+    });
     cleanup(() => this.resultModal?.close());
     this.resultModal = undefined;
     void this.controller?.unload().catch(() => { console.warn('PLUGIN_UNLOAD_CLEANUP_FAILED'); });
-    this.lifecycleRevision++;
-    // Revoke navigation before any observer or host teardown may run.
-    cleanup(() => this.navigator?.dispose());
-    cleanup(() => this.denseMachine.dispose());
-    cleanup(() => this.denseUi.dispose());
-    cleanup(() => this.searchController.dispose());
     cleanup(() => this.app.workspace.detachLeavesOfType(SEARCH_VIEW));
     void this.stopStandalone().catch(() => { console.warn('PLUGIN_UNLOAD_CLEANUP_FAILED'); });
     void this.stopAdvanced().catch(() => { /* failed barrier remains closed to reload */ });

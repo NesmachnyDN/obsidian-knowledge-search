@@ -38,6 +38,7 @@ export class SourceNavigator<File> {
   invalidate(): void { this.revision++; }
   dispose(): void { this.disposed = true; this.invalidate(); }
   async open(hit: EvidenceHit): Promise<void> {
+    if (this.disposed) throw new StandaloneError('NAVIGATION_REJECTED');
     // Snapshot caller-owned evidence before crossing an asynchronous boundary.
     const value = structuredClone(hit);
     const revision = ++this.revision;

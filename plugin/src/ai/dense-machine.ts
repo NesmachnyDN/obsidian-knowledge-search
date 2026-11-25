@@ -69,8 +69,8 @@ export class DenseMachine {
         &&(!s.owner||this.ui.owns(s.owner));
     }catch{return false;}
   }
-  pending():boolean {return !!this.slot&&!this.slot.owner&&this.current(this.slot);}
-  owns(owner:symbol):boolean{return this.slot?.owner===owner;}
+  pending():boolean {return !this.disposed&&!this.ui.isDisposed()&&!!this.slot&&!this.slot.owner&&this.current(this.slot);}
+  owns(owner:symbol):boolean{return !this.disposed&&!this.ui.isDisposed()&&this.slot?.owner===owner;}
   /** Only called from a dedicated human ItemView action. */
   async review(owner:symbol):Promise<void> {
     const s=this.slot;
@@ -114,6 +114,7 @@ export class DenseMachine {
   }
   async request(input:unknown):Promise<Reply> {
     try{
+      if(this.disposed||this.ui.isDisposed())return fail('NOT_READY');
       const cmd=parseMachine(input,this.port.preference);
       if(this.disposed||this.ui.isDisposed())return fail('NOT_READY');
       if(cmd.operation==='submit'){

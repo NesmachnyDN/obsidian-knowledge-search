@@ -6,6 +6,7 @@ type Channel = Set<Listener>;
  * Observers may inspect/cancel but cannot admit work from a delivery. */
 export class DenseAuthority {
   private depth = 0;
+  private terminalClosed = false;
   private revocations = 0;
   private revision = 0;
   private notifying = false;
@@ -16,7 +17,15 @@ export class DenseAuthority {
   private readonly quarantined = new WeakSet<Listener>();
   constructor(private readonly sharedFence: () => boolean = () => false) {}
   channel(): Channel { const channel = new Set<Listener>(); this.channels.add(channel); return channel; }
-  revoking(): boolean { return this.revocations > 0 || this.sharedFence(); }
+  /** Permanent, synchronous admission/publication-rights fence. Retire the
+   * actual owners afterwards; existing observers still receive final snapshots. */
+  sealTerminal(): void {
+    if (this.terminalClosed) return;
+    this.terminalClosed = true;
+    this.revision++;
+  }
+  terminal(): boolean { return this.terminalClosed; }
+  revoking(): boolean { return this.terminalClosed || this.revocations > 0 || this.sharedFence(); }
   epoch(): number { return this.revision; }
   admissionClosed(): boolean { return this.revoking() || this.notifying; }
   delivering(): boolean { return this.notifying; }
@@ -31,7 +40,7 @@ export class DenseAuthority {
     finally { this.revocations--; }
   }
   subscribe(channel: Channel, listener: Listener): () => void {
-    if (!this.channels.has(channel) || this.retired.has(channel) || this.quarantined.has(listener)) return () => {};
+    if (this.terminalClosed || !this.channels.has(channel) || this.retired.has(channel) || this.quarantined.has(listener)) return () => {};
     if (!channel.has(listener)) {
       if (this.notifying && this.additions >= 32) {
         console.warn('DENSE_OBSERVER_REJECTED', 'registration-budget'); return () => {};
