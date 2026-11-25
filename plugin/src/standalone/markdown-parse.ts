@@ -90,7 +90,7 @@ function frontmatter(lines: string[]): { properties: TypedProperty[]; valid: boo
   }
 }
 type Line = { text: string; start: number; end: number; charStart: number; charEnd: number; number: number };
-function physicalLines(raw: Uint8Array): Line[] {
+export function physicalLines(raw: Uint8Array): Line[] {
   let contents: string;
   try { contents = new TextDecoder('utf-8', { fatal: true }).decode(raw); }
   catch { throw new StandaloneError('INVALID_UTF8'); }

@@ -26,6 +26,10 @@ export function parseSearch(value: unknown): SearchRequest {
     if (bytes > 16384) throw new StandaloneError('INVALID_REQUEST');
   };
   for (const path of value.scope ?? []) count(path);
+  if (value.range) {
+    count(value.range.sourceId); count(value.range.sourceSha256);
+    for (const offset of [value.range.byteStart,value.range.byteEnd,value.range.charStart,value.range.charEnd]) count(offset);
+  }
   if (value.metadata?.tag !== undefined) count(value.metadata.tag);
   if (value.metadata?.linkTarget !== undefined) count(value.metadata.linkTarget);
   if (typeof value.requestedMode !== 'string' || value.predicates?.some(p =>

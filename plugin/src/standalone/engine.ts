@@ -4,6 +4,7 @@ import {
   type ParsedBlock,
 } from './contracts';
 import { terms } from './markdown';
+import { containsLocator, verifyOriginalRange } from './selection-range';
 import { metadataAnchor } from './metadata';
 import { verifySpan } from '../search/navigation';
 import type { MarkdownParser } from './worker';
@@ -295,7 +296,9 @@ export class StandaloneEngine {
   }
   async search(input: unknown): Promise<SearchResponse> {
     validateRequest(input);
-    const req: SearchRequest = input;
+    const req: SearchRequest = input.range ? structuredClone(input) : input;
+    const range = req.range;
+    const rangeRevision = this.revision;
     const gen = this.generation; // Pin ALL response fields to this immutable snapshot.
     const response = (status: SearchResponse['status'], error: string | null,
       hits: EvidenceHit[], stale: number, snapshot: IndexGeneration | null = gen): SearchResponse => ({
@@ -329,6 +332,13 @@ export class StandaloneEngine {
       const age = this.now() - this.verifiedAt;
       const due = age < 0 || age >= SOURCE_AUDIT_INTERVAL_MS;
       if ((drift || due) && !this.stopped && !this.paused && !this.work) this.reconcile();
+      if (range) {
+        const selected = gen.documents.find(doc => doc.sourceId === range.sourceId);
+        if (!selected || selected.sha256 !== range.sourceSha256 || !paths.includes(range.sourceId))
+          throw new StandaloneError('SOURCE_STALE');
+        verifyOriginalRange(range, await this.provider.read(range.sourceId));
+        if (this.revision !== rangeRevision || this.generation !== gen) throw new StandaloneError('SOURCE_STALE');
+      }
       // Protocol-v2 default is unchanged ranked terms. The explicit literal mode
       // checks original physical source lines, not query tokens or heading context.
       const metadataOnly = req.query === '';
@@ -342,6 +352,7 @@ export class StandaloneEngine {
       const candidates: { doc: SourceVersion; block: ParsedBlock; score: number }[] = [];
       for (const doc of gen.documents) {
         if ((scope && !scope.has(doc.sourceId)) || !matches(doc.properties, predicates)) continue;
+        if (range && doc.sourceId !== range.sourceId) continue;
         if (doc.extractionStatus !== 'ok' && doc.extractionStatus !== 'partial') continue;
         const metadataEvidence = req.metadata || metadataOnly
           ? metadataAnchor(doc, req.metadata, predicates) : null;
@@ -353,6 +364,7 @@ export class StandaloneEngine {
           continue;
         }
         for (const block of doc.blocks) {
+          if (range && !containsLocator(range,block.locator)) continue;
           let score: number;
           if (literal) {
             // Properties are typed metadata, not searchable body lines. Preserve
@@ -366,8 +378,11 @@ export class StandaloneEngine {
               offset = text.indexOf(needle, offset + needle.length)) occurrences++;
             score = 5 + occurrences;
           } else {
-            if (!block.terms.length || mandatoryIds.some(id => !block.terms.includes(id))) continue;
-            const matched = tokens.filter(term => block.terms.includes(term));
+            // Canonical ordinary search includes heading terms; selected-range ranking
+            // must not use headings outside the selection or inject any context.
+            const rankedTerms = range && block.terms.length ? terms(block.originalText) : block.terms;
+            if (!rankedTerms.length || mandatoryIds.some(id => !rankedTerms.includes(id))) continue;
+            const matched = tokens.filter(term => rankedTerms.includes(term));
             if (!matched.length) continue;
             // Complete compound identifier gets stronger weight than individual parts.
             score = matched.reduce((sum, term) =>
@@ -408,14 +423,25 @@ export class StandaloneEngine {
           || [...original].length !== loc.charEnd - loc.charStart || loc.lineEnd !== loc.lineStart) {
           throw new StandaloneError('EVIDENCE_INCOMPLETE');
         }
-        hits.push({
+        const hit: EvidenceHit = {
           sourceId: row.doc.sourceId, sourceSha256: row.doc.sha256, originalExcerpt: original,
           sourceLocators: [loc], rank: hits.length + 1, lexicalRank: hits.length + 1,
           retrievalMode: 'lexical', indexGenerationId: gen.generationId, score: row.score,
-          headings: [...row.block.headings], wikiLinks: [...row.block.wikiLinks],
-          properties: row.doc.properties,
-        });
+          headings: range ? [] : [...row.block.headings], wikiLinks: [...row.block.wikiLinks],
+          properties: range ? [] : row.doc.properties,
+        };
+        if (range) {
+          if (hit.sourceId !== range.sourceId || !containsLocator(range,loc)) throw new StandaloneError('EVIDENCE_INCOMPLETE');
+          verifySpan(hit,bytes);
+        }
+        hits.push(hit);
         if (hits.length >= req.limit) break;
+      }
+      if (range) {
+        // Even a zero-hit answer must authenticate the selected source before publication.
+        verifyOriginalRange(range,await this.provider.read(range.sourceId));
+        if (stale || this.revision !== rangeRevision || this.generation !== gen)
+          throw new StandaloneError('SOURCE_STALE');
       }
       // A missed event never defeats live hash suppression; queue reconciliation for recovery.
       if (stale && !this.stopped && !this.paused && !this.work) this.reconcile();

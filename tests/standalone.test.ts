@@ -1553,3 +1553,93 @@ test('B8: corrupt predecessor generation before C must not erase the last valid 
     assert.equal(reopened.generation?.generationId, a);
   } finally { await cleanup(); }
 });
+
+test('06H.2-A1: exact editor coordinates across Unicode and original LF/CRLF/CR delimiters', async () => {
+  const {mapEditorRange,verifyOriginalRange} = await import('../plugin/src/standalone/selection-range');
+  for (const newline of ['\n','\r\n','\r']) {
+    const original = ['α🚀e\u0301','selected line',''].join(newline);
+    const raw = Buffer.from(original);
+    const editor = original.replace(/\r\n|\r/g,'\n');
+    const selection = {sourceId:'note.md',sourceSha256:hash(raw),editorText:editor,
+      anchor:{line:2,utf16Column:0},head:{line:0,utf16Column:3}};
+    const range = mapEditorRange(selection,raw);
+    const expected = Buffer.byteLength('α🚀');
+    assert.deepEqual(range,{sourceId:'note.md',sourceSha256:hash(raw),byteStart:expected,
+      byteEnd:raw.length,charStart:2,charEnd:[...original].length});
+    assert.ok(Object.isFrozen(range));
+    assert.deepEqual(mapEditorRange({...selection,anchor:selection.head,head:selection.anchor},raw),range);
+    verifyOriginalRange(range,raw);
+    const firstLineEnd = mapEditorRange({...selection,anchor:{line:0,utf16Column:0},head:{line:0,utf16Column:5}},raw);
+    assert.equal(firstLineEnd.byteEnd,Buffer.byteLength('α🚀e\u0301'));
+    assert.equal(firstLineEnd.charEnd,4);
+    const nextLine = mapEditorRange({...selection,anchor:{line:0,utf16Column:5},head:{line:1,utf16Column:0}},raw);
+    assert.equal(nextLine.byteEnd-nextLine.byteStart,Buffer.byteLength(newline));
+    assert.equal(nextLine.charEnd-nextLine.charStart,newline.length);
+    assert.throws(()=>mapEditorRange({...selection,head:{line:0,utf16Column:2}},raw),error('INVALID_REQUEST'));
+    assert.throws(()=>mapEditorRange({...selection,head:selection.anchor},raw),error('INVALID_REQUEST'));
+    assert.throws(()=>mapEditorRange({...selection,head:{line:0,utf16Column:6}},raw),error('INVALID_REQUEST'));
+    assert.throws(()=>mapEditorRange({...selection,head:{line:3,utf16Column:0}},raw),error('INVALID_REQUEST'));
+    assert.throws(()=>mapEditorRange({...selection,editorText:editor+' unsaved'},raw),error('SOURCE_STALE'));
+    assert.throws(()=>mapEditorRange({...selection,editorText:editor.normalize('NFC')},raw),error('SOURCE_STALE'));
+    assert.throws(()=>mapEditorRange({...selection,sourceSha256:hash('other')},raw),error('SOURCE_STALE'));
+    assert.throws(()=>verifyOriginalRange({...range,charStart:1},raw),error('INVALID_REQUEST'));
+    assert.throws(()=>verifyOriginalRange({...range,byteStart:3,charStart:1},raw),error('INVALID_REQUEST'));
+    if(newline==='\r\n') assert.throws(()=>verifyOriginalRange({...nextLine,byteEnd:nextLine.byteEnd-1,charEnd:nextLine.charEnd-1},raw),error('INVALID_REQUEST'));
+  }
+  for(const raw of [Buffer.from([0xff]),Buffer.from('\ufeffx'),Buffer.from('x\0')]){
+    assert.throws(()=>mapEditorRange({sourceId:'note.md',sourceSha256:hash(raw),editorText:'x',
+      anchor:{line:0,utf16Column:0},head:{line:0,utf16Column:1}},raw),error('INVALID_UTF8'));
+  }
+});
+test('06H.2-A1: selected range filters before Top-K and excludes inherited heading and Properties context', async () => {
+  const {mapEditorRange} = await import('../plugin/src/standalone/selection-range');
+  const text = ['---','secret: private','---','# forbidden','needle needle needle','needle allowed','needle partial',''].join('\r\n');
+  const raw=Buffer.from(text);
+  const {engine,cleanup}=await setup({'selected.md':text,'other.md':'needle needle needle needle'});
+  try {
+    const range=mapEditorRange({sourceId:'selected.md',sourceSha256:hash(raw),editorText:text.replace(/\r\n/g,'\n'),
+      anchor:{line:5,utf16Column:0},head:{line:6,utf16Column:6}},raw);
+    const options={range,scope:['selected.md'],limit:1};
+    for(const matchMode of ['terms','literal'] as const){
+      const result=await engine.search(search('needle',{...options,matchMode}));
+      assert.equal(result.status,'ok');
+      assert.deepEqual(result.hits.map(h=>h.originalExcerpt),['needle allowed']);
+      assert.deepEqual(result.hits[0]!.headings,[]);
+      assert.deepEqual(result.hits[0]!.properties,[]);
+      assert.equal(result.hits[0]!.rank,1);
+      assert.equal(result.hits[0]!.sourceId,'selected.md');
+    }
+    assert.ok((await engine.search(search('forbidden'))).hits.length>0);
+    assert.deepEqual((await engine.search(search('forbidden',options))).hits,[]);
+    assert.deepEqual((await engine.search(search('partial',options))).hits,[]);
+    assert.equal((await engine.search(search('needle',{...options,predicates:[{key:'secret',valueType:'string',value:'private',operator:'eq'}]}))).hits.length,1);
+    assert.deepEqual((await engine.search(search('needle',{...options,predicates:[{key:'secret',valueType:'string',value:'wrong',operator:'eq'}]}))).hits,[]);
+    for(const overrides of [{scope:[]},{scope:['other.md']},{scope:['selected.md','other.md']},{scope:undefined},
+      {requestedMode:'dense' as const},{requestedMode:'hybrid' as const},{range:{...range,byteEnd:range.byteStart}},
+      {range:{...range,charStart:-1}},{range:{...range,extra:true}}]){
+      await assert.rejects(engine.search(search('needle',{...options,...overrides})),error('INVALID_REQUEST'));
+    }
+    await assert.rejects(engine.search(search('',{...options,predicates:[{key:'secret',valueType:'string',value:'private',operator:'eq'}]})),error('INVALID_REQUEST'));
+    const stale=await engine.search(search('absent',{...options,range:{...range,sourceSha256:hash('different')}}));
+    assert.equal(stale.status,'failed');assert.equal(stale.error,'SOURCE_STALE');assert.deepEqual(stale.hits,[]);
+  }finally{await cleanup();}
+});
+test('06H.2-A1: selected source reauthenticated on zero hits, and caller cannot mutate scope in flight', async () => {
+  const {mapEditorRange} = await import('../plugin/src/standalone/selection-range');
+  const text='outside\nneedle allowed\n';
+  const raw=Buffer.from(text);
+  const {engine,reader,cleanup}=await setup({'selected.md':text,'other.md':'needle outside'});
+  const read=reader.read.bind(reader);
+  try{
+    const range=mapEditorRange({sourceId:'selected.md',sourceSha256:hash(raw),editorText:text,
+      anchor:{line:1,utf16Column:0},head:{line:2,utf16Column:0}},raw);
+    const req=search('needle',{range:{...range},scope:['selected.md']});
+    const result=engine.search(req);
+    req.scope![0]='other.md';req.range!.sourceId='other.md';
+    assert.deepEqual((await result).hits.map(h=>h.originalExcerpt),['needle allowed']);
+    let reads=0;
+    reader.read=async path=>path==='selected.md'&&++reads===2?Buffer.from('changed'):read(path);
+    const changed=await engine.search(search('not-present',{range,scope:['selected.md']}));
+    assert.equal(changed.status,'failed');assert.equal(changed.error,'SOURCE_STALE');assert.deepEqual(changed.hits,[]);
+  }finally{reader.read=read;await cleanup();}
+});
