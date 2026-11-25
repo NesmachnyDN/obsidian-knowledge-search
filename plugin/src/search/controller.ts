@@ -11,7 +11,8 @@ import type { AdvancedHealth } from '../advanced/health';
 import type { IngestionStatus } from '../advanced/manager';
 import { isRecord, StandaloneError, validateRequest, validProperty, BOUNDS,
   type SearchRequest, type SearchResponse, type Predicate, type EvidenceHit, type SearchMetadata } from '../standalone/contracts';
-import type { StandaloneEngine } from '../standalone/engine';
+import type { StandaloneEngine, ChatScopeLease } from '../standalone/engine';
+import { parseScopeSelector, type ScopeSelector, type ScopedSearch } from '../standalone/chat-scope';
 import { diagnostics, safeCode, statusSnapshot, type SearchStatus } from './status';
 
 export type ApiError = { apiVersion: 1; ok: false; error: string };
@@ -51,7 +52,8 @@ export function propertyInput(key: string, valueType: string, operator: string, 
   if (!validProperty(predicate, true)) throw new StandaloneError('INVALID_REQUEST');
   return predicate as Predicate;
 }
-type Engine = Pick<StandaloneEngine, 'search' | 'status' | 'cancel' | 'resume' | 'rebuild'>;
+type Engine = Pick<StandaloneEngine, 'search' | 'status' | 'cancel' | 'resume' | 'rebuild'>
+  & Partial<Pick<StandaloneEngine, 'captureChatScope'>>;
 // The concrete trusted owner is retained, not a callback resolving a mutable host.
 type RetirementTarget = { invalidate(): void };
 type RetirementObligation = {
@@ -68,6 +70,11 @@ export type RerankPreview = { role: EvidenceRole; sequence: number; revision: nu
 // Internal elapsed-time deadlines are never taken from the returned preview.
 type ActiveEvidenceOperation = { abort: AbortController; context: CallContext; revision: number };
 type PendingEvidencePreview = { preview: RerankPreview; monotonicStartedMs: number; bootStartedSeconds: number };
+export type ScopedRetrievalTurn = Readonly<{ result: Promise<ApiResult<SearchResponse>>; cancel(): void }>;
+const SCOPED_RETRIEVAL_TIMEOUT_MS = 30_000;
+type ActiveScopedRetrieval = { readonly abort: AbortController; readonly context: CallContext;
+  readonly revision: number; readonly sourceRevision: number; readonly finish: (value: ApiResult<SearchResponse>) => void;
+  timer?: ReturnType<typeof setTimeout>; retired: boolean };
 export type RerankState = { phase: 'running' | 'results' | 'error'; error: ProviderFailureCode | null; hits: readonly RerankedHit[] };
 export type RerankPort = {
   config(): ProviderPreference; scopeId(): string | undefined; verify(hit: EvidenceHit): Promise<void>;
@@ -87,6 +94,10 @@ export class SearchController {
   private prepared: Partial<Record<EvidenceRole,PendingEvidencePreview>> = {};
   private previewTimers: Partial<Record<EvidenceRole,ReturnType<typeof setTimeout>>> = {};
   private activeEvidence: Partial<Record<EvidenceRole,ActiveEvidenceOperation>> = {};
+  // This is deliberately not a caller-visible handle. Only this host can cancel,
+  // retire, or publish a scoped retrieval turn.
+  private scopedRetrieval?: ActiveScopedRetrieval;
+  private generationAdmissionDepth = 0;
   private readonly generator = new EvidenceGenerator();
   private readonly reranker = new EvidenceReranker();
   private readonly rerankProfiles = new RerankRuntimeProfiles(()=>this.invalidateRerankProfile());
@@ -441,6 +452,7 @@ export class SearchController {
       this.pending?.resolve(failure('SUPERSEDED')); this.pending = undefined;
       this.state = state;
       reserve?.(revision);
+      this.revokeScopedRetrieval();
       this.revokeEvidence();
       if (!this.disposed && !this.retirement.running && (this.retirement.obligations.some(item => item.kind !== 'role') || this.retirement.overflow))
         this.failRetirement();
@@ -490,6 +502,107 @@ export class SearchController {
     if (this.ownsRevision(revision)) this.emit();
     return result;
   }
+  /**
+   * Host-only retrieval capability. Cancellation is tied to this exact turn;
+   * neither a lease nor generation/disclosure permission leaves the controller.
+   */
+  startScopedChatRetrieval(selector: unknown, input: unknown): ScopedRetrievalTurn {
+    const rejected = (code:string):ScopedRetrievalTurn =>
+      Object.freeze({result:Promise.resolve(failure(code)),cancel:()=>{}});
+    let request: ScopedSearch, selection: ScopeSelector;
+    try {
+      if (!isRecord(input) || Object.keys(input).some(key => !['requestId','query','limit','matchMode'].includes(key)))
+        throw new StandaloneError('INVALID_REQUEST');
+      const parsed = parseSearch({protocolVersion:2,requestId:input.requestId,query:input.query,requestedMode:'lexical',
+        limit:input.limit,...(input.matchMode === undefined ? {} : {matchMode:input.matchMode})});
+      request = {requestId:parsed.requestId,query:parsed.query,limit:parsed.limit,matchMode:parsed.matchMode};
+      selection = parseScopeSelector(selector);
+    } catch(error) { return rejected(error instanceof StandaloneError ? error.code : 'INVALID_REQUEST'); }
+    if (this.disposed || !this.enabled) return rejected('DISABLED');
+    if (this.paused) return rejected('PAUSED');
+    if (this.sharedAuthorityTransition()) return rejected('SUPERSEDED');
+    const engine = this.engine;
+    if (!engine?.captureChatScope) return rejected('CAPABILITY_UNAVAILABLE');
+    if (this.generationAdmissionDepth || this.prepared.generation || this.activeEvidence.generation
+      || this.scopedRetrieval || this.active || this.pending) return rejected('BUSY');
+    const abort = new AbortController();
+    let context: CallContext;
+    try {
+      context = bindActiveDeadline({signal:abort.signal,deadlineUnixMs:Date.now()+SCOPED_RETRIEVAL_TIMEOUT_MS},
+        SCOPED_RETRIEVAL_TIMEOUT_MS);
+    } catch { return rejected('TIMEOUT'); }
+    let finish!: ActiveScopedRetrieval['finish'];
+    const result = new Promise<ApiResult<SearchResponse>>(resolve=>{finish=resolve;});
+    const operation: ActiveScopedRetrieval = {abort,context,revision:this.revision,sourceRevision:this.sourceRevision,finish,retired:false};
+    // Reserve before any engine or settings callback can reenter.
+    this.scopedRetrieval = operation;
+    const owned = ():boolean => this.scopedRetrieval === operation && !operation.retired && !this.disposed
+      && this.enabled && !this.paused && this.revision === operation.revision
+      && this.sourceRevision === operation.sourceRevision && this.engine === engine
+      && !this.sharedAuthorityTransition() && !abort.signal.aborted;
+    const check = ():void => {
+      remainingOperationMs(context);
+      if (!owned()) throw new StandaloneError('SUPERSEDED');
+    };
+    const configBinding = ():string => {
+      const pref = this.generationPort?.config();
+      return JSON.stringify([pref?.state === 'configured' ? configDigest('generation',pref) : pref?.state ?? null,
+        this.generationPort?.scopeId() ?? null]);
+    };
+    const retire = (code:string):void => {
+      if (this.scopedRetrieval !== operation || operation.retired) return;
+      this.revokeScopedRetrieval(operation,code);
+      this.drainRetirements();
+    };
+    operation.timer = setTimeout(()=>retire('TIMEOUT'),SCOPED_RETRIEVAL_TIMEOUT_MS);
+    void (async()=>{
+      try {
+        check();
+        const config = configBinding();check();
+        const generation = engine.status().generationId;check();
+        if (!generation) throw new StandaloneError('INDEX_UNAVAILABLE');
+        const current = (lease:ChatScopeLease):void => {
+          check();
+          if (configBinding() !== config || engine.status().generationId !== generation
+            || lease.snapshot.generationId !== generation || !lease.current()) throw new StandaloneError('SCOPE_CHANGED');
+          check();
+        };
+        const lease = await engine.captureChatScope!(selection,abort.signal);
+        current(lease);
+        const response = await lease.search(request);
+        current(lease);
+        await lease.verify();
+        current(lease);
+        if (response.indexGenerationId !== generation || response.requestId !== request.requestId
+          || response.requestedMode !== 'lexical' || response.executedMode !== 'lexical')
+          throw new StandaloneError('SCOPE_CHANGED');
+        const detached = structuredClone(response);check();
+        finish({apiVersion:1,ok:true,value:detached});
+      } catch(error) {
+        if (!operation.retired) {
+          const expired = deadlineFailure(context);
+          finish(failure(expired?.code ?? (error instanceof StandaloneError || error instanceof ProviderFailure
+            ? error.code : 'INTERNAL_FAILURE')));
+        }
+      } finally {
+        clearTimeout(operation.timer);
+        // Physical slot remains reserved even after logical cancellation until
+        // the outstanding capture/search/verification actually settles.
+        if (this.scopedRetrieval === operation) this.scopedRetrieval=undefined;
+      }
+    })();
+    return Object.freeze({result,cancel:()=>retire('CANCELLED')});
+  }
+  private revokeScopedRetrieval(operation = this.scopedRetrieval, code = 'SUPERSEDED'): void {
+    if (!operation || this.scopedRetrieval !== operation || operation.retired) return;
+    operation.retired=true;
+    clearTimeout(operation.timer);
+    const reason=cancelActiveDeadline(operation.context);
+    operation.finish(failure(reason.code === 'TIMEOUT' ? 'TIMEOUT' : code));
+    // Logical retirement is complete; physical abort joins the shared ledger.
+    this.enqueueRetirement({kind:'evidence',revision:operation.revision,owner:operation.abort,
+      attempted:false,run:()=>operation.abort.abort()});
+  }
   private async pump(): Promise<void> {
     if (this.notifying || this.runtimeSettingsChanging || this.sharedResetDepth || this.revokingSharedAuthority || this.sharedAuthorityFault || this.active || !this.pending) return;
     const job = this.pending; this.pending = undefined;
@@ -520,7 +633,12 @@ export class SearchController {
     return role === 'reranking' ? this.rerankPort : this.generationPort;
   }
   prepareRerank(): RerankPreview { return this.prepareEvidence('reranking'); }
-  prepareGeneration(): RerankPreview { return this.prepareEvidence('generation'); }
+  prepareGeneration(): RerankPreview {
+    if (this.scopedRetrieval) throw new ProviderFailure('BUSY');
+    this.generationAdmissionDepth++;
+    try { return this.prepareEvidence('generation'); }
+    finally { this.generationAdmissionDepth--; }
+  }
   /** Settings changes revoke admission itself, not just pending consent. */
   revokeRerankProfile(): void { this.rerankProfiles.revoke(); }
   private invalidateRerankProfile(): void {
@@ -700,7 +818,10 @@ export class SearchController {
     return this.confirmEvidence('reranking',preview,classification,token);
   }
   generationConfirmed(preview: RerankPreview, classification: 'synthetic' | 'public', token: string): Promise<void> {
-    return this.confirmEvidence('generation',preview,classification,token);
+    if (this.scopedRetrieval) return Promise.reject(new ProviderFailure('BUSY'));
+    this.generationAdmissionDepth++;
+    try { return this.confirmEvidence('generation',preview,classification,token); }
+    finally { this.generationAdmissionDepth--; }
   }
   private async confirmEvidence(role: EvidenceRole, preview: RerankPreview, classification: 'synthetic' | 'public', token: string): Promise<void> {
     if (this.sharedAuthorityTransition() || this.roleRetirement(role)) throw new ProviderFailure('DISCLOSURE_DENIED');
@@ -815,6 +936,7 @@ export class SearchController {
   sealTerminal(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.revokeScopedRetrieval();
     this.engine = undefined;
     this.revision++;
     this.lastQuery = '';

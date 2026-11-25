@@ -3,6 +3,7 @@ export const AI_CONTRACT_VERSION = 1 as const;
 export const AI_ROLES = ['embedding', 'reranking', 'generation'] as const;
 export type AiRole = typeof AI_ROLES[number];
 export type ProviderFailureCode = 'DISABLED' | 'CONFIG_INVALID' | 'NOT_READY'
+  | 'BUSY'
   | 'ENDPOINT_DENIED' | 'DISCLOSURE_DENIED' | 'MODEL_MISMATCH' | 'LIMIT_EXCEEDED'
   | 'UNAUTHENTICATED' | 'FORBIDDEN' | 'RATE_LIMITED' | 'QUOTA_EXCEEDED'
   | 'TIMEOUT' | 'CANCELLED' | 'NETWORK' | 'SERVER_ERROR' | 'INVALID_RESPONSE' | 'SOURCE_STALE';
