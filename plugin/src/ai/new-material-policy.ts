@@ -15,7 +15,7 @@ export type NewMaterialRuleConfig=Readonly<{version:typeof NEW_MATERIAL_RULE_CON
   defaultAction:MarkAction;rules:readonly NewMaterialRule[]}>;
 /** This is supplied by a trusted import adapter. A frontmatter property is never provenance. */
 export type TrustedImportProvenance=Readonly<{channelId:string;digest:string;sourceId:string;sha256:string;rootId:string}>;
-export type MaterialLifecycle=Readonly<{state:'existing'|'verified-new';sourceId:string;sha256:string;rootId:string}>;
+export type MaterialLifecycle=Readonly<{state:'existing'|'verified-new'|'unresolved';sourceId:string;sha256:string;rootId:string}>;
 export type NewMaterialPolicyInput=Readonly<{sourceId:string;sha256:string;rootId:string;proof:PolicyMetadataProof;
   lifecycle:MaterialLifecycle;provenance:TrustedImportProvenance|null}>;
 export type NewMaterialDecision=Readonly<{policyVersion:typeof NEW_MATERIAL_POLICY_VERSION;ruleRevision:string|null;
@@ -46,13 +46,16 @@ function validWhen(value:unknown):value is RuleWhen{
     &&(when.tags===undefined||strings(when.tags))&&(when.properties===undefined||Array.isArray(when.properties)
       &&when.properties.length>0&&when.properties.length<=BOUNDS.predicates&&when.properties.every(predicate=>propertyShape(predicate,true)));
 }
+export const MAX_RULE_CONFIG_BYTES=32768;
+export function defaultMarkingRules():NewMaterialRuleConfig{return {version:NEW_MATERIAL_RULE_CONFIG_VERSION,defaultAction:'leave-absent',rules:[]};}
 export function validNewMaterialRuleConfig(config:unknown):config is NewMaterialRuleConfig{
   if(!config||typeof config!=='object'||Array.isArray(config)||!exact(config,['version','defaultAction','rules']))return false;
   const candidate=config as NewMaterialRuleConfig;
   return candidate.version===NEW_MATERIAL_RULE_CONFIG_VERSION&&['leave-absent','set-external','set-private'].includes(candidate.defaultAction)
     &&Array.isArray(candidate.rules)&&candidate.rules.length<=BOUNDS.predicates&&candidate.rules.every(rule=>!!rule&&typeof rule==='object'
       &&exact(rule,['id','action','when'])&&identifier(rule.id)&&['set-external','set-private'].includes(rule.action)&&validWhen(rule.when))
-    &&new Set(candidate.rules.map(rule=>rule.id)).size===candidate.rules.length;
+    &&new Set(candidate.rules.map(rule=>rule.id)).size===candidate.rules.length
+    &&Buffer.byteLength(JSON.stringify(candidate))<=MAX_RULE_CONFIG_BYTES;
 }
 function ruleRevision(config:NewMaterialRuleConfig):string{
   return hash(JSON.stringify({version:config.version,defaultAction:config.defaultAction,rules:config.rules.map(rule=>({id:rule.id,action:rule.action,when:{
@@ -70,7 +73,7 @@ function inputValid(input:NewMaterialPolicyInput):boolean{
   return validPath(input.sourceId)&&isDigest(input.sha256)&&isDigest(input.rootId)&&input.proof.sourceId===input.sourceId
     &&input.proof.sha256===input.sha256&&input.proof.scopeId===input.rootId&&['absent','external','private','invalid','unresolved'].includes(input.proof.state)
     &&validProperties(input.proof.properties)&&!!input.lifecycle&&exact(input.lifecycle,['state','sourceId','sha256','rootId'])
-    &&['existing','verified-new'].includes(input.lifecycle.state)&&validPath(input.lifecycle.sourceId)&&isDigest(input.lifecycle.sha256)
+    &&['existing','verified-new','unresolved'].includes(input.lifecycle.state)&&validPath(input.lifecycle.sourceId)&&isDigest(input.lifecycle.sha256)
     &&isDigest(input.lifecycle.rootId)&&(input.provenance===null||!!input.provenance&&exact(input.provenance,['channelId','digest','sourceId','sha256','rootId'])
       &&identifier(input.provenance.channelId)&&isDigest(input.provenance.digest)&&validPath(input.provenance.sourceId)
       &&isDigest(input.provenance.sha256)&&isDigest(input.provenance.rootId));
@@ -112,6 +115,7 @@ export function decideNewMaterialMarking(config:unknown,input:NewMaterialPolicyI
       return decision(revision,'leave-absent','provenance-unresolved',null);
     if(input.proof.state==='private')return decision(revision,'leave-absent','explicit-private',null,true);
     if(input.proof.state!=='absent'&&input.proof.state!=='external')return decision(revision,'leave-absent','metadata-unresolved',null);
+    if(input.lifecycle.state==='unresolved')return decision(revision,'leave-absent','lifecycle-unresolved',null);
     if(input.lifecycle.state==='existing')return decision(revision,'leave-absent','existing-material',null,true,false);
     const results=config.rules.map(rule=>({rule,result:matches(rule,input)}));
     const restrictive=results.find(result=>result.result==='match'&&result.rule.action==='set-private');
