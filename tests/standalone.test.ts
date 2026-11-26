@@ -2185,6 +2185,39 @@ test('06B.2b cached projection rehashes entire catalog without repeated worker r
   }finally{reader.read=originalRead;await parser.close();await cleanup();}
 });
 
+test('06B.4 complete graph audit refreshes an aged lexical generation without skipping source proof',async()=>{
+  const {engine,reader,store,root,cleanup}=await setup({'a.md':graphCard('A','depends: B\n')+'REQ-LOCAL-1 selected.\n','b.md':graphCard('B')});
+  let clock=1000,reads=0;
+  const actual=reader.read.bind(reader);
+  try{
+    await engine.close();
+    const fresh=newEngine(reader,store,undefined,()=>clock);
+    try{
+      await fresh.start();await fresh.whenIdle();fresh.configureGraph(graphMapping);
+      reader.read=async path=>{reads++;return actual(path);};
+      clock+=30_001;
+      const r=await fresh.retrieveLocalGraph(localGraphRequest(),new AbortController().signal);
+      assert.equal(r.candidates.length,2);assert.ok(reads>=4);
+      assert.equal((await fresh.search(search('REQ-LOCAL-1'))).status,'ok');
+      clock+=30_001;await writeFile(join(root,'b.md'),graphCard('C'));
+      await assert.rejects(fresh.retrieveLocalGraph(localGraphRequest(),new AbortController().signal),error('GRAPH_SOURCE_STALE'));
+      await fresh.whenIdle();
+      const next=await fresh.retrieveLocalGraph(localGraphRequest(),new AbortController().signal);
+      assert.equal(next.candidates.length,1);
+    }finally{reader.read=actual;await fresh.close();}
+  }finally{await cleanup();}
+});
+test('06B.4 unchanged source bytes with changed authoritative hints still retire graph before audit refresh',async()=>{
+  const {engine,reader,cleanup}=await setup({'a.md':graphCard('A')+'REQ-LOCAL-1 selected.\n'});
+  const actual=reader.versionHints.bind(reader);
+  try{
+    engine.configureGraph(graphMapping);
+    reader.versionHints=async p=>(await actual(p)).map(h=>h+'-changed');
+    await assert.rejects(engine.retrieveLocalGraph(localGraphRequest(),new AbortController().signal),error('GRAPH_SOURCE_STALE'));
+    reader.versionHints=actual;await engine.whenIdle();
+    assert.equal((await engine.retrieveLocalGraph(localGraphRequest(),new AbortController().signal)).candidates.length,1);
+  }finally{reader.versionHints=actual;await cleanup();}
+});
 test('06B.2b close waits for physical graph read and prevents late result',async()=>{
   const {engine,reader,cleanup}=await setup({'a.md':graphCard('A')});
   const actual=reader.read.bind(reader), gate=asynchronousGate();

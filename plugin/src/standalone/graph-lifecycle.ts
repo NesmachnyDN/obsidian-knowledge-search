@@ -24,7 +24,7 @@ export type GraphScopeLease = Readonly<{
  * serialized index digest is not proof that its parse matches original bytes.
  * The existing source provider enforces the vault boundary and byte cap. */
 export async function authenticateGraphCatalog(gen: IndexGeneration, provider: SourceProvider,
-  parser: MarkdownParser, reparse: boolean, check: () => void, yieldJob: () => Promise<void>): Promise<void> {
+  parser: MarkdownParser, reparse: boolean, check: () => void, yieldJob: () => Promise<void>): Promise<string[]> {
   const membership = async () => {
     check();
     const paths = await provider.list(); check();
@@ -35,7 +35,9 @@ export async function authenticateGraphCatalog(gen: IndexGeneration, provider: S
   };
   const paths = await membership();
   const hints = await provider.versionHints(paths); check();
+  let processed=0;
   for (const doc of gen.documents) {
+    check();
     const bytes = await provider.read(doc.sourceId); check();
     if (bytes.byteLength > BOUNDS.fileBytes || hash(bytes) !== doc.sha256)
       throw new StandaloneError('GRAPH_SOURCE_STALE');
@@ -44,24 +46,27 @@ export async function authenticateGraphCatalog(gen: IndexGeneration, provider: S
       if (JSON.stringify(parsed) !== JSON.stringify(doc))
         throw new StandaloneError('GRAPH_INDEX_UNAUTHENTICATED');
     }
-    await yieldJob(); check();
+    // Source and parser reads already cross asynchronous boundaries. Batch the
+    // additional cooperative timer yield without reducing per-source guards.
+    if(++processed%8===0){await yieldJob();check();}
   }
   const after = await membership();
   const afterHints = await provider.versionHints(after); check();
   if (hints.length !== paths.length || afterHints.length !== hints.length
     || hints.some((h,i) => h !== afterHints[i])) throw new StandaloneError('GRAPH_SOURCE_STALE');
+  return afterHints;
 }
 
 export async function buildAuthenticatedGraph(gen: IndexGeneration, mapping: GraphMapping,
   provider: SourceProvider, parser: MarkdownParser, current: () => boolean,
-  check: () => void, yieldJob: () => Promise<void>): Promise<GraphProjection> {
+  check: () => void, yieldJob: () => Promise<void>): Promise<{graph:GraphProjection;hints:string[]}> {
   await authenticateGraphCatalog(gen,provider,parser,true,check,yieldJob);
   check();
   const graph = await deriveGraphProjection(gen,mapping,{cancelled:()=>!current(),yieldJob});
   check();
   if ('code' in graph) throw new StandaloneError(graph.code);
-  await authenticateGraphCatalog(gen,provider,parser,false,check,yieldJob);
-  check(); return graph;
+  const hints=await authenticateGraphCatalog(gen,provider,parser,false,check,yieldJob);
+  check(); return {graph,hints};
 }
 
 /** Scope is resolved only against the pinned, authenticated generation.
