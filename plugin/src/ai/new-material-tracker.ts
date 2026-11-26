@@ -1,5 +1,7 @@
 import { BOUNDS, isDigest, validPath } from '../standalone/contracts';
-import type { DescriptorLifecycleProof } from '../standalone/source';
+import { BoundedVaultReader, type DescriptorLifecycleProof } from '../standalone/source';
+import { DurableLifecycleLedger } from './lifecycle-ledger';
+import type { LedgerAnchor, LedgerEntry } from './lifecycle-ledger-schema';
 
 export type LifecycleState = 'existing'|'verified-new'|'unresolved';
 export type LifecycleContext = Readonly<{
@@ -11,8 +13,22 @@ export type BaselineInventory<T extends object> = Readonly<{complete:boolean;can
 export type BaselinePreview<T extends object> = Readonly<{
   context:LifecycleContext; startedAt:number; expiresAt:number; candidates:readonly BaselineCandidate<T>[];
 }>;
-type Admitted<T extends object> = Readonly<{owner:T;state:Exclude<LifecycleState,'unresolved'>;proof:DescriptorLifecycleProof}>;
+type Origin='native-create'|'baseline';
+type Admitted<T extends object> = Readonly<{owner:T;state:Exclude<LifecycleState,'unresolved'>;proof:DescriptorLifecycleProof;
+  origin:Origin;originVersionId:string}>;
 type Entry<T extends object> = Admitted<T>|'deleted'|'ambiguous';
+/**
+ * Future host integration supplies these capabilities from its native event
+ * authority. They are deliberately synchronous: an asynchronous lookup cannot
+ * be treated as a stable native owner at the restore publication boundary.
+ * This contract does not prove native-event authenticity or completeness.
+ */
+export type LifecycleRestoreHost<T extends object> = Readonly<{
+  // One-shot host epoch signal: abort synchronously on ANY authority loss,
+  // even a transient loss between asynchronous descriptor observations.
+  signal:AbortSignal; current:()=>boolean; resolveNativeOwner:(sourceId:string)=>T|null;
+}>;
+export type LifecycleRestoreEvidence = Readonly<{baselineAdmitted:boolean;entries:readonly LedgerEntry[]}>;
 
 function objectIdentity(value:unknown):value is object {
   return typeof value==='object'&&value!==null;
@@ -45,10 +61,10 @@ function admitted<T extends object>(entry:Entry<T>|undefined):entry is Admitted<
 
 /**
  * One host-owned tracker. The accepted ephemeral pilot API remains unchanged.
- * The exact-version substrate is not wired to production in POLICY.2e1.
+ * Exact-version and durable restoration primitives are not yet wired to production.
  * Only an admitted native host adapter may supply context, complete inventories,
  * event sequence/owner and fresh canonical descriptor proofs; note content and
- * arbitrary callers are not evidence. Durable epoch admission is still absent.
+ * arbitrary callers are not evidence. Durable epoch initialization and native admission are still separate gates.
  */
 export class NewMaterialTracker<T extends object> {
   private readonly entries=new Map<string,T|null>();
@@ -60,7 +76,17 @@ export class NewMaterialTracker<T extends object> {
   private eventSequence=0;
   private baselineDone=false;
   private pending?:BaselinePreview<T>;
+  private lifecycleRevision=0;
+  private restoreUsed=false;
+  private restorePending=false;
+  private legacyTouched=false;
+  private noteLegacyMutation():void {
+    this.legacyTouched=true;
+    // The pilot path cannot supply exact-version transition evidence.
+    if(this.restoreUsed)this.sealLifecycle();
+  }
   created(path:string,owner:T):void {
+    this.noteLegacyMutation();
     if(this.overflow||!validPath(path))return;
     if(this.entries.size>=BOUNDS.sources&&!this.entries.has(path)){this.entries.clear();this.overflow=true;return;}
     // Duplicate create for an existing tracked path is ambiguous.
@@ -69,11 +95,13 @@ export class NewMaterialTracker<T extends object> {
   }
   /** A modify/metadata event is not creation evidence. Preserve only exact live identity. */
   changed(path:string,owner:T):void {
+    this.noteLegacyMutation();
     if(this.overflow||!validPath(path))return;
     if(this.entries.has(path)&&this.entries.get(path)!==owner)this.entries.set(path,null);
   }
   /** Only an exact file-owner move can carry creation provenance to a new path. */
   renamed(oldPath:string,path:string,owner:T):void {
+    this.noteLegacyMutation();
     if(this.overflow)return;
     if(oldPath===path){this.changed(path,owner);return;}
     const known=validPath(oldPath)&&this.entries.get(oldPath)===owner;
@@ -84,12 +112,13 @@ export class NewMaterialTracker<T extends object> {
     if(known)this.entries.set(path,owner);
   }
   invalidate(path:string):void {
+    this.noteLegacyMutation();
     for(const key of this.entries.keys())if(key===path||key.startsWith(path+'/'))this.entries.delete(key);
   }
   state(path:string,owner:T):'verified-new'|'unresolved' {
     return !this.overflow&&this.entries.get(path)===owner?'verified-new':'unresolved';
   }
-  clear():void {this.entries.clear();this.overflow=false;this.sealLifecycle();}
+  clear():void {this.entries.clear();this.overflow=false;this.lifecycleRevision++;this.sealLifecycle();}
 
 
   openLifecycle(context:LifecycleContext):boolean {
@@ -105,7 +134,9 @@ export class NewMaterialTracker<T extends object> {
     this.sealed=true;this.exact.clear();this.pending=undefined;
   }
   private event(context:LifecycleContext,event:NativeLifecycleEvent,kind:NativeLifecycleEvent['kind']):boolean {
+    if(this.restorePending){this.sealLifecycle();return false;}
     if(!this.current(context))return false;
+    this.lifecycleRevision++;
     this.pending=undefined;
     if(!event||event.kind!==kind||!Number.isSafeInteger(event.sequence)||event.sequence!==this.eventSequence+1){
       this.sealLifecycle();return false;
@@ -117,11 +148,14 @@ export class NewMaterialTracker<T extends object> {
     if(this.exact.size>=BOUNDS.sources&&!this.exact.has(path)){this.sealLifecycle();return false;}
     this.exact.set(path,entry);return true;
   }
-  private setAdmitted(owner:T,state:Admitted<T>['state'],proof:DescriptorLifecycleProof):boolean {
-    return this.store(proof.version.sourceId,Object.freeze({owner,state,proof:copyProof(proof)}));
+  private setAdmitted(owner:T,state:Admitted<T>['state'],proof:DescriptorLifecycleProof,
+      origin:Origin=state==='existing'?'baseline':'native-create',originVersionId=proof.version.versionId):boolean {
+    return this.store(proof.version.sourceId,Object.freeze({owner,state,proof:copyProof(proof),origin,originVersionId}));
   }
   reviseRules(context:LifecycleContext,nextRevision:string):boolean {
+    if(this.restorePending){this.sealLifecycle();return false;}
     if(!this.current(context)||!isDigest(nextRevision))return false;
+    this.lifecycleRevision++;
     this.pending=undefined;
     this.context=Object.freeze({...this.context!,rulesRevision:nextRevision});
     return true;
@@ -133,7 +167,7 @@ export class NewMaterialTracker<T extends object> {
     if((previous!==undefined&&previous!=='deleted')||this.entries.has(path)){
       this.store(path,'ambiguous');return 'unresolved';
     }
-    return this.setAdmitted(owner,'verified-new',proof)?'verified-new':'unresolved';
+    return this.setAdmitted(owner,'verified-new',proof,'native-create',proof.version.versionId)?'verified-new':'unresolved';
   }
   advance(context:LifecycleContext,owner:T,event:NativeLifecycleEvent,prior:DescriptorLifecycleProof,
       next:DescriptorLifecycleProof):LifecycleState {
@@ -153,7 +187,7 @@ export class NewMaterialTracker<T extends object> {
       return 'unresolved';
     }
     if(!samePath)this.store(from,'deleted');
-    return this.setAdmitted(owner,current.state,next)?current.state:'unresolved';
+    return this.setAdmitted(owner,current.state,next,current.origin,current.originVersionId)?current.state:'unresolved';
   }
   retire(context:LifecycleContext,event:NativeLifecycleEvent,path:string,target:'file'|'folder'):boolean {
     const kind=event?.kind==='delete'?'delete':'uncertain';
@@ -166,7 +200,7 @@ export class NewMaterialTracker<T extends object> {
     return this.store(path,kind==='delete'?'deleted':'ambiguous');
   }
   lifecycleState(context:LifecycleContext,owner:T,proof:DescriptorLifecycleProof):LifecycleState {
-    if(!this.current(context)||!validProof(proof,context.rootId))return 'unresolved';
+    if(this.restorePending||!this.current(context)||!validProof(proof,context.rootId))return 'unresolved';
     const current=this.exact.get(proof.version.sourceId);
     return admitted(current)&&current.owner===owner&&sameProof(current.proof,proof)?current.state:'unresolved';
   }
@@ -185,14 +219,14 @@ export class NewMaterialTracker<T extends object> {
     return Object.freeze(out.sort((a,b)=>a.proof.version.sourceId<b.proof.version.sourceId?-1:1));
   }
   previewInitialBaseline(context:LifecycleContext,input:BaselineInventory<T>,now:number,ttlMs:number):BaselinePreview<T>|null {
-    if(!this.current(context)||this.baselineDone)return null;
+    if(this.restorePending||!this.current(context)||this.baselineDone)return null;
     this.pending=undefined;
     if(!Number.isSafeInteger(now)||now<0||!Number.isSafeInteger(ttlMs)||ttlMs<=0||ttlMs>300000
       ||!Number.isSafeInteger(now+ttlMs))return null;
     const candidates=this.inventory(context,input);
     if(!candidates)return null;
     const preview=Object.freeze({context:this.context!,startedAt:now,expiresAt:now+ttlMs,candidates});
-    this.pending=preview;return preview;
+    this.lifecycleRevision++;this.pending=preview;return preview;
   }
   confirmInitialBaseline(context:LifecycleContext,preview:BaselinePreview<T>,input:BaselineInventory<T>,now:number):boolean {
     // Capability identity is instance-local and cannot be replayed by copying
@@ -205,7 +239,103 @@ export class NewMaterialTracker<T extends object> {
     if(!fresh||fresh.length!==preview.candidates.length||!fresh.every((c,i)=>
       c.owner===preview.candidates[i]!.owner&&sameProof(c.proof,preview.candidates[i]!.proof)))return false;
     // All bounds and candidates verified before synchronous all-or-nothing admission.
-    for(const c of fresh)this.exact.set(c.proof.version.sourceId,Object.freeze({owner:c.owner,state:'existing',proof:c.proof}));
+    for(const c of fresh)this.exact.set(c.proof.version.sourceId,Object.freeze({owner:c.owner,state:'existing',proof:c.proof,
+      origin:'baseline',originVersionId:c.proof.version.versionId}));
     this.baselineDone=true;return true;
   }
+
+  /**
+   * One explicit, host-serialized recovery attempt for a pristine opened
+   * tracker. It never accepts caller-supplied snapshots or source proofs.
+   * The host must synchronously abort its captured one-shot signal on every
+   * authority loss, serialize ledger writes/close, and revalidate source proofs
+   * again at every later policy-use boundary.
+   */
+  async restoreCommittedLifecycle(context:LifecycleContext,ledger:DurableLifecycleLedger,reader:BoundedVaultReader,
+      host:LifecycleRestoreHost<T>):Promise<boolean> {
+    if(this.restoreUsed||this.restorePending||!this.current(context))return false;
+    this.restoreUsed=true;
+    if(this.exact.size!==0||this.eventSequence!==0||this.lifecycleRevision!==0||this.pending
+      ||this.baselineDone||this.legacyTouched||this.overflow||this.entries.size!==0
+      ||!(ledger instanceof DurableLifecycleLedger)||!(reader instanceof BoundedVaultReader)
+      ||reader.rootId!==context.rootId||!host||!(host.signal instanceof AbortSignal)
+      ||typeof host.current!=='function'||typeof host.resolveNativeOwner!=='function'){
+      this.sealLifecycle();return false;
+    }
+    this.restorePending=true;
+    const capturedContext=this.context!,signal=host.signal;
+    const intact=()=>this.restorePending&&this.current(capturedContext)&&this.lifecycleRevision===0
+      &&!this.legacyTouched&&host.signal===signal&&!signal.aborted;
+    const current=()=>intact()&&host.current()===true&&intact();
+    let published=false;
+    try {
+      if(!current())return false;
+      const loaded=await ledger.read();
+      if(!loaded||loaded.snapshot.rootId!==capturedContext.rootId||!current())return false;
+      const restored=new Map<string,Entry<T>>(),owners=new Map<T,string>();
+      const bind=(owner:T,path:string):boolean=>{
+        const prior=owners.get(owner);
+        if(prior!==undefined&&prior!==path){
+          restored.set(prior,'ambiguous');restored.set(path,'ambiguous');return false;
+        }
+        owners.set(owner,path);return true;
+      };
+      for(const record of loaded.snapshot.entries){
+        if(!current())return false;
+        if(!('proof' in record)){
+          restored.set(record.sourceId,record.state);continue;
+        }
+        const path=record.sourceId,first=host.resolveNativeOwner(path);
+        if(!objectIdentity(first)||!bind(first,path)){restored.set(path,'ambiguous');continue;}
+        let observed:DescriptorLifecycleProof;
+        try {observed=await reader.readLifecycleProof(path);}catch{restored.set(path,'ambiguous');continue;}
+        if(!current())return false;
+        const second=host.resolveNativeOwner(path);
+        if(!objectIdentity(second)||!bind(second,path)||first!==second||!sameProof(record.proof,observed)){
+          restored.set(path,'ambiguous');continue;
+        }
+        restored.set(path,Object.freeze({owner:first,state:record.state,proof:copyProof(record.proof),
+          origin:record.origin,originVersionId:record.originVersionId}));
+      }
+      if(!current()||restored.size!==loaded.snapshot.entries.length)return false;
+      // The backend verifies the current committed anchor on each read. The
+      // trusted host serializes this whole operation with writes and close.
+      const committed=await ledger.read();
+      if(!committed||!sameLedgerAnchor(committed.anchor,loaded.anchor)||!current())return false;
+      // All native owners are resolved again after the last await. Detect
+      // late substitution and duplicate ownership, including denied records.
+      for(const record of loaded.snapshot.entries){
+        if(!('proof' in record))continue;
+        if(!intact())return false;
+        const path=record.sourceId,owner=host.resolveNativeOwner(path),entry=restored.get(path);
+        if(!objectIdentity(owner)||!bind(owner,path)||!admitted(entry)||entry.owner!==owner)
+          restored.set(path,'ambiguous');
+      }
+      if(!current())return false;
+      // No callback/await between final fence and publication.
+      for(const [path,entry] of restored)this.exact.set(path,entry);
+      this.baselineDone=loaded.snapshot.baselineAdmitted;
+      published=true;
+      return true;
+    }catch{return false;}finally{
+      if(!published)this.sealLifecycle();
+      this.restorePending=false;
+    }
+  }
+  /** Immutable bounded evidence for a future host-authorized ledger commit. */
+  exportCommittedLifecycleEvidence(context:LifecycleContext):LifecycleRestoreEvidence|null {
+    if(this.restorePending||!this.current(context))return null;
+    const entries:LedgerEntry[]=[];
+    for(const [sourceId,entry] of [...this.exact.entries()].sort(([a],[b])=>a<b?-1:a>b?1:0)){
+      if(entry==='deleted'||entry==='ambiguous')entries.push(Object.freeze({sourceId,state:entry}));
+      else entries.push(Object.freeze({sourceId,state:entry.state,origin:entry.origin,originVersionId:entry.originVersionId,
+        proof:copyProof(entry.proof)}));
+    }
+    return Object.freeze({baselineAdmitted:this.baselineDone,entries:Object.freeze(entries)});
+  }
+}
+
+function sameLedgerAnchor(a:LedgerAnchor,b:LedgerAnchor):boolean {
+  return a.schemaVersion===b.schemaVersion&&a.rootId===b.rootId&&a.epoch===b.epoch
+    &&a.revision===b.revision&&a.snapshotSha256===b.snapshotSha256;
 }
