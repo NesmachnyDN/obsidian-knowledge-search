@@ -119,7 +119,10 @@ export function physicalLines(raw: Uint8Array): Line[] {
  * frontmatter parser interprets values; this proof merely excludes syntax where
  * its limited grammar cannot establish an unambiguous original mapping. */
 export function parsePolicyMetadata(path:string,data:Uint8Array,rootId:string,sha:string):PolicyMetadataProof {
-  const proof=(state:PolicyMetadataProof['state']):PolicyMetadataProof=>({sourceId:path,sha256:sha,scopeId:rootId,state});
+  const proof=(state:PolicyMetadataProof['state'],properties:readonly TypedProperty[]=[]):PolicyMetadataProof=>({
+    sourceId:path,sha256:sha,scopeId:rootId,state,
+    properties:properties.map(p=>({key:p.key,valueType:p.valueType,value:Array.isArray(p.value)?[...p.value]:p.value})),
+  });
   if(data.byteLength>BOUNDS.fileBytes)throw new StandaloneError('SOURCE_LIMIT');
   const lines=physicalLines(data);
   const first=lines[0]?.text??'';
@@ -146,10 +149,10 @@ export function parsePolicyMetadata(path:string,data:Uint8Array,rootId:string,sh
     return proof('unresolved');
   }
   const property=metadata.properties.find(p=>p.key==='llm_processing');
-  if(!property)return proof('absent');
-  if(property.valueType==='string'&&property.value==='external')return proof('external');
-  if(property.valueType==='string'&&property.value==='private')return proof('private');
-  return proof('invalid');
+  if(!property)return proof('absent',metadata.properties);
+  if(property.valueType==='string'&&property.value==='external')return proof('external',metadata.properties);
+  if(property.valueType==='string'&&property.value==='private')return proof('private',metadata.properties);
+  return proof('invalid',metadata.properties);
 }
 const HEADING = /^(#{1,6})[ \t]+(.+)$/;
 const CLAUSE = /^(REQ-[A-Za-z0-9-]+|[0-9]+(?:\.[0-9]+)+):/;

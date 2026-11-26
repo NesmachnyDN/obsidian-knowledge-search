@@ -103,7 +103,8 @@ test('POLICY.1b existing worker carries version-bound compact proof, lexical par
     const pending=worker.policyMetadata('note.md',bytes,root);
     await assert.rejects(worker.policyMetadata('note.md',bytes,root),/PARSER_BUSY/);
     const proof=await pending;
-    assert.deepEqual(proof,{sourceId:'note.md',sha256:hash(raw),scopeId:root,state:'private'});
+    assert.deepEqual(proof,{sourceId:'note.md',sha256:hash(raw),scopeId:root,state:'private',
+      properties:[{key:'llm_processing',valueType:'string',value:'private'}]});
     assert.ok(Object.isFrozen(proof));
     const doc=await worker.parse('note.md',bytes,root);
     assert.equal(doc.properties[0]?.value,'private');assert.equal(doc.sha256,hash(raw));

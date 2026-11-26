@@ -1,5 +1,5 @@
 import { constants, closeSync, fstatSync, openSync, readSync } from 'node:fs';
-import { BOUNDS, StandaloneError, hash, validPath, isDigest, type SourceVersion } from './contracts';
+import { BOUNDS, StandaloneError, hash, validPath, isDigest, validProperty, type SourceVersion } from './contracts';
 import type { PolicyMetadataProof } from './shared';
 
 export interface PolicyMetadataParser {
@@ -97,13 +97,24 @@ export class WorkerMarkdownParser implements MarkdownParser, PolicyMetadataParse
     } else if (typeof message.error === 'string') {
       waiting.reject(new StandaloneError(message.error));
     } else if(waiting.kind==='policy') {
-      if(!message.proof||!['absent','external','private','invalid','unresolved'].includes(message.proof.state)) {
+      if(!message.proof||!['absent','external','private','invalid','unresolved'].includes(message.proof.state)
+        || !Array.isArray(message.proof.properties) || message.proof.properties.length>BOUNDS.propertiesPerSource
+        || !message.proof.properties.every(property=>validProperty(property))
+        || new Set(message.proof.properties.map(property=>property.key)).size!==message.proof.properties.length
+        || !this.consistentPolicyProof(message.proof)) {
         waiting.reject(new StandaloneError('PARSER_PROTOCOL_ERROR'));this.fail('PARSER_PROTOCOL_ERROR');
       } else waiting.resolve(message.proof);
     } else if (!message.doc || !Array.isArray(message.doc.blocks)) {
       waiting.reject(new StandaloneError('PARSER_PROTOCOL_ERROR'));
       this.fail('PARSER_PROTOCOL_ERROR');
     } else waiting.resolve(message.doc);
+  }
+  private consistentPolicyProof(proof:PolicyMetadataProof):boolean {
+    if(proof.state==='unresolved')return proof.properties.length===0;
+    const marker=proof.properties.find(p=>p.key==='llm_processing');
+    const state=!marker?'absent':marker.valueType==='string'&&marker.value==='external'?'external':
+      marker.valueType==='string'&&marker.value==='private'?'private':'invalid';
+    return state===proof.state;
   }
   async parse(path: string, bytes: Uint8Array, rootId: string): Promise<SourceVersion> {
     if (this.stopped) throw new StandaloneError('PARSER_CLOSED');
@@ -145,7 +156,9 @@ export class WorkerMarkdownParser implements MarkdownParser, PolicyMetadataParse
     if(proof.sha256!==sha||proof.sourceId!==path||proof.scopeId!==rootId){
       this.fail('PARSER_PROTOCOL_ERROR');throw new StandaloneError('PARSER_PROTOCOL_ERROR');
     }
-    return Object.freeze({sourceId:path,sha256:sha,scopeId:rootId,state:proof.state});
+    return Object.freeze({sourceId:path,sha256:sha,scopeId:rootId,state:proof.state,
+      properties:Object.freeze(proof.properties.map(property=>Object.freeze({key:property.key,valueType:property.valueType,
+        value:Array.isArray(property.value)?Object.freeze([...property.value]):property.value}))) });
   }
   async close(): Promise<void> {
     if (this.stopped) return;
