@@ -1,0 +1,2580 @@
+{
+  "schema": "oks-06b4-results-v1",
+  "corpusSha256": "888f125c9fa07383b858358d5b8155494f3bd1f06df9edf53804899bc88aa4c3",
+  "count": 128,
+  "queryCount": 40,
+  "required": {
+    "count": 20,
+    "lexical": {
+      "recall": 0.4583333333333333,
+      "ndcg": 0.8012331832952715,
+      "mrr": 1
+    },
+    "graph": {
+      "recall": 1,
+      "ndcg": 1,
+      "mrr": 1
+    },
+    "delta": {
+      "recall": 0.5416666666666667,
+      "ndcg": 0.1987668167047285,
+      "mrr": 0
+    }
+  },
+  "ordinary": {
+    "count": 20,
+    "lexical": {
+      "recall": 1,
+      "ndcg": 1,
+      "mrr": 1
+    },
+    "graph": {
+      "recall": 1,
+      "ndcg": 1,
+      "mrr": 1
+    },
+    "delta": {
+      "recall": 0,
+      "ndcg": 0,
+      "mrr": 0
+    }
+  },
+  "rows": [
+    {
+      "id": "held-00",
+      "language": "ru",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.5,
+        "ndcg": 0.8262346571285599,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-00-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-00-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.6679300000000694
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-00-a.md",
+          "case-00-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-00-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-00-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 114.72869300000002,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-00-b.md\",[\"[\\\"case-00-a.md\\\",\\\"case-00-a.md\\\",\\\"case-00-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 113.06076299999995
+    },
+    {
+      "id": "held-01",
+      "language": "en",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.5,
+        "ndcg": 0.8262346571285599,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-01-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-01-a.md",
+            "rank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 1.4159280000001218
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-01-a.md",
+          "case-01-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-01-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 4
+          },
+          {
+            "source": "case-01-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 112.52517699999999,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-01-b.md\",[\"[\\\"case-01-b.md\\\",\\\"case-01-b.md\\\",\\\"case-01-a.md\\\",\\\"depends\\\",\\\"reverse\\\"]\"]]"
+        ]
+      },
+      "addedMs": 111.10924899999986
+    },
+    {
+      "id": "held-02",
+      "language": "ru",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.3333333333333333,
+        "ndcg": 0.7262287617954056,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-02-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-02-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.32803100000001
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-02-a.md",
+          "case-02-b.md",
+          "case-02-c.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-02-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-02-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-02-c.md",
+            "rank": 3,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 106.13463999999999,
+        "paths": {
+          "matched": 2,
+          "actual": 2,
+          "expected": 2,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-02-b.md\",[\"[\\\"case-02-a.md\\\",\\\"case-02-a.md\\\",\\\"case-02-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]",
+          "[\"case-02-c.md\",[\"[\\\"case-02-a.md\\\",\\\"case-02-a.md\\\",\\\"case-02-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\",\"[\\\"case-02-b.md\\\",\\\"case-02-b.md\\\",\\\"case-02-c.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 104.80660899999998
+    },
+    {
+      "id": "held-03",
+      "language": "en",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.5,
+        "ndcg": 0.8262346571285599,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-03-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-03-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.454733000000033
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-03-a.md",
+          "case-03-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-03-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-03-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 107.55610000000001,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-03-b.md\",[\"[\\\"case-03-b.md\\\",\\\"case-03-a.md\\\",\\\"case-03-b.md\\\",\\\"provides\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 106.10136699999998
+    },
+    {
+      "id": "held-04",
+      "language": "ru",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.5,
+        "ndcg": 0.8262346571285599,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-04-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-04-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.2759220000000369
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-04-a.md",
+          "case-04-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-04-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-04-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 106.286969,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-04-b.md\",[\"[\\\"case-04-a.md\\\",\\\"case-04-a.md\\\",\\\"case-04-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 105.01104699999996
+    },
+    {
+      "id": "held-05",
+      "language": "en",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.5,
+        "ndcg": 0.8262346571285599,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-05-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-05-a.md",
+            "rank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 1.6428419999999733
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-05-a.md",
+          "case-05-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-05-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 4
+          },
+          {
+            "source": "case-05-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 108.42838400000005,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-05-b.md\",[\"[\\\"case-05-b.md\\\",\\\"case-05-b.md\\\",\\\"case-05-a.md\\\",\\\"depends\\\",\\\"reverse\\\"]\"]]"
+        ]
+      },
+      "addedMs": 106.78554200000008
+    },
+    {
+      "id": "held-06",
+      "language": "ru",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.3333333333333333,
+        "ndcg": 0.7262287617954056,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-06-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-06-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.3850780000000213
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-06-a.md",
+          "case-06-b.md",
+          "case-06-c.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-06-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-06-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-06-c.md",
+            "rank": 3,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 110.70730400000002,
+        "paths": {
+          "matched": 2,
+          "actual": 2,
+          "expected": 2,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-06-b.md\",[\"[\\\"case-06-a.md\\\",\\\"case-06-a.md\\\",\\\"case-06-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]",
+          "[\"case-06-c.md\",[\"[\\\"case-06-a.md\\\",\\\"case-06-a.md\\\",\\\"case-06-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\",\"[\\\"case-06-b.md\\\",\\\"case-06-b.md\\\",\\\"case-06-c.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 109.322226
+    },
+    {
+      "id": "held-07",
+      "language": "en",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.5,
+        "ndcg": 0.8262346571285599,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-07-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-07-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.2925239999999576
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-07-a.md",
+          "case-07-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-07-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-07-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 108.98434699999984,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-07-b.md\",[\"[\\\"case-07-b.md\\\",\\\"case-07-a.md\\\",\\\"case-07-b.md\\\",\\\"provides\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 107.69182299999989
+    },
+    {
+      "id": "held-08",
+      "language": "ru",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.5,
+        "ndcg": 0.8262346571285599,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-08-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-08-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.2176399999998466
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-08-a.md",
+          "case-08-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-08-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-08-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 107.453348,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-08-b.md\",[\"[\\\"case-08-a.md\\\",\\\"case-08-a.md\\\",\\\"case-08-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 106.23570800000016
+    },
+    {
+      "id": "held-09",
+      "language": "en",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.5,
+        "ndcg": 0.8262346571285599,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-09-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-09-a.md",
+            "rank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 1.3005749999999807
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-09-a.md",
+          "case-09-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-09-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 4
+          },
+          {
+            "source": "case-09-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 109.12790100000007,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-09-b.md\",[\"[\\\"case-09-b.md\\\",\\\"case-09-b.md\\\",\\\"case-09-a.md\\\",\\\"depends\\\",\\\"reverse\\\"]\"]]"
+        ]
+      },
+      "addedMs": 107.82732600000008
+    },
+    {
+      "id": "held-10",
+      "language": "ru",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.3333333333333333,
+        "ndcg": 0.7262287617954056,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-10-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-10-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.3592640000001666
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-10-a.md",
+          "case-10-b.md",
+          "case-10-c.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-10-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-10-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-10-c.md",
+            "rank": 3,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 108.05610500000012,
+        "paths": {
+          "matched": 2,
+          "actual": 2,
+          "expected": 2,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-10-b.md\",[\"[\\\"case-10-a.md\\\",\\\"case-10-a.md\\\",\\\"case-10-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]",
+          "[\"case-10-c.md\",[\"[\\\"case-10-a.md\\\",\\\"case-10-a.md\\\",\\\"case-10-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\",\"[\\\"case-10-b.md\\\",\\\"case-10-b.md\\\",\\\"case-10-c.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 106.69684099999995
+    },
+    {
+      "id": "held-11",
+      "language": "en",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.5,
+        "ndcg": 0.8262346571285599,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-11-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-11-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.365375999999742
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-11-a.md",
+          "case-11-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-11-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-11-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 109.18462600000021,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-11-b.md\",[\"[\\\"case-11-b.md\\\",\\\"case-11-a.md\\\",\\\"case-11-b.md\\\",\\\"provides\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 107.81925000000047
+    },
+    {
+      "id": "held-12",
+      "language": "ru",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.5,
+        "ndcg": 0.8262346571285599,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-12-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-12-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.2882929999996122
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-12-a.md",
+          "case-12-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-12-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-12-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 109.78969999999981,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-12-b.md\",[\"[\\\"case-12-a.md\\\",\\\"case-12-a.md\\\",\\\"case-12-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 108.5014070000002
+    },
+    {
+      "id": "held-13",
+      "language": "en",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.5,
+        "ndcg": 0.8262346571285599,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-13-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-13-a.md",
+            "rank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 1.3610859999998866
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-13-a.md",
+          "case-13-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-13-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 4
+          },
+          {
+            "source": "case-13-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 109.0036500000001,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-13-b.md\",[\"[\\\"case-13-b.md\\\",\\\"case-13-b.md\\\",\\\"case-13-a.md\\\",\\\"depends\\\",\\\"reverse\\\"]\"]]"
+        ]
+      },
+      "addedMs": 107.64256400000022
+    },
+    {
+      "id": "held-14",
+      "language": "ru",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.3333333333333333,
+        "ndcg": 0.7262287617954056,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-14-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-14-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.3237500000000182
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-14-a.md",
+          "case-14-b.md",
+          "case-14-c.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-14-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-14-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-14-c.md",
+            "rank": 3,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 107.34585899999956,
+        "paths": {
+          "matched": 2,
+          "actual": 2,
+          "expected": 2,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-14-b.md\",[\"[\\\"case-14-a.md\\\",\\\"case-14-a.md\\\",\\\"case-14-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]",
+          "[\"case-14-c.md\",[\"[\\\"case-14-a.md\\\",\\\"case-14-a.md\\\",\\\"case-14-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\",\"[\\\"case-14-b.md\\\",\\\"case-14-b.md\\\",\\\"case-14-c.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 106.02210899999955
+    },
+    {
+      "id": "held-15",
+      "language": "en",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.5,
+        "ndcg": 0.8262346571285599,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-15-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-15-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.265349000000242
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-15-a.md",
+          "case-15-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-15-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-15-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 110.22093700000005,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-15-b.md\",[\"[\\\"case-15-b.md\\\",\\\"case-15-a.md\\\",\\\"case-15-b.md\\\",\\\"provides\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 108.9555879999998
+    },
+    {
+      "id": "held-16",
+      "language": "ru",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.5,
+        "ndcg": 0.8262346571285599,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-16-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-16-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.1969189999999799
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-16-a.md",
+          "case-16-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-16-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-16-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 107.12741899999992,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-16-b.md\",[\"[\\\"case-16-a.md\\\",\\\"case-16-a.md\\\",\\\"case-16-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 105.93049999999994
+    },
+    {
+      "id": "held-17",
+      "language": "en",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.5,
+        "ndcg": 0.8262346571285599,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-17-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-17-a.md",
+            "rank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 1.3296370000002753
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-17-a.md",
+          "case-17-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-17-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 4
+          },
+          {
+            "source": "case-17-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 109.27622500000007,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-17-b.md\",[\"[\\\"case-17-b.md\\\",\\\"case-17-b.md\\\",\\\"case-17-a.md\\\",\\\"depends\\\",\\\"reverse\\\"]\"]]"
+        ]
+      },
+      "addedMs": 107.94658799999979
+    },
+    {
+      "id": "held-18",
+      "language": "ru",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.3333333333333333,
+        "ndcg": 0.7262287617954056,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-18-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-18-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.2261960000000727
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-18-a.md",
+          "case-18-b.md",
+          "case-18-c.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-18-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-18-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-18-c.md",
+            "rank": 3,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 107.78194899999971,
+        "paths": {
+          "matched": 2,
+          "actual": 2,
+          "expected": 2,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-18-b.md\",[\"[\\\"case-18-a.md\\\",\\\"case-18-a.md\\\",\\\"case-18-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]",
+          "[\"case-18-c.md\",[\"[\\\"case-18-a.md\\\",\\\"case-18-a.md\\\",\\\"case-18-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\",\"[\\\"case-18-b.md\\\",\\\"case-18-b.md\\\",\\\"case-18-c.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 106.55575299999964
+    },
+    {
+      "id": "held-19",
+      "language": "en",
+      "category": "graph-required",
+      "lexical": {
+        "recall": 0.5,
+        "ndcg": 0.8262346571285599,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-19-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-19-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 2.2560170000001563
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-19-a.md",
+          "case-19-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-19-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-19-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 107.17016999999987,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-19-b.md\",[\"[\\\"case-19-b.md\\\",\\\"case-19-a.md\\\",\\\"case-19-b.md\\\",\\\"provides\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 104.91415299999971
+    },
+    {
+      "id": "held-20",
+      "language": "ru",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-20-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-20-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.2623180000000502
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-20-a.md",
+          "case-20-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-20-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-20-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 108.04081300000007,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-20-b.md\",[\"[\\\"case-20-a.md\\\",\\\"case-20-a.md\\\",\\\"case-20-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 106.77849500000002
+    },
+    {
+      "id": "held-21",
+      "language": "en",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-21-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-21-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 2.022143000000142
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-21-a.md",
+          "case-21-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-21-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-21-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 119.92203500000005,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-21-b.md\",[\"[\\\"case-21-a.md\\\",\\\"case-21-a.md\\\",\\\"case-21-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 117.89989199999991
+    },
+    {
+      "id": "held-22",
+      "language": "ru",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-22-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-22-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.3052299999999377
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-22-a.md",
+          "case-22-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-22-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-22-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 107.971767,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-22-b.md\",[\"[\\\"case-22-a.md\\\",\\\"case-22-a.md\\\",\\\"case-22-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 106.66653700000006
+    },
+    {
+      "id": "held-23",
+      "language": "en",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-23-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-23-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.4347149999998692
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-23-a.md",
+          "case-23-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-23-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-23-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 110.22236299999986,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-23-b.md\",[\"[\\\"case-23-a.md\\\",\\\"case-23-a.md\\\",\\\"case-23-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 108.78764799999999
+    },
+    {
+      "id": "held-24",
+      "language": "ru",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-24-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-24-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 2.1386179999999513
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-24-a.md",
+          "case-24-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-24-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-24-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 116.17075000000023,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-24-b.md\",[\"[\\\"case-24-a.md\\\",\\\"case-24-a.md\\\",\\\"case-24-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 114.03213200000027
+    },
+    {
+      "id": "held-25",
+      "language": "en",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-25-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-25-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.6886349999999766
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-25-a.md",
+          "case-25-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-25-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-25-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 106.02989699999989,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-25-b.md\",[\"[\\\"case-25-a.md\\\",\\\"case-25-a.md\\\",\\\"case-25-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 104.34126199999992
+    },
+    {
+      "id": "held-26",
+      "language": "ru",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-26-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-26-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 2.076049000000239
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-26-a.md",
+          "case-26-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-26-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-26-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 108.69787799999995,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-26-b.md\",[\"[\\\"case-26-a.md\\\",\\\"case-26-a.md\\\",\\\"case-26-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 106.6218289999997
+    },
+    {
+      "id": "held-27",
+      "language": "en",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-27-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-27-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.268837000000076
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-27-a.md",
+          "case-27-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-27-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-27-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 109.01085499999999,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-27-b.md\",[\"[\\\"case-27-a.md\\\",\\\"case-27-a.md\\\",\\\"case-27-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 107.74201799999992
+    },
+    {
+      "id": "held-28",
+      "language": "ru",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-28-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-28-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.1651699999997618
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-28-a.md",
+          "case-28-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-28-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-28-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 106.19240099999979,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-28-b.md\",[\"[\\\"case-28-a.md\\\",\\\"case-28-a.md\\\",\\\"case-28-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 105.02723100000003
+    },
+    {
+      "id": "held-29",
+      "language": "en",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-29-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-29-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.3815599999998085
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-29-a.md",
+          "case-29-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-29-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-29-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 138.90188800000033,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-29-b.md\",[\"[\\\"case-29-a.md\\\",\\\"case-29-a.md\\\",\\\"case-29-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 137.52032800000052
+    },
+    {
+      "id": "held-30",
+      "language": "ru",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-30-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-30-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.3424409999997806
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-30-a.md",
+          "case-30-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-30-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-30-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 121.92659999999978,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-30-b.md\",[\"[\\\"case-30-a.md\\\",\\\"case-30-a.md\\\",\\\"case-30-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 120.584159
+    },
+    {
+      "id": "held-31",
+      "language": "en",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-31-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-31-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.2359019999994416
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-31-a.md",
+          "case-31-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-31-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-31-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 113.11776400000053,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-31-b.md\",[\"[\\\"case-31-a.md\\\",\\\"case-31-a.md\\\",\\\"case-31-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 111.88186200000109
+    },
+    {
+      "id": "held-32",
+      "language": "ru",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-32-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-32-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.2343710000004648
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-32-a.md",
+          "case-32-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-32-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-32-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 102.57923799999935,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-32-b.md\",[\"[\\\"case-32-a.md\\\",\\\"case-32-a.md\\\",\\\"case-32-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 101.34486699999889
+    },
+    {
+      "id": "held-33",
+      "language": "en",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-33-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-33-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.4536420000004
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-33-a.md",
+          "case-33-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-33-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-33-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 105.80681499999992,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-33-b.md\",[\"[\\\"case-33-a.md\\\",\\\"case-33-a.md\\\",\\\"case-33-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 104.35317299999952
+    },
+    {
+      "id": "held-34",
+      "language": "ru",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-34-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-34-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.238749000000098
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-34-a.md",
+          "case-34-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-34-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-34-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 106.92484599999989,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-34-b.md\",[\"[\\\"case-34-a.md\\\",\\\"case-34-a.md\\\",\\\"case-34-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 105.68609699999979
+    },
+    {
+      "id": "held-35",
+      "language": "en",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-35-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-35-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.3047810000007303
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-35-a.md",
+          "case-35-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-35-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-35-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 107.85796699999992,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-35-b.md\",[\"[\\\"case-35-a.md\\\",\\\"case-35-a.md\\\",\\\"case-35-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 106.55318599999919
+    },
+    {
+      "id": "held-36",
+      "language": "ru",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-36-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-36-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.2350960000003397
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-36-a.md",
+          "case-36-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-36-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-36-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 103.64102000000003,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-36-b.md\",[\"[\\\"case-36-a.md\\\",\\\"case-36-a.md\\\",\\\"case-36-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 102.40592399999969
+    },
+    {
+      "id": "held-37",
+      "language": "en",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-37-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-37-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.2807549999997718
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-37-a.md",
+          "case-37-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-37-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-37-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 105.712493,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-37-b.md\",[\"[\\\"case-37-a.md\\\",\\\"case-37-a.md\\\",\\\"case-37-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 104.43173800000022
+    },
+    {
+      "id": "held-38",
+      "language": "ru",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-38-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-38-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.1990879999993922
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-38-a.md",
+          "case-38-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-38-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-38-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 105.39416400000027,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-38-b.md\",[\"[\\\"case-38-a.md\\\",\\\"case-38-a.md\\\",\\\"case-38-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 104.19507600000088
+    },
+    {
+      "id": "held-39",
+      "language": "en",
+      "category": "ordinary",
+      "lexical": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-39-a.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-39-a.md",
+            "rank": 1,
+            "line": 5
+          }
+        ],
+        "ms": 1.3924710000001141
+      },
+      "graph": {
+        "recall": 1,
+        "ndcg": 1,
+        "mrr": 1,
+        "exact": true,
+        "ranked": [
+          "case-39-a.md",
+          "case-39-b.md"
+        ],
+        "rawRanks": [
+          {
+            "source": "case-39-a.md",
+            "rank": 1,
+            "lexicalRank": 1,
+            "seedLexicalRank": 1,
+            "line": 5
+          },
+          {
+            "source": "case-39-b.md",
+            "rank": 2,
+            "lexicalRank": null,
+            "seedLexicalRank": 1,
+            "line": 4
+          }
+        ],
+        "ms": 107.82425500000045,
+        "paths": {
+          "matched": 1,
+          "actual": 1,
+          "expected": 1,
+          "precision": 1,
+          "recall": 1
+        },
+        "actualPaths": [
+          "[\"case-39-b.md\",[\"[\\\"case-39-a.md\\\",\\\"case-39-a.md\\\",\\\"case-39-b.md\\\",\\\"depends\\\",\\\"forward\\\"]\"]]"
+        ]
+      },
+      "addedMs": 106.43178400000033
+    }
+  ],
+  "edgeReport": {
+    "matched": 49,
+    "actual": 49,
+    "expected": 49,
+    "precision": 1,
+    "recall": 1
+  },
+  "locatorCount": 470,
+  "invalidLocators": 0,
+  "lifecycle": {
+    "narrow": true,
+    "ambiguous": true,
+    "cycle": true,
+    "privateLocal": true,
+    "silentEdit": true,
+    "rename": true,
+    "delete": true,
+    "cancel": true,
+    "rollback": true,
+    "restart": true
+  },
+  "gates": {
+    "requiredRecall": true,
+    "requiredNdcg": true,
+    "ordinaryNdcg": true,
+    "ordinaryMrr": true,
+    "exactId": true,
+    "paths": true,
+    "edges": true,
+    "locators": true,
+    "lifecycle": true,
+    "projectionBytes": true,
+    "rss": true,
+    "projectionP95": true,
+    "addedP95": true,
+    "nodeEventLoopP95": true,
+    "graphDisk": true
+  },
+  "resources": {
+    "buildMs": 493.43682200000006,
+    "coldMs": 232.41135900000006,
+    "restartMs": 406.1420159999998,
+    "projectionMs": [
+      22.692041000000017,
+      15.840484999999944,
+      12.426993000000039,
+      12.81099699999993,
+      12.930704999999989
+    ],
+    "projectionP95Ms": 22.692041000000017,
+    "projectionBytes": 76665,
+    "addedP95Ms": 117.89989199999991,
+    "lexicalP95Ms": 2.076049000000239,
+    "graphP95Ms": 119.92203500000005,
+    "rssPeakDelta": 31137792,
+    "beforeRss": 104775680,
+    "beforePeak": 104775680,
+    "querySampledPeak": 135782400,
+    "queryHighWater": 135913472,
+    "lifecycleSampledPeak": 150810624,
+    "lifecycleHighWater": 151937024,
+    "lifecyclePeakDeltaFromInitial": 47161344,
+    "cpuUserMs": 2625.096,
+    "cpuSystemMs": 1439.482,
+    "indexBytes": 366656,
+    "graphDiskBytes": 0,
+    "eventLoopP95Ms": 10.952703,
+    "io": {
+      "readCalls": 10792,
+      "readBytes": 904208,
+      "readMs": 2374.200928000024,
+      "listCalls": 247,
+      "hintCalls": 247,
+      "hintMs": 243.16794600000196
+    },
+    "lifecycleIo": {
+      "readCalls": 3733,
+      "readBytes": 312236,
+      "readMs": 979.4411969999746,
+      "listCalls": 64,
+      "hintCalls": 62,
+      "hintMs": 81.36745699999844
+    }
+  },
+  "providerProfiles": "NOT RUN: no provider admitted; deterministic local graph only",
+  "providerRequests": 0,
+  "limitations": [
+    "Node worker-backed filesystem integration, not actual UI responsiveness",
+    "Exact identifier synthetic corpus; not semantic quality or production representativeness",
+    "No independent graph-to-AI profile admitted"
+  ]
+}
