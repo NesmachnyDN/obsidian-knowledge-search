@@ -155,12 +155,14 @@ export class NewMaterialTracker<T extends object> {
     if(!samePath)this.store(from,'deleted');
     return this.setAdmitted(owner,current.state,next)?current.state:'unresolved';
   }
-  retire(context:LifecycleContext,event:NativeLifecycleEvent,path:string):boolean {
+  retire(context:LifecycleContext,event:NativeLifecycleEvent,path:string,target:'file'|'folder'):boolean {
     const kind=event?.kind==='delete'?'delete':'uncertain';
     if(!this.event(context,event,kind))return false;
     // Folder moves, malformed paths and other unbounded ambiguities are not
     // proven transitions. Retire the entire epoch rather than guess ownership.
-    if(!validPath(path)){this.sealLifecycle();return false;}
+    if(target!=='file'||!validPath(path)||[...this.exact.keys()].some(key=>key.startsWith(path+'/'))){
+      this.sealLifecycle();return false;
+    }
     return this.store(path,kind==='delete'?'deleted':'ambiguous');
   }
   lifecycleState(context:LifecycleContext,owner:T,proof:DescriptorLifecycleProof):LifecycleState {

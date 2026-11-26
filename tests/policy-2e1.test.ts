@@ -75,7 +75,7 @@ test('rules and native events revoke pending baseline, known new/ambiguous paths
   assert.equal(tracker.observeCreate(next,owner,{kind:'create',sequence:1},a),'verified-new');
   assert.equal(tracker.confirmInitialBaseline(next,p2,inventory,1),false);
   assert.equal(tracker.previewInitialBaseline(next,inventory,0,100),null);
-  assert.equal(tracker.retire(next,{kind:'uncertain',sequence:2},'a.md'),true);
+  assert.equal(tracker.retire(next,{kind:'uncertain',sequence:2},'a.md','file'),true);
   assert.equal(tracker.lifecycleState(next,owner,a),'unresolved');
   assert.equal(tracker.previewInitialBaseline(next,inventory,0,100),null);
 });
@@ -133,7 +133,7 @@ test('collision, wrong owner and stale prior retire exact authority; delete and 
   assert.equal(tracker.advance(c,owner,{kind:'rename',sequence:3},a,proof(c,'b.md','1','a.md')),'unresolved');
   assert.equal(tracker.lifecycleState(c,owner,a),'unresolved');
   assert.equal(tracker.lifecycleState(c,second,b),'unresolved');
-  assert.equal(tracker.retire(c,{kind:'delete',sequence:4},'a.md'),true);
+  assert.equal(tracker.retire(c,{kind:'delete',sequence:4},'a.md','file'),true);
   const next=proof(c,'a.md','2','new object');
   assert.equal(tracker.observeCreate(c,owner,{kind:'create',sequence:5},next),'verified-new');
   assert.equal(tracker.advance(c,second,{kind:'modify',sequence:6},next,proof(c,'a.md','3','new object')),'unresolved');
@@ -152,4 +152,20 @@ test('admitted existing successors require exact prior; caller mutation cannot r
   assert.equal(tracker.lifecycleState(c,owner,proof(c,'a.md','2')),'existing');
   assert.equal(tracker.advance(c,owner,{kind:'modify',sequence:2},a,proof(c,'a.md','3')),'unresolved');
   assert.equal(tracker.lifecycleState(c,owner,proof(c,'a.md','2')),'unresolved');
+});
+test('folder deletion or uncertainty seals descendants even for a Markdown-suffixed directory',()=>{
+  for(const kind of ['delete','uncertain'] as const)for(const target of ['file','folder'] as const){
+    const {c,tracker,owner,second}=fixture();
+    const a=proof(c,'folder.md/a.md'),b=proof(c,'folder.md/nested/b.md');
+    assert.equal(tracker.observeCreate(c,owner,{kind:'create',sequence:1},a),'verified-new');
+    assert.equal(tracker.observeCreate(c,second,{kind:'create',sequence:2},b),'verified-new');
+    assert.equal(tracker.retire(c,{kind,sequence:3},'folder.md',target),false);
+    assert.equal(tracker.lifecycleState(c,owner,a),'unresolved');
+    assert.equal(tracker.lifecycleState(c,second,b),'unresolved');
+    assert.equal(tracker.previewInitialBaseline(c,{complete:true,candidates:[{owner,proof:a}]},0,100),null);
+  }
+  // An explicit folder event also fences inventory before any descendant is observed.
+  const {c,tracker,owner}=fixture();
+  assert.equal(tracker.retire(c,{kind:'delete',sequence:1},'folder.md','folder'),false);
+  assert.equal(tracker.observeCreate(c,owner,{kind:'create',sequence:2},proof(c,'folder.md/a.md')),'unresolved');
 });
