@@ -13,6 +13,15 @@ export interface SourceProvider {
 export type OriginalVersionProof = Readonly<{
   rootId: string; sourceId: string; sha256: string; versionId: string;
 }>;
+/**
+ * Descriptor evidence for the lifecycle ledger.  This is deliberately a
+ * separate shape: existing callers continue to receive OriginalVersionProof.
+ * stableIdentity is evidence that two observed descriptors are the same
+ * filesystem object, never evidence of an allowed lifecycle transition.
+ */
+export type DescriptorLifecycleProof = Readonly<{
+  version: OriginalVersionProof; stableIdentity: string;
+}>;
 
 function regularOriginal(info: BigIntStats): boolean {
   return info.isFile() && !info.isSymbolicLink() && info.nlink === 1n;
@@ -97,12 +106,27 @@ export class BoundedVaultReader implements SourceProvider {
   }
   // This is an observed original version, not lifecycle admission or authority.
   async readVersionProof(relative: string): Promise<OriginalVersionProof> {
-    const { bytes, version } = await this.readOriginal(relative);
-    const sha256 = hash(bytes);
-    return Object.freeze({ rootId: this.rootId, sourceId: relative, sha256,
-      versionId: hash(JSON.stringify(['oks-original-version-v1', this.rootId, relative, sha256, version])) });
+    return this.versionProof(relative, await this.readOriginal(relative));
   }
-  private async readOriginal(relative: string): Promise<{bytes: Uint8Array; version: string[]}> {
+  /** One protected descriptor read supplies both version and stable identity. */
+  async readLifecycleProof(relative: string): Promise<DescriptorLifecycleProof> {
+    const observed = await this.readOriginal(relative);
+    const birthtime = observed.info.birthtimeNs;
+    // Linux filesystems which cannot supply a real creation time must not
+    // manufacture an identity from mutable timestamps.
+    if (birthtime <= 0n) throw new StandaloneError('LIFECYCLE_IDENTITY_UNSUPPORTED');
+    const version = this.versionProof(relative, observed);
+    return Object.freeze({ version, stableIdentity: hash(JSON.stringify([
+      'oks-lifecycle-descriptor-identity-v1', this.rootId,
+      observed.info.dev.toString(), observed.info.ino.toString(), birthtime.toString(),
+    ])) });
+  }
+  private versionProof(relative:string, observed:{bytes:Uint8Array;version:string[]}):OriginalVersionProof {
+    const sha256 = hash(observed.bytes);
+    return Object.freeze({ rootId: this.rootId, sourceId: relative, sha256,
+      versionId: hash(JSON.stringify(['oks-original-version-v1', this.rootId, relative, sha256, observed.version])) });
+  }
+  private async readOriginal(relative: string): Promise<{bytes: Uint8Array; version: string[]; info: BigIntStats}> {
     if (!validPath(relative)) throw new StandaloneError('SOURCE_REJECTED');
     const parts = relative.split('/');
     // Linux descriptor-anchored walk forbids redirecting an ancestor via symlink.
@@ -161,7 +185,7 @@ export class BoundedVaultReader implements SourceProvider {
           || !sameVersion(opened, pathAfter)
           || await readlink('/proc/self/fd/' + handle.fd) !== target)
         throw new StandaloneError('SOURCE_CHANGED');
-      return { bytes: bytes.subarray(0, count), version: versionFields(opened) };
+      return { bytes: bytes.subarray(0, count), version: versionFields(opened), info: opened };
     } catch (cause) {
       if (cause instanceof StandaloneError) throw cause;
       // ENOTDIR/ELOOP from descriptor traversal is an explicit denied source,

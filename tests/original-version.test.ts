@@ -56,7 +56,7 @@ test('canonical original version proof refuses links, non-original paths, and ov
 const fs = require('node:fs/promises') as typeof import('node:fs/promises');
 
 test('original reader denies ancestor move and symlink substitution after descriptor open', async t => {
-  for (const proof of [false, true]) for (const duringRewalk of [false, true]) {
+  for (const proof of ['bytes', 'version', 'lifecycle'] as const) for (const duringRewalk of [false, true]) {
     const base = await mkdtemp(join(tmpdir(), 'oks-original-ancestor-race-'));
     const root = join(base, 'vault');
     const nested = join(root, 'nested');
@@ -85,7 +85,8 @@ test('original reader denies ancestor move and symlink substitution after descri
         return handle;
       });
       try {
-        const read = proof ? reader.readVersionProof('nested/note.md') : reader.read('nested/note.md');
+        const read = proof==='version' ? reader.readVersionProof('nested/note.md')
+          : proof==='lifecycle' ? reader.readLifecycleProof('nested/note.md') : reader.read('nested/note.md');
         await assert.rejects(read, { code: duringRewalk ? 'SOURCE_CHANGED' : 'SOURCE_REJECTED' });
         assert.equal(substituted, true);
       } finally { mock.mock.restore(); }
