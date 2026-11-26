@@ -24,7 +24,8 @@ class Fixture(BaseHTTPRequestHandler):
         else:
             with self.server.count_lock:
                 self.server.generation_count += 1
-                self.server.generation_count_path.write_text(str(self.server.generation_count), encoding="utf-8")
+                request_number = self.server.generation_count
+                self.server.generation_count_path.write_text(str(request_number), encoding="utf-8")
         auth = self.headers.get("Authorization")
         if auth not in {"Bearer fixture-success", "Bearer fixture-delay", "Bearer fixture-bad-citation"}:
             self.send_error(401)
@@ -47,9 +48,13 @@ class Fixture(BaseHTTPRequestHandler):
                 assert body["stream"] is False and body["max_tokens"] == 128
                 payload = json.loads(body["messages"][1]["content"])
                 assert payload["question"] == "REQ-OKS-GENERATION"
-                assert sorted(x["text"] for x in payload["passages"]) == [
-                    "REQ-OKS-GENERATION: alpha", "REQ-OKS-GENERATION: beta"]
-                assert [x["id"] for x in payload["passages"]] == [0, 1]
+                expected = ["REQ-OKS-GENERATION: alpha", "REQ-OKS-GENERATION: beta"]
+                if self.server.native_chat:
+                    assert request_number in (1, 2) and auth == "Bearer fixture-success"
+                    if request_number == 2:
+                        expected = expected[:1]
+                assert sorted(x["text"] for x in payload["passages"]) == expected
+                assert [x["id"] for x in payload["passages"]] == list(range(len(expected)))
         except (ValueError, KeyError, AssertionError, TypeError):
             self.send_error(400)
             return
@@ -62,7 +67,7 @@ class Fixture(BaseHTTPRequestHandler):
             claims = [{"kind": "quotation", "text": payload["passages"][0]["text"],
                        "citationIds": [99 if auth == "Bearer fixture-bad-citation" else 0]},
                       {"kind": "inference", "text": "<img src=x onerror=alert(1)> synthetic inference",
-                       "citationIds": [0, 1]}]
+                       "citationIds": list(range(len(payload["passages"])))}]
             result = {"model": body["model"], "usage": {"completion_tokens": 32},
                       "choices": [{"index": 0, "finish_reason": "stop", "message": {
                           "role": "assistant", "content": json.dumps({"claims": claims})}}]}
@@ -122,7 +127,10 @@ class Fixture(BaseHTTPRequestHandler):
             pass
 
 if __name__ == "__main__":
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "--native-chat"):
+        raise SystemExit("usage: fixture READY_FILE [--native-chat]")
     server = ThreadingHTTPServer(("127.0.0.1", 18765), Fixture)
+    server.native_chat = len(sys.argv) == 3
     server.count_lock = Lock()
     server.embedding_count = 0
     server.rerank_count = 0

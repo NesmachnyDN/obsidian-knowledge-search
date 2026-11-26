@@ -159,7 +159,9 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
     ip link set lo up
     test "$(ip -o link show | wc -l)" -eq 1
     test -z "$(ip route show default)"
-    python3 "$repo/scripts/obsidian-rerank-fixture.py" "$tmp/rerank-ready" &
+    fixture_args=()
+    if [[ "${OKS_NATIVE_CHAT_TEST:-0}" == 1 ]]; then fixture_args+=(--native-chat); fi
+    python3 "$repo/scripts/obsidian-rerank-fixture.py" "$tmp/rerank-ready" "${fixture_args[@]}" &
     mock_pid=$!
     for _ in {1..50}; do test ! -f "$tmp/rerank-ready" || break; sleep .1; done
     test -f "$tmp/rerank-ready"
@@ -183,7 +185,7 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
     printf "%s\n" "$chat"
     test "$(cat "$tmp/rerank-ready.generation-count")" = 2 ||
       { echo "HOST_SMOKE_FAILURE: expected exactly two authorized native chat requests" >&2; exit 1; }
-    echo "OBSIDIAN_NATIVE_CHAT_WIRE_PASS: exactly two authorized fixture requests"
+    echo "OBSIDIAN_NATIVE_CHAT_WIRE_PASS: exactly two authorized fixture requests; first alpha+beta, second alpha only"
     exit 0
   fi
   if [[ "${OKS_06UX_L10N_SWITCH_TEST:-0}" == 1 ]]; then

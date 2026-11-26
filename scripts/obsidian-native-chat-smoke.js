@@ -46,10 +46,12 @@
   assert([...root().querySelectorAll('button')].some(el=>el.textContent==='chat-a.md'),'CITATION');
   send.click();button('New chat').click();assert(find('No scope selected'),'RESET');
   set(control('Scope'),'files');
-  set(control('Paths (one per line), folder or property key'),'chat-a.md\nchat-b.md');
+  set(control('Paths (one per line), folder or property key'),'chat-a.md');
   button('Apply scope').click();set(control('Question'),'REQ-OKS-GENERATION');
   const selected=await prepare();selected.click();await wait(()=>find('Completed. History verified locally.'),'SELECTED');
-  assert(find('Quotation'),'SELECTED_QUOTE');
+  assert(find('Quotation')&&find('REQ-OKS-GENERATION: alpha'),'SELECTED_QUOTE');
+  assert(!root().textContent.includes('REQ-OKS-GENERATION: beta'),'SELECTED_EXCLUDED_TEXT');
+  assert(![...root().querySelectorAll('button')].some(el=>el.textContent==='chat-b.md'),'SELECTED_EXCLUDED_CITATION');
   const stalePreview=await prepare();await app.vault.modify(a,'REQ-OKS-GENERATION: changed\n');
   await wait(()=>find('No scope selected'),'SOURCE_INVALIDATION');
   stalePreview.click();
