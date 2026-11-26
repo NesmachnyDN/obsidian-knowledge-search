@@ -16,6 +16,7 @@ import { isRecord, StandaloneError, validateRequest, validProperty, BOUNDS,
   type SearchRequest, type SearchResponse, type Predicate, type EvidenceHit, type SearchMetadata } from '../standalone/contracts';
 import type { StandaloneEngine, ChatScopeLease } from '../standalone/engine';
 import { parseScopeSelector, type ScopeSelector, type ScopedSearch, type ScopeSnapshot } from '../standalone/chat-scope';
+import type { NavigationAuthority } from './navigation';
 import { diagnostics, safeCode, statusSnapshot, type SearchStatus } from './status';
 
 export type ApiError = { apiVersion: 1; ok: false; error: string };
@@ -24,7 +25,7 @@ const failure = (error: string): ApiError => ({ apiVersion: 1, ok: false, error:
 const CHAT_FAILURE_CODES = new Set(['DISABLED','CONFIG_INVALID','NOT_READY','BUSY','ENDPOINT_DENIED',
   'DISCLOSURE_DENIED','MODEL_MISMATCH','LIMIT_EXCEEDED','UNAUTHENTICATED','FORBIDDEN','RATE_LIMITED',
   'QUOTA_EXCEEDED','TIMEOUT','CANCELLED','NETWORK','SERVER_ERROR','INVALID_RESPONSE','SOURCE_STALE',
-  'INSUFFICIENT_EVIDENCE']);
+  'INSUFFICIENT_EVIDENCE','NAVIGATION_REJECTED']);
 const chatFailure = (error:string):ApiError => ({apiVersion:1,ok:false,error:CHAT_FAILURE_CODES.has(error)?error:'INTERNAL_FAILURE'});
 export function parseSearch(value: unknown): SearchRequest {
   validateRequest(value);
@@ -228,7 +229,7 @@ export class SearchController {
   private waveAdditions = 0;
   private readonly quarantined = new WeakSet<() => void>();
   private state: UiState = { phase: 'idle', message: 'Enter a query to search original Markdown.', response: null };
-  constructor(private readonly navigate: (hit: EvidenceHit) => Promise<void>,
+  constructor(private readonly navigate: (hit: EvidenceHit, authority?: NavigationAuthority) => Promise<void>,
     private readonly advancedStatus?: () => AdvancedHealth,
     private readonly ingestionStatus?: () => IngestionStatus,
     private readonly rerankPort?: RerankPort, private readonly generationPort?: RerankPort,
@@ -676,17 +677,37 @@ export class SearchController {
   /** Same physical slot as retained retrieval. A historical proof is not a
    * grant; local display reauthenticates exact membership, originals and spans. */
   readVerifiedRetainedChatHistory(session:RetainedChatSessionOwner):Promise<ApiResult<readonly CompletedChatTurn[]>> {
+    return this.withVerifiedRetainedChatHistory(session,{apiVersion:1,ok:true,value:[]},history=>structuredClone(history));
+  }
+  /** Never accept a UI-supplied path, span or citation object. */
+  openRetainedChatCitation(session:RetainedChatSessionOwner,turnId:string,claimIndex:number,citationIndex:number):Promise<ApiResult<null>> {
+    const lookup=(history:readonly CompletedChatTurn[])=>history.find(turn=>turn.id===turnId)?.claims[claimIndex]?.citations[citationIndex];
+    const entry=this.retainedSessions.get(session);
+    if(!entry||typeof turnId!=='string'||!Number.isSafeInteger(claimIndex)||claimIndex<0
+      ||!Number.isSafeInteger(citationIndex)||citationIndex<0||!lookup(entry.history))
+      return Promise.resolve(chatFailure('NAVIGATION_REJECTED'));
+    return this.withVerifiedRetainedChatHistory(session,chatFailure('NAVIGATION_REJECTED'),async(history,authority)=>{
+      const hit=lookup(history);
+      if(!hit)throw new StandaloneError('NAVIGATION_REJECTED');
+      authority.current();
+      await this.navigate(structuredClone(hit),authority);
+      authority.current();
+      return null;
+    });
+  }
+  private withVerifiedRetainedChatHistory<T>(session:RetainedChatSessionOwner,empty:ApiResult<T>,
+    complete:(history:readonly CompletedChatTurn[],authority:NavigationAuthority)=>T|Promise<T>):Promise<ApiResult<T>> {
     const entry=this.retainedSessions.get(session),engine=this.engine,port=this.generationPort;
     if(!entry||this.disposed||!this.enabled||this.paused||this.sharedAuthorityTransition())return Promise.resolve(chatFailure('CANCELLED'));
-    if(!entry.history.length)return Promise.resolve({apiVersion:1,ok:true,value:[]});
+    if(!entry.history.length)return Promise.resolve(empty);
     if(!engine?.captureChatScope||!port)return Promise.resolve(chatFailure('NOT_READY'));
     if(!this.embeddingAdmissionAvailable()||this.active||this.pending)return Promise.resolve(chatFailure('BUSY'));
     const abort=new AbortController(),history=entry.history;
     let context:CallContext;
     try{context=bindActiveDeadline({signal:abort.signal,deadlineUnixMs:Date.now()+SCOPED_RETRIEVAL_TIMEOUT_MS},SCOPED_RETRIEVAL_TIMEOUT_MS);}
     catch{return Promise.resolve(chatFailure('TIMEOUT'));}
-    let finish!:(result:ApiResult<readonly CompletedChatTurn[]>)=>void;
-    const result=new Promise<ApiResult<readonly CompletedChatTurn[]>>(resolve=>{finish=resolve;});
+    let finish!:(result:ApiResult<T>)=>void;
+    const result=new Promise<ApiResult<T>>(resolve=>{finish=resolve;});
     const operation:ActiveScopedRetrieval={abort,context,revision:this.revision,sourceRevision:this.sourceRevision,
       finish:result=>{if(!result.ok)finish(result);},retained:{session,owner:Object.freeze({})},retired:false,inFlight:true};
     this.scopedRetrieval=operation;
@@ -717,15 +738,18 @@ export class SearchController {
           await port.verify(structuredClone(citation));compatible();
         }
         await scope.verify();compatible();
-        const detached=structuredClone(history);compatible();
+        const authority:NavigationAuthority=Object.freeze({current:compatible,verify:async()=>{
+          compatible();await scope.verify();compatible();
+        }});
+        const value=await complete(history,authority);compatible();
         entry.lastUsed=Date.now();
         clearTimeout(operation.timer);
         operation.inFlight=false;this.scopedRetrieval=undefined;
-        finish({apiVersion:1,ok:true,value:detached});
+        finish({apiVersion:1,ok:true,value});
       }catch(error){
         if(!operation.retired){
           clear();
-          const reason=deadlineFailure(context)?.code??(error instanceof ProviderFailure?error.code:'SOURCE_STALE');
+          const reason=deadlineFailure(context)?.code??(error instanceof ProviderFailure||error instanceof StandaloneError?error.code:'SOURCE_STALE');
           this.retireScopedRetrieval(operation,reason);
         }
       }finally{operation.inFlight=false;this.releaseRetiredScopedRetrieval();}

@@ -27,6 +27,8 @@ export function verifySpan(hit: EvidenceHit, bytes: Uint8Array): VerifiedSpan {
     return { text, from: { line: loc.lineStart - 1, ch: 0 }, to: { line: loc.lineEnd - 1, ch: excerpt.length } };
   } catch { return reject(); }
 }
+/** Trusted, operation-local authority, not a provider or disclosure capability. */
+export type NavigationAuthority = Readonly<{current():void; verify():Promise<void>}>;
 export interface NavigationPort<File> {
   exact(path: string): File | null;
   open(file: File, guard: () => void): Promise<{ text(): string; select(from: Position, to: Position, guard: () => void): void }>;
@@ -38,8 +40,9 @@ export class SourceNavigator<File> {
     private readonly sharedFence: () => boolean = () => false) {}
   invalidate(): void { this.revision++; }
   dispose(): void { this.disposed = true; this.invalidate(); }
-  async open(hit: EvidenceHit): Promise<void> {
+  async open(hit: EvidenceHit, authority?: NavigationAuthority): Promise<void> {
     if (this.disposed || this.sharedFence()) throw new StandaloneError('NAVIGATION_REJECTED');
+    authority?.current();
     // Snapshot caller-owned evidence before crossing an asynchronous boundary.
     const value = structuredClone(hit);
     const revision = ++this.revision;
@@ -47,6 +50,10 @@ export class SourceNavigator<File> {
     const current = (): boolean => !this.disposed && !this.sharedFence() && revision === this.revision;
     const guard = (): void => {
       if (!file || !current() || this.port.exact(value.sourceId) !== file || !current())
+        throw new StandaloneError('NAVIGATION_REJECTED');
+      if (!authority) return;
+      authority.current();
+      if (!current() || this.port.exact(value.sourceId) !== file || !current())
         throw new StandaloneError('NAVIGATION_REJECTED');
     };
     const read = async (): Promise<VerifiedSpan> => {
@@ -56,14 +63,17 @@ export class SourceNavigator<File> {
       return verifySpan(value, bytes);
     };
     await read(); guard();
+    if (authority) { await authority.verify(); guard(); }
     // Fresh read immediately before open; no async action between guard and open.
     await read(); guard();
     const editor = await this.port.open(file!, guard); guard();
+    if (authority) { await authority.verify(); guard(); }
     const span = await read(); guard();
     // Obsidian editors normalize line endings. Unsaved edits still revoke selection.
     if (editor.text().replace(/\r\n|\r/g, '\n') !== span.text.replace(/\r\n|\r/g, '\n'))
       throw new StandaloneError('NAVIGATION_REJECTED');
     guard();
     editor.select(span.from, span.to, guard);
+    if (authority) guard();
   }
 }

@@ -138,9 +138,9 @@ export default class SyntheticEvidencePlugin extends Plugin {
     return {config,profile:null,adapter:'unadmitted-cloud',policyRevision:String(this.searchController.sourceAuthorityRevision()),
       configRevision:configDigest(input.role,config),restrictions:[],rules:this.settings.markingRules,materials,complete:true};
   }
-  readonly searchController: SearchController = new SearchController(async hit => {
+  readonly searchController: SearchController = new SearchController(async (hit,authority) => {
     if (this.unloaded || this.denseSettingsChanging || !this.navigator) throw new StandaloneError('NAVIGATION_REJECTED');
-    await this.navigator.open(hit);
+    await this.navigator.open(hit,authority);
   }, () => this.advancedHealth.snapshot(), () => this.advancedIngestion.snapshot(), {
     config: () => this.settings.ai.reranking,
     scopeId: () => this.sourceReader?.rootId,
