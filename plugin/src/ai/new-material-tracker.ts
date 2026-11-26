@@ -24,7 +24,9 @@ type Entry<T extends object> = Admitted<T>|'deleted'|'ambiguous';
  * This contract does not prove native-event authenticity or completeness.
  */
 export type LifecycleRestoreHost<T extends object> = Readonly<{
-  current:()=>boolean; resolveNativeOwner:(sourceId:string)=>T|null;
+  // One-shot host epoch signal: abort synchronously on ANY authority loss,
+  // even a transient loss between asynchronous descriptor observations.
+  signal:AbortSignal; current:()=>boolean; resolveNativeOwner:(sourceId:string)=>T|null;
 }>;
 export type LifecycleRestoreEvidence = Readonly<{baselineAdmitted:boolean;entries:readonly LedgerEntry[]}>;
 
@@ -245,7 +247,8 @@ export class NewMaterialTracker<T extends object> {
   /**
    * One explicit, host-serialized recovery attempt for a pristine opened
    * tracker. It never accepts caller-supplied snapshots or source proofs.
-   * The host must fence ledger writes/close and revalidate fresh source proofs
+   * The host must synchronously abort its captured one-shot signal on every
+   * authority loss, serialize ledger writes/close, and revalidate source proofs
    * again at every later policy-use boundary.
    */
   async restoreCommittedLifecycle(context:LifecycleContext,ledger:DurableLifecycleLedger,reader:BoundedVaultReader,
@@ -255,12 +258,14 @@ export class NewMaterialTracker<T extends object> {
     if(this.exact.size!==0||this.eventSequence!==0||this.lifecycleRevision!==0||this.pending
       ||this.baselineDone||this.legacyTouched||this.overflow||this.entries.size!==0
       ||!(ledger instanceof DurableLifecycleLedger)||!(reader instanceof BoundedVaultReader)
-      ||reader.rootId!==context.rootId||!host||typeof host.current!=='function'||typeof host.resolveNativeOwner!=='function'){
+      ||reader.rootId!==context.rootId||!host||!(host.signal instanceof AbortSignal)
+      ||typeof host.current!=='function'||typeof host.resolveNativeOwner!=='function'){
       this.sealLifecycle();return false;
     }
     this.restorePending=true;
-    const capturedContext=this.context!;
-    const intact=()=>this.restorePending&&this.current(capturedContext)&&this.lifecycleRevision===0&&!this.legacyTouched;
+    const capturedContext=this.context!,signal=host.signal;
+    const intact=()=>this.restorePending&&this.current(capturedContext)&&this.lifecycleRevision===0
+      &&!this.legacyTouched&&host.signal===signal&&!signal.aborted;
     const current=()=>intact()&&host.current()===true&&intact();
     let published=false;
     try {

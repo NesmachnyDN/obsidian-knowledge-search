@@ -39,13 +39,14 @@ function active(proof:DescriptorLifecycleProof,state:'existing'|'verified-new'='
   return {sourceId:proof.version.sourceId,state,origin:state==='existing'?'baseline':'native-create',originVersionId:proof.version.versionId,proof};
 }
 function tracker(context:LifecycleContext){const value=new NewMaterialTracker<object>();assert.equal(value.openLifecycle(context),true);return value;}
-const host=(f:Fixture)=>({current:()=>true,resolveNativeOwner:(path:string)=>path==='a.md'?f.owner:null});
+const signal=()=>new AbortController().signal;
+const host=(f:Fixture)=>({signal:signal(),current:()=>true,resolveNativeOwner:(path:string)=>path==='a.md'?f.owner:null});
 const inventory=(owner:object,proof:DescriptorLifecycleProof)=>({complete:true,candidates:[{owner,proof}]});
 
 test('restore authenticates a reopened ledger, exact current original and current native owner; origin survives subsequent verified transition',async()=>{
   for(const state of ['existing','verified-new'] as const)await fixture(async f=>{
     const proof=await f.reader.readLifecycleProof('a.md');await f.commit([active(proof,state)]);await f.reopen();
-    const value=tracker(f.context),currentOwner={},h={current:()=>true,resolveNativeOwner:()=>currentOwner};
+    const value=tracker(f.context),currentOwner={},h={signal:signal(),current:()=>true,resolveNativeOwner:()=>currentOwner};
     assert.equal(await value.restoreCommittedLifecycle(f.context,f.ledger,f.reader,h),true);
     assert.equal(value.lifecycleState(f.context,currentOwner,proof),state);
     assert.equal(value.lifecycleState(f.context,f.owner,proof),'unresolved');
@@ -88,7 +89,7 @@ test('unknown, substituted or late-changed native owner denies exact recovery',a
     const value=tracker(f.context);let calls=0;const changed={};
     const resolveNativeOwner=()=>{calls++;return phase==='unknown'?null:
       phase==='after-read'&&calls>=2||phase==='before-publish'&&calls>=3?changed:f.owner;};
-    assert.equal(await value.restoreCommittedLifecycle(f.context,f.ledger,f.reader,{current:()=>true,resolveNativeOwner}),true);
+    assert.equal(await value.restoreCommittedLifecycle(f.context,f.ledger,f.reader,{signal:signal(),current:()=>true,resolveNativeOwner}),true);
     assert.equal(value.lifecycleState(f.context,f.owner,proof),'unresolved');
     assert.equal(value.lifecycleState(f.context,changed,proof),'unresolved');
     assert.deepEqual(value.exportCommittedLifecycleEvidence(f.context)?.entries,[{sourceId:'a.md',state:'ambiguous'}]);
@@ -103,7 +104,7 @@ test('duplicate ownership denies both records even when one already fails versio
     await f.commit([active(a),active(b),{sourceId:'gone.md',state:'deleted'},{sourceId:'unknown.md',state:'ambiguous'}]);
     if(stale)await writeFile(join(f.root,'a.md'),'changed');
     await f.reopen();const value=tracker(f.context);
-    assert.equal(await value.restoreCommittedLifecycle(f.context,f.ledger,f.reader,{current:()=>true,resolveNativeOwner:()=>f.owner}),true);
+    assert.equal(await value.restoreCommittedLifecycle(f.context,f.ledger,f.reader,{signal:signal(),current:()=>true,resolveNativeOwner:()=>f.owner}),true);
     assert.equal(value.lifecycleState(f.context,f.owner,a),'unresolved');
     assert.equal(value.lifecycleState(f.context,f.owner,b),'unresolved');
     assert.deepEqual(value.exportCommittedLifecycleEvidence(f.context)?.entries,[
@@ -114,7 +115,7 @@ test('duplicate ownership denies both records even when one already fails versio
 });
 
 test('missing, corrupt or missing-after-commit anchor, foreign reader/ledger and structural lookalikes fail closed',async()=>{
-  for(const failure of ['empty','corrupt','missing','foreign-reader','foreign-ledger','forged'] as const)await fixture(async f=>{
+  for(const failure of ['empty','corrupt','missing','foreign-reader','foreign-ledger','forged','aborted-signal'] as const)await fixture(async f=>{
     const proof=await f.reader.readLifecycleProof('a.md');
     if(failure!=='empty')await f.commit([active(proof)]);
     if(failure==='corrupt')await writeFile(f.anchor,'invalid',{mode:0o600});
@@ -130,7 +131,9 @@ test('missing, corrupt or missing-after-commit anchor, foreign reader/ledger and
           await foreign.initializeEmptyEpoch();ledger=foreign;}
       }
       if(failure==='forged')ledger={read:async()=>await f.ledger.read()} as never;
-      assert.equal(await value.restoreCommittedLifecycle(f.context,ledger,reader,host(f)),false);
+      const h=host(f);
+      if(failure==='aborted-signal'){const controller=new AbortController();controller.abort();h.signal=controller.signal;}
+      assert.equal(await value.restoreCommittedLifecycle(f.context,ledger,reader,h),false);
       assert.equal(value.lifecycleState(f.context,f.owner,proof),'unresolved');
       assert.equal(value.exportCommittedLifecycleEvidence(f.context),null);
       assert.equal(value.previewInitialBaseline(f.context,inventory(f.owner,proof),0,100),null);
@@ -153,12 +156,12 @@ test('initialized empty epoch restores without automatic baseline; baseline flag
 });
 
 test('interruptions seal restoration, prevent partial publication and forbid baseline/retry',async()=>{
-  for(const interrupt of ['event','rules','clear','fence','legacy','anchor','closed'] as const)await fixture(async f=>{
+  for(const interrupt of ['event','rules','clear','fence','transient-fence','substituted-signal','legacy','anchor','closed'] as const)await fixture(async f=>{
     await writeFile(join(f.root,'b.md'),'other');
     const proof=await f.reader.readLifecycleProof('a.md'),b=await f.reader.readLifecycleProof('b.md');
     await f.commit([active(proof),active(b)]);await f.reopen();
     const value=tracker(f.context),original=f.reader.readLifecycleProof.bind(f.reader);let live=true;
-    const ownerB={},h={current:()=>live,resolveNativeOwner:(path:string)=>path==='a.md'?f.owner:ownerB};
+    const ownerB={},controller=new AbortController(),h={signal:controller.signal,current:()=>live,resolveNativeOwner:(path:string)=>path==='a.md'?f.owner:ownerB};
     Object.defineProperty(f.reader,'readLifecycleProof',{configurable:true,value:async(path:string)=>{
       assert.equal(value.lifecycleState(f.context,f.owner,proof),'unresolved');
       assert.equal(value.previewInitialBaseline(f.context,inventory(f.owner,proof),0,100),null);
@@ -167,7 +170,9 @@ test('interruptions seal restoration, prevent partial publication and forbid bas
         if(interrupt==='event')assert.equal(value.observeCreate(f.context,ownerB,{kind:'create',sequence:1},b),'unresolved');
         if(interrupt==='rules')value.reviseRules(f.context,hash('changed-rules'));
         if(interrupt==='clear')value.clear();
-        if(interrupt==='fence')live=false;
+        if(interrupt==='fence'){live=false;controller.abort();}
+        if(interrupt==='transient-fence'){live=false;controller.abort();live=true;}
+        if(interrupt==='substituted-signal')h.signal=signal();
         if(interrupt==='legacy')value.changed('a.md',f.owner);
         if(interrupt==='anchor'){const old=(await f.ledger.read())!;await f.ledger.commit(old.anchor.snapshotSha256,true,old.snapshot.entries);}
         if(interrupt==='closed')await f.ledger.close();
@@ -207,7 +212,7 @@ test('bounded committed tombstone inventory is retained without resolving owners
   await fixture(async f=>{
     const records=Array.from({length:BOUNDS.sources},(_,i):LedgerEntry=>({sourceId:'t'+String(i).padStart(4,'0')+'.md',state:'ambiguous'}));
     await f.commit(records,false);await f.reopen();const value=tracker(f.context);
-    assert.equal(await value.restoreCommittedLifecycle(f.context,f.ledger,f.reader,{current:()=>true,
+    assert.equal(await value.restoreCommittedLifecycle(f.context,f.ledger,f.reader,{signal:signal(),current:()=>true,
       resolveNativeOwner:()=>{throw Error('tombstone must not resolve owner');}}),true);
     assert.deepEqual(value.exportCommittedLifecycleEvidence(f.context)?.entries,records);
   });
