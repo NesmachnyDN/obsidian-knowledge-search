@@ -29,6 +29,12 @@ type PublicationAttempt={switchAttempted:boolean};
 export class InitialBaselinePublicationError extends StandaloneError {
   constructor(public readonly outcome:'denied'|'uncertain-publication') { super('LIFECYCLE_LEDGER_UNAVAILABLE'); }
 }
+/** Distinguish proven malformed committed state from ambiguous orphan evidence.
+ * Operational, permission and lock failures retain the generic unavailable code. */
+export class LifecycleLedgerStateError extends StandaloneError {
+  constructor(public readonly reason:'corrupted'|'ambiguous') { super('LIFECYCLE_LEDGER_UNAVAILABLE'); }
+}
+const invalidState=(reason:LifecycleLedgerStateError['reason']):never=>{throw new LifecycleLedgerStateError(reason);};
 const snapshotFile=(digest:string)=>digest+'.json';
 
 async function boundedNames(dir:string):Promise<string[]>{
@@ -57,25 +63,30 @@ function sameAnchor(a:LedgerAnchor|null,b:LedgerAnchor|null):boolean{
 async function readAnchor(dir:string,rootId:string,uid:number):Promise<LedgerAnchor|null>{
   const names=await boundedNames(dir);
   if(!names.includes(CURRENT))return null;
-  const anchor=parseCanonical(await strictFile(join(dir,CURRENT),MAX_ANCHOR_BYTES,uid));
-  validateLedgerAnchor(anchor,rootId);
-  return Object.freeze(anchor);
+  const bytes=await strictFile(join(dir,CURRENT),MAX_ANCHOR_BYTES,uid);
+  try {
+    const anchor=parseCanonical(bytes);
+    validateLedgerAnchor(anchor,rootId);
+    return Object.freeze(anchor);
+  }catch{return invalidState('corrupted');}
 }
 async function readCommitted(d:Directories,rootId:string,uid:number):Promise<Loaded|null>{
   const names=await namesFor(d,uid),anchor=await readAnchor(d.anchor,rootId,uid);
   if(!anchor){
     // Missing current plus any prior/staged artifact is uncertain, not fresh.
-    if(names.anchor.length!==1||names.data.length!==0)return bad();
+    if(names.anchor.length!==1||names.data.length!==0)return invalidState('ambiguous');
     return null;
   }
   const name=snapshotFile(anchor.snapshotSha256);
-  if(!names.data.includes(name))return bad();
+  if(!names.data.includes(name))return invalidState('corrupted');
   const bytes=await strictFile(join(d.data,name),MAX_LEDGER_BYTES,uid);
-  if(hash(bytes)!==anchor.snapshotSha256)return bad();
-  const snapshot=parseCanonical(bytes);
-  validateLedgerSnapshot(snapshot,rootId);
-  if(snapshot.epoch!==anchor.epoch||snapshot.revision!==anchor.revision)return bad();
-  return {anchor,snapshot:immutableLedgerSnapshot(snapshot)};
+  if(hash(bytes)!==anchor.snapshotSha256)return invalidState('corrupted');
+  try {
+    const snapshot=parseCanonical(bytes);
+    validateLedgerSnapshot(snapshot,rootId);
+    if(snapshot.epoch!==anchor.epoch||snapshot.revision!==anchor.revision)return invalidState('corrupted');
+    return {anchor,snapshot:immutableLedgerSnapshot(snapshot)};
+  }catch{return invalidState('corrupted');}
 }
 async function safeArtifact(dir:string,name:string,uid:number):Promise<void>{
   const info=await lstat(join(dir,name));
@@ -124,7 +135,7 @@ export class DurableLifecycleLedger{
         if(loaded){ledger.current=loaded.anchor;await cleanup(d,loaded.anchor,uid);}
       });
       lock=undefined;return ledger;
-    }catch{return bad();}
+    }catch(error){if(error instanceof LifecycleLedgerStateError)throw error;return bad();}
     finally{await lock?.close();}
   }
   private async withDirs<T>(action:(d:Directories)=>Promise<T>):Promise<T>{
@@ -140,7 +151,7 @@ export class DurableLifecycleLedger{
   }
   private async run<T>(action:()=>Promise<T>):Promise<T>{
     if(this.closing||this.poisoned||this.active)return bad();
-    const operation=(async()=>{try{return await action();}catch{this.poisoned=true;return bad();}})();
+    const operation=(async()=>{try{return await action();}catch(error){this.poisoned=true;if(error instanceof LifecycleLedgerStateError)throw error;return bad();}})();
     this.active=operation;
     try{return await operation;}finally{this.active=undefined;}
   }
