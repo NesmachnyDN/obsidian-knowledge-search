@@ -646,3 +646,106 @@ test('06H.2-A2b2c: no matching evidence and restrictive change after preview can
     }finally{c.dispose();}
   },(req,res)=>{calls++;req.resume();reply(res,generated([]));});
 });
+
+test('06H.2-A2b2d: completed history is host-owned, selected explicitly, and prior text is generation-only',async()=>{
+  const cfg:ProviderConfig={state:'configured',transport:'local',origin:'http://127.0.0.1:1',identity:{model:'synthetic',revision:'v1'},
+    limits:{timeoutMs:1000,maxInputBytes:4096,maxCandidates:3,maxOutputTokens:32,maxConcurrent:1}};
+  const c=new SearchController(async()=>{},undefined,undefined,undefined,{config:()=>cfg,scopeId:()=>root,verify:async()=>{}});
+  (c as unknown as {generator:{run:()=>Promise<readonly {kind:'quotation';text:string;citations:readonly EvidenceHit[]}[]>}}).generator={
+    run:async()=>[{kind:'quotation',text:hit.originalExcerpt,citations:[hit]}]
+  };
+  const complete=async(session:object,query:string,prior:unknown=[]):Promise<string>=>{
+    const turn=c.startRetainedChatTurn(session,selector,{...request,requestId:query,query},prior);
+    const retrieval=await turn.result;assert.equal(retrieval.ok,true);
+    const stamp=await c.bindRetainedGenerationCredential(session,turn.owner,'synthetic');
+    let draft=c.createRetainedChatClassificationDraft(session,turn.owner,stamp);
+    draft=c.attestRetainedChatClassification(session,turn.owner,draft,draft.question.id,'synthetic');
+    for(const item of draft.priorQuestions) draft=c.attestRetainedChatClassification(session,turn.owner,draft,item.id,'public');
+    draft=c.attestRetainedChatClassification(session,turn.owner,draft,draft.evidence[0]!.id,'synthetic');
+    const preview=await c.prepareRetainedChatGeneration(session,turn.owner,draft);
+    assert.equal(preview.composedQuestion.text===query,draft.priorQuestions.length===0);
+    assert.equal((await c.confirmRetainedChatGeneration(session,turn.owner,preview)).ok,true);
+    return c.readRetainedChatHistory(session)[0]!.id;
+  };
+  try {
+    c.attach(engine(async()=>lease()));const session=c.openRetainedChatSession(),other=c.openRetainedChatSession();
+    const first=await complete(session,'first');
+    assert.deepEqual(await c.startRetainedChatTurn(session,selector,request,[first,first]).result,error('DISCLOSURE_DENIED'));
+    assert.deepEqual(await c.startRetainedChatTurn(other,selector,request,[first]).result,error('DISCLOSURE_DENIED'));
+    const turn=c.startRetainedChatTurn(session,selector,{...request,requestId:'second',query:'second'},[first]);
+    assert.equal((await turn.result).ok,true);
+    const stamp=await c.bindRetainedGenerationCredential(session,turn.owner,'synthetic');
+    const draft=c.createRetainedChatClassificationDraft(session,turn.owner,stamp);
+    assert.equal(draft.priorQuestions.length,1);assert.equal(draft.priorQuestions[0]!.classification,'unknown');
+    const view=await c.readRetainedChatTurn(session,turn.owner);assert.equal(view.ok,true);
+    if (view.ok) assert.equal(view.value.response.requestId,'second');
+    c.clearRetainedGenerationCredential(session,turn.owner);
+    assert.deepEqual(c.readRetainedChatHistory(session),[]);
+  } finally { c.dispose(); }
+});
+
+test('06H.2-A2b2d: loopback exact explicit history, fresh attestation, no hidden history, complete-turn eviction',async()=>{
+  const wire:unknown[]=[], lexical:string[]=[];
+  let scope=lease().snapshot;
+  await generationFixture(async cfg=>{
+    const c=new SearchController(async()=>{},undefined,undefined,undefined,{config:()=>cfg,scopeId:()=>root,verify:async candidate=>assert.deepEqual(candidate,hit)});
+    try{
+      c.attach(engine(async()=>lease({snapshot:scope,search:async req=>{lexical.push(req.query);return response(req.requestId);}})));
+      const session=c.openRetainedChatSession();
+      const start=async(query:string,prior:string[]=[])=>{
+        const turn=c.startRetainedChatTurn(session,selector,{...request,query},prior);
+        assert.equal((await turn.result).ok,true);
+        const stamp=await c.bindRetainedGenerationCredential(session,turn.owner,'fixture');
+        let draft=c.createRetainedChatClassificationDraft(session,turn.owner,stamp);
+        draft=c.attestRetainedChatClassification(session,turn.owner,draft,draft.question.id,'synthetic');
+        draft=c.attestRetainedChatClassification(session,turn.owner,draft,draft.evidence[0]!.id,'synthetic');
+        return {turn,draft};
+      };
+      const finish=async(query:string,prior:string[]=[])=>{
+        let {turn,draft}=await start(query,prior);
+        if(prior.length){
+          await assert.rejects(c.prepareRetainedChatGeneration(session,turn.owner,draft),{message:'DISCLOSURE_DENIED'});
+          for(const item of draft.priorQuestions){
+            assert.equal(item.classification,'unknown');
+            draft=c.attestRetainedChatClassification(session,turn.owner,draft,item.id,'public');
+          }
+        }
+        const preview=await c.prepareRetainedChatGeneration(session,turn.owner,draft);
+        assert.equal(preview.composedQuestion.classification,prior.length?'public':'synthetic');
+        assert.equal((await c.confirmRetainedChatGeneration(session,turn.owner,preview)).ok,true);
+        return c.readRetainedChatHistory(session).at(-1)!.id;
+      };
+      const first=await finish('первый');
+      await finish('second',[first]);
+      assert.deepEqual(wire.slice(0,2),[
+        {question:'первый',passages:[{id:0,text:hit.originalExcerpt}]},
+        {question:'Prior user question 1:\nпервый\n\nCurrent user question:\nsecond',passages:[{id:0,text:hit.originalExcerpt}]}
+      ]);
+      assert.deepEqual(lexical.slice(0,2),['первый','second']);
+      await finish('third');
+      assert.deepEqual(wire[2],{question:'third',passages:[{id:0,text:hit.originalExcerpt}]});
+      for(let i=0;i<10;i++)await finish('turn-'+i);
+      assert.equal(c.readRetainedChatHistory(session).length,12);
+      assert.equal(c.readRetainedChatHistory(session).some(t=>t.id===first),false);
+      assert.deepEqual(await c.startRetainedChatTurn(session,selector,request,[first]).result,error('DISCLOSURE_DENIED'));
+      assert.deepEqual(await c.startRetainedChatTurn(session,selector,{...request,query:'я'.repeat(257)}).result,error('INVALID_REQUEST'));
+      const newest=c.readRetainedChatHistory(session).at(-1)!.id;
+      const {turn}=await start('replacement',[newest]);
+      await assert.rejects(c.bindRetainedGenerationCredential(session,turn.owner,'replacement'),{message:'CANCELLED'});
+      assert.deepEqual(c.readRetainedChatHistory(session),[]);
+      assert.equal(wire.length,13);
+      await finish('before scope change');
+      scope={...scope,coverage:{...scope.coverage,excluded:1}};
+      const changed=await start('new scope');
+      assert.deepEqual(c.readRetainedChatHistory(session),[]);
+      c.cancelRetainedChatTurn(session,changed.turn.owner);
+      assert.equal(wire.length,14);
+    }finally{c.dispose();}
+  },(req,res)=>{
+    assert.equal(req.headers.authorization,'Bearer fixture');
+    let body='';req.on('data',chunk=>body+=String(chunk));req.on('end',()=>{
+      wire.push(JSON.parse(JSON.parse(body).messages[1].content));
+      reply(res,generated([{kind:'quotation',text:hit.originalExcerpt,citationIds:[0]}]));
+    });
+  });
+});

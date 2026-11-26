@@ -1,4 +1,5 @@
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { EvidenceGenerator, type GeneratedEvidenceClaim } from '../ai/generation-evidence';
 import { EvidenceReranker, type RerankedHit } from '../ai/rerank-evidence';
 import { pilotConfig } from '../ai/loopback-rerank';
@@ -89,19 +90,29 @@ export type RetainedScopedView = { scope: ScopeSnapshot; response: SearchRespons
 export type RetainedChatClassificationDraft = Readonly<{
   id: string; credentialStamp: GenerationCredentialStamp;
   question: Readonly<{ id: string; digest: string; text: string; classification: Classification }>;
+  priorQuestions: readonly Readonly<{ id: string; turnId:string; digest: string; text: string; classification: Classification }>[];
   evidence: readonly Readonly<{ id: string; digest: string; sourceId: string; sourceSha256: string;
     locatorDigest: string; excerpt: string; classification: Classification }>[];
 }>;
 export type RetainedChatGenerationPreview = RetainedChatClassificationDraft & Readonly<{
   scopeDigest:string; scopeId:string; config:Readonly<ProviderConfig>; expiresUnixMs:number; inputBytes:number;
+  composedQuestion:Readonly<{text:string;digest:string;classification:Classification}>;
 }>;
 const SCOPED_RETRIEVAL_TIMEOUT_MS = 30_000;
 const MAX_CHAT_SESSIONS = 4;
+const MAX_COMPLETED_TURNS = 12;
+const MAX_STORED_QUESTION_BYTES = 2048;
+const MAX_SESSION_HISTORY_BYTES = 64 * 1024;
+const MAX_HISTORY_BYTES = 256 * 1024;
+type CompletedChatTurn = Readonly<{id:string; question:string; questionDigest:string; claims:readonly GeneratedEvidenceClaim[];
+  scopeDigest:string; configuration:string; generationId:string; sourceRevision:number; completedAt:number}>;
+type RetainedChatSession = {readonly owner:RetainedChatSessionOwner; history:CompletedChatTurn[]; lastUsed:number};
 type RetainedScopedTurn = { readonly session: RetainedChatSessionOwner; readonly owner: RetainedChatTurnOwner;
   lease?: ChatScopeLease; response?: SearchResponse; check?: () => void;
   finishRead?: (value: ApiResult<RetainedScopedView>) => void;
   rejectCredential?: (error:ProviderFailure)=>void; rejectPreview?: (error:ProviderFailure)=>void; configuration?:string; question?:string;
-  draft?: RetainedDraft; preview?: RetainedPreview; generationBusy?:boolean; };
+  draft?: RetainedDraft; preview?: RetainedPreview; generationBusy?:boolean; priorIds?:readonly string[]; prior?:readonly Pick<CompletedChatTurn,'id'|'question'|'questionDigest'>[];
+  credentialBound?:boolean; };
 type RetainedDraft = { readonly view: RetainedChatClassificationDraft; readonly configuration:string;
   readonly stamp:GenerationCredentialStamp; readonly labels:Map<string,Classification>; };
 type RetainedPreview = { readonly view:RetainedChatGenerationPreview; readonly draft:RetainedDraft };
@@ -132,7 +143,7 @@ export class SearchController {
   // retire, or publish a scoped retrieval turn.
   private scopedRetrieval?: ActiveScopedRetrieval;
   // Object identity is host-local: a cloned or foreign session never matches.
-  private readonly retainedSessions = new Set<RetainedChatSessionOwner>();
+  private readonly retainedSessions = new Map<RetainedChatSessionOwner,RetainedChatSession>();
   private generationAdmissionDepth = 0;
   private generationTransition?:object;
   private generationTransitionView?:object;
@@ -493,6 +504,9 @@ export class SearchController {
       // callbacks. A nested reset or terminal seal can then settle that job,
       // never be overwritten by the interrupted caller, and own publication.
       this.lastQuery = '';
+      // A shared authority transition (source, runtime, provider or host
+      // revocation) cannot leave a transcript eligible for later disclosure.
+      this.clearAllRetainedHistory();
       this.pending?.resolve(failure('SUPERSEDED')); this.pending = undefined;
       this.state = state;
       reserve?.(revision);
@@ -555,9 +569,15 @@ export class SearchController {
   }
   openRetainedChatSession(): RetainedChatSessionOwner {
     if (this.disposed) throw new ProviderFailure('DISABLED');
-    if (this.retainedSessions.size >= MAX_CHAT_SESSIONS) throw new ProviderFailure('LIMIT_EXCEEDED');
+    if (this.retainedSessions.size >= MAX_CHAT_SESSIONS) {
+      const active=this.scopedRetrieval?.retained?.session;
+      const candidates=[...this.retainedSessions.values()].filter(entry=>entry.owner!==active && entry.history.length>0)
+        .sort((a,b)=>a.lastUsed-b.lastUsed);
+      if (!candidates.length) throw new ProviderFailure('LIMIT_EXCEEDED');
+      this.retainedSessions.delete(candidates[0]!.owner);
+    }
     const session = Object.freeze({});
-    this.retainedSessions.add(session);
+    this.retainedSessions.set(session,{owner:session,history:[],lastUsed:Date.now()});
     return session;
   }
   closeRetainedChatSession(session: RetainedChatSessionOwner): void {
@@ -565,9 +585,14 @@ export class SearchController {
     const operation = this.scopedRetrieval;
     if (operation?.retained?.session === session) this.retireScopedRetrieval(operation,'CANCELLED');
   }
-  startRetainedChatTurn(session: RetainedChatSessionOwner, selector: unknown, input: unknown): RetainedScopedRetrievalTurn {
+  /** Prior IDs are host-issued opaque completed-question IDs only. */
+  startRetainedChatTurn(session: RetainedChatSessionOwner, selector: unknown, input: unknown,
+    priorQuestionIds: unknown = []): RetainedScopedRetrievalTurn {
     const owner = Object.freeze({});
-    const turn = this.beginScopedRetrieval(selector,input,{session,owner});
+    let priorIds:readonly string[];
+    try { priorIds=this.selectedPriorIds(session,priorQuestionIds); }
+    catch { return Object.freeze({owner,result:Promise.resolve(chatFailure('DISCLOSURE_DENIED'))}); }
+    const turn = this.beginScopedRetrieval(selector,input,{session,owner,priorIds});
     return Object.freeze({owner,result:turn.result});
   }
   private ownedRetainedTurn(session: RetainedChatSessionOwner, owner: RetainedChatTurnOwner): ActiveScopedRetrieval | undefined {
@@ -579,6 +604,24 @@ export class SearchController {
     const operation = this.ownedRetainedTurn(session,owner);
     if (operation) this.retireScopedRetrieval(operation,'CANCELLED');
   }
+  /** Detached host-only transcript view. It is intentionally absent from StandaloneApi. */
+  readRetainedChatHistory(session:RetainedChatSessionOwner):readonly CompletedChatTurn[] {
+    const entry=this.retainedSessions.get(session);
+    if (!entry || this.disposed) throw new ProviderFailure('CANCELLED');
+    entry.lastUsed=Date.now();
+    return structuredClone(entry.history);
+  }
+  private selectedPriorIds(session:RetainedChatSessionOwner,value:unknown):readonly string[] {
+    if (!Array.isArray(value) || value.length>2 || value.some(id=>typeof id!=='string')) throw new ProviderFailure('DISCLOSURE_DENIED');
+    const entry=this.retainedSessions.get(session);
+    if (new Set(value).size!==value.length || !value.every(id=>entry?.history.some(turn=>turn.id===id)))
+      throw new ProviderFailure('DISCLOSURE_DENIED');
+    return Object.freeze([...value]);
+  }
+  private clearRetainedHistory(session:RetainedChatSessionOwner|undefined):void {
+    const entry=session&&this.retainedSessions.get(session); if (entry) entry.history=[];
+  }
+  private clearAllRetainedHistory():void { for(const entry of this.retainedSessions.values()) entry.history=[]; }
   private clearRetainedGeneration(retained: RetainedScopedTurn): void {
     retained.draft=undefined;
     retained.preview=undefined;
@@ -599,8 +642,12 @@ export class SearchController {
       if (this.ownedRetainedTurn(retained.session,retained.owner)!==operation || retained.check!==check
         || retained.lease!==lease || retained.configuration!==pinned
         || !this.generationCredential.current(retained.owner,binding,stamp)) throw new ProviderFailure('CANCELLED');
+      const history=this.retainedSessions.get(retained.session)?.history;
+      if (retained.prior?.some(item=>!history?.some(turn=>turn.id===item.id && turn.questionDigest===item.questionDigest && turn.question===item.question)))
+        throw new ProviderFailure('CANCELLED');
       return {config,binding,scopeId,port};
     } catch(error) {
+      this.clearRetainedHistory(retained.session);
       this.retireScopedRetrieval(operation,error instanceof ProviderFailure || error instanceof StandaloneError ? error.code : 'CANCELLED');
       throw error instanceof ProviderFailure ? error : new ProviderFailure('CANCELLED');
     }
@@ -623,8 +670,42 @@ export class SearchController {
     }
     return size;
   }
+  private composeRetainedQuestion(draft:RetainedChatClassificationDraft):{text:string;digest:string;classification:Classification} {
+    if (!draft.priorQuestions.length) return {text:draft.question.text,digest:hash(draft.question.text),classification:draft.question.classification};
+    const text=[...draft.priorQuestions.map((item,index)=>`Prior user question ${index+1}:\n${item.text}`),
+      `Current user question:\n${draft.question.text}`].join('\n\n');
+    const classification=draft.priorQuestions.some(item=>item.classification==='public') || draft.question.classification==='public'
+      ? 'public' : 'synthetic';
+    return {text,digest:hash(text),classification};
+  }
+  private serializedHistoryBytes(history:readonly CompletedChatTurn[],lastUsed:number):number {
+    return Buffer.byteLength(JSON.stringify({history,lastUsed}),'utf8');
+  }
+  private prepareCompletedTurn(session:RetainedChatSessionOwner,retained:RetainedScopedTurn,
+    preview:RetainedChatGenerationPreview,claims:readonly GeneratedEvidenceClaim[]):()=>boolean {
+    const entry=this.retainedSessions.get(session);
+    if (!entry || !retained.question || !retained.lease || Buffer.byteLength(retained.question,'utf8')>MAX_STORED_QUESTION_BYTES)
+      throw new ProviderFailure('LIMIT_EXCEEDED');
+    const previous=entry.history, completedAt=Date.now();
+    const turn=Object.freeze({id:randomUUID(),
+      question:retained.question,questionDigest:hash(retained.question),claims:structuredClone(claims),scopeDigest:preview.scopeDigest,
+      configuration:retained.configuration!,generationId:retained.lease.snapshot.generationId,sourceRevision:this.sourceRevision,completedAt});
+    const candidate=[...previous,turn];
+    while(candidate.length>MAX_COMPLETED_TURNS || this.serializedHistoryBytes(candidate,completedAt)>MAX_SESSION_HISTORY_BYTES) candidate.shift();
+    if (!candidate.includes(turn)) throw new ProviderFailure('LIMIT_EXCEEDED');
+    // The four per-session envelopes imply the aggregate bound. Do not mutate
+    // any transcript until logical retirement and publication checks succeed.
+    const publish=():boolean=>{
+      if (this.retainedSessions.get(session)!==entry || entry.history!==previous) return false;
+      const total=[...this.retainedSessions.values()].reduce((size,item)=>size+
+        this.serializedHistoryBytes(item===entry?candidate:item.history,item===entry?completedAt:item.lastUsed),0);
+      if(total>MAX_HISTORY_BYTES) return false;
+      entry.history=candidate;entry.lastUsed=completedAt;return true;
+    };
+    return publish;
+  }
   private retainedDraftView(question:string, response:SearchResponse, stamp:GenerationCredentialStamp,
-    labels:Map<string,Classification>):RetainedChatClassificationDraft {
+    labels:Map<string,Classification>,prior:readonly Pick<CompletedChatTurn,'id'|'question'|'questionDigest'>[]=[]):RetainedChatClassificationDraft {
     const questionDigest=hash(question), questionId=`question:${questionDigest}`;
     const evidence=response.hits.map((hit,index)=>{
       const locatorDigest=hash(JSON.stringify(hit.sourceLocators));
@@ -633,9 +714,11 @@ export class SearchController {
       return Object.freeze({id,digest,sourceId:hit.sourceId,sourceSha256:hit.sourceSha256,locatorDigest,
         excerpt:hit.originalExcerpt,classification:labels.get(id) ?? 'unknown'});
     });
+    const priorQuestions=prior.map(turn=>Object.freeze({id:`prior:${turn.id}`,turnId:turn.id,digest:turn.questionDigest,
+      text:turn.question,classification:labels.get(`prior:${turn.id}`) ?? 'unknown'}));
     return Object.freeze({id:`chat-draft:${++this.sequence}`,credentialStamp:Object.freeze({...stamp}),
       question:Object.freeze({id:questionId,digest:questionDigest,text:question,
-        classification:labels.get(questionId) ?? 'unknown'}),evidence:Object.freeze(evidence)});
+        classification:labels.get(questionId) ?? 'unknown'}),priorQuestions:Object.freeze(priorQuestions),evidence:Object.freeze(evidence)});
   }
   /** Classifications are explicit, per detached item attestations.  Unknown and
    * restrictive labels never become consent by omission or by a bulk choice. */
@@ -651,7 +734,7 @@ export class SearchController {
       }
       this.retainedInputBytes(retained.question!,retained.response!.hits,config);
       const labels=new Map<string,Classification>();
-      const view=this.retainedDraftView(retained.question!,retained.response!,stamp,labels);
+      const view=this.retainedDraftView(retained.question!,retained.response!,stamp,labels,retained.prior);
       retained.draft={view,configuration:binding,stamp:Object.freeze({...stamp}),labels};
       retained.preview=undefined;
       return view;
@@ -664,15 +747,16 @@ export class SearchController {
       throw new ProviderFailure('DISCLOSURE_DENIED');
     return this.withRetainedGeneration(operation,()=>{
       this.retainedGenerationCurrent(operation,retained,record.stamp);
-      const known=[draft.question.id,...draft.evidence.map(item=>item.id)];
+      const known=[draft.question.id,...draft.priorQuestions.map(item=>item.id),...draft.evidence.map(item=>item.id)];
       if (!known.includes(itemId)) throw new ProviderFailure('DISCLOSURE_DENIED');
       if (classification!=='synthetic' && classification!=='public') {
+        this.clearRetainedHistory(retained.session);
         this.retireScopedRetrieval(operation,'DISCLOSURE_DENIED');
         throw new ProviderFailure('DISCLOSURE_DENIED');
       }
       retained.preview=undefined;
       record.labels.set(itemId,classification);
-      const view=this.retainedDraftView(retained.question!,retained.response!,record.stamp,record.labels);
+      const view=this.retainedDraftView(retained.question!,retained.response!,record.stamp,record.labels,retained.prior);
       retained.draft={...record,view};
       return view;
     });
@@ -683,7 +767,8 @@ export class SearchController {
     if (!operation || !retained || operation.inFlight || !record || record.view!==draft || retained.preview)
       return Promise.reject(new ProviderFailure('DISCLOSURE_DENIED'));
     const allowed=(c:Classification)=>c==='synthetic'||c==='public';
-    if (!allowed(draft.question.classification) || draft.evidence.some(item=>!allowed(item.classification)))
+    if (!allowed(draft.question.classification) || draft.priorQuestions.some(item=>!allowed(item.classification))
+      || draft.evidence.some(item=>!allowed(item.classification)))
       return Promise.reject(new ProviderFailure('DISCLOSURE_DENIED'));
     operation.inFlight=true;retained.generationBusy=true;
     const result=new Promise<RetainedChatGenerationPreview>((resolve,reject)=>{
@@ -694,7 +779,8 @@ export class SearchController {
           const {config,scopeId,port}=current();
           const lease=retained.lease!, hits=retained.response!.hits;
           const scopeDigest=hash(JSON.stringify(lease.snapshot));
-          const inputBytes=this.retainedInputBytes(retained.question!,hits,config);
+          const composed=this.composeRetainedQuestion(draft);
+          const inputBytes=this.retainedInputBytes(composed.text,hits,config);
           await lease.verify();current();
           for(const hit of hits) {
             await port.verify(structuredClone(hit));current();
@@ -703,7 +789,7 @@ export class SearchController {
             throw new ProviderFailure('CANCELLED');
           Object.freeze(config.identity);Object.freeze(config.limits);Object.freeze(config);
           const preview=Object.freeze({...draft,config,scopeId,scopeDigest,
-            expiresUnixMs:operation.context.deadlineUnixMs,inputBytes});
+            composedQuestion:Object.freeze(composed),expiresUnixMs:operation.context.deadlineUnixMs,inputBytes});
           retained.preview={view:preview,draft:record};
           resolve(preview);
         } catch(error) {
@@ -733,7 +819,7 @@ export class SearchController {
       if (binding!==envelope.draft.configuration || !retained.response || !retained.lease || !retained.question
         || preview.scopeId!==scopeId || preview.scopeDigest!==hash(JSON.stringify(retained.lease.snapshot)))
         throw new ProviderFailure('CANCELLED');
-      const query=preview.question, candidates=retained.response.hits.map((hit,index)=>({hit,
+      const query=preview.composedQuestion, candidates=retained.response.hits.map((hit,index)=>({hit,
         classification:preview.evidence[index]!.classification}));
       if (query.classification!=='synthetic' && query.classification!=='public'
         || candidates.some(candidate=>candidate.classification!=='synthetic' && candidate.classification!=='public'))
@@ -743,9 +829,11 @@ export class SearchController {
       // the original retained context before/after its own async boundaries.
       const context=operation.context;
       const providerDeadline=Math.min(context.deadlineUnixMs,Date.now()+config.limits.timeoutMs);
-      const grant:DisclosureGrant={version:1,role:'generation',configDigest:binding,scopeId,expiresUnixMs:providerDeadline,
+      const constituents=Object.freeze([...preview.priorQuestions.map(item=>Object.freeze({id:item.id,digest:item.digest,classification:item.classification})),
+        Object.freeze({id:preview.question.id,digest:preview.question.digest,classification:preview.question.classification})]);
+      const grant:DisclosureGrant & {readonly constituents:typeof constituents}={version:1,role:'generation',configDigest:binding,scopeId,expiresUnixMs:providerDeadline,
         queryDigest:hash(query.text),queryClassification:query.classification,sources:candidates.map(({hit,classification})=>({
-          sourceId:hit.sourceId,sourceSha256:hit.sourceSha256,excerptDigest:hash(hit.originalExcerpt),classification}))};
+          sourceId:hit.sourceId,sourceSha256:hit.sourceSha256,excerptDigest:hash(hit.originalExcerpt),classification})),constituents};
       const current=():boolean=>{
         try { this.retainedGenerationCurrent(operation,retained,envelope.draft.stamp); return !operation.retired && operation.inFlight; }
         catch { return false; }
@@ -768,10 +856,12 @@ export class SearchController {
       if(!current())throw new ProviderFailure('CANCELLED');
       remainingOperationMs(context);
       const detached=structuredClone(claims);
+      const publish=detached.length?this.prepareCompletedTurn(session,retained,preview,detached):undefined;
       this.retireScopedRetrieval(operation,'CANCELLED');
       if(this.disposed || this.revision!==operation.revision || this.sourceRevision!==operation.sourceRevision
         || !this.retainedSessions.has(session)) return chatFailure('CANCELLED');
-      return detached.length?{apiVersion:1,ok:true,value:detached}:chatFailure('INSUFFICIENT_EVIDENCE');
+      if(!publish)return chatFailure('INSUFFICIENT_EVIDENCE');
+      return publish()?{apiVersion:1,ok:true,value:detached}:chatFailure('CANCELLED');
     } catch(error) {
       const code=deadlineFailure(operation.context)?.code ?? (error instanceof ProviderFailure ? error.code : 'NOT_READY');
       this.retireScopedRetrieval(operation,code);
@@ -795,9 +885,10 @@ export class SearchController {
     const operation=this.ownedRetainedTurn(session,owner);
     if (!operation) return;
     this.generationCredential.revoke(owner);
+    this.clearRetainedHistory(session);
     this.clearRetainedGeneration(operation.retained!);
     // An outstanding resolver may not be replaced until physically settled.
-    if (operation.retained?.rejectCredential || operation.retained?.generationBusy) this.retireScopedRetrieval(operation,'CANCELLED');
+    if (operation.retained?.rejectCredential || operation.retained?.generationBusy || operation.retained?.prior?.length) this.retireScopedRetrieval(operation,'CANCELLED');
   }
   private bindRetainedCredential(session:RetainedChatSessionOwner,owner:RetainedChatTurnOwner,
     input?:{token:string}):Promise<GenerationCredentialStamp> {
@@ -806,13 +897,23 @@ export class SearchController {
     if (operation.inFlight) {
       // Replacement of an outstanding resolver is an explicit retirement,
       // not permission to start a second resolver against the same slot.
-      if (operation.retained?.rejectCredential || operation.retained?.generationBusy) this.retireScopedRetrieval(operation,'CANCELLED');
+      if (operation.retained?.rejectCredential || operation.retained?.generationBusy) {
+        this.clearRetainedHistory(session);this.retireScopedRetrieval(operation,'CANCELLED');
+      }
       return Promise.reject(new ProviderFailure('BUSY'));
     }
     const retained=operation.retained!;
     if (!retained.check || !retained.lease || !retained.response) return Promise.reject(new ProviderFailure('NOT_READY'));
+    const replacing=!!retained.credentialBound;
     operation.inFlight=true;
     this.generationCredential.revoke(owner);
+    if (replacing) {
+      this.clearRetainedHistory(session);
+      if(retained.prior?.length){
+        this.retireScopedRetrieval(operation,'CANCELLED');operation.inFlight=false;this.releaseRetiredScopedRetrieval();
+        return Promise.reject(new ProviderFailure('CANCELLED'));
+      }
+    }
     this.clearRetainedGeneration(retained);
     const result=new Promise<GenerationCredentialStamp>((resolve,reject)=>{
       retained.rejectCredential=reject;
@@ -844,6 +945,7 @@ export class SearchController {
           verifyBinding();
           // The exact original attempt, not a later resolver/input, completes.
           const stamp=this.generationCredential.complete(attempt,secret);
+          retained.credentialBound=true;
           resolve(stamp);
         } catch(error) {
           this.generationCredential.revoke(owner);
@@ -969,6 +1071,20 @@ export class SearchController {
           retained.question=request.query;
           retained.check=()=>current(lease);
           retained.configuration=config;
+          const entry=this.retainedSessions.get(retained.session);
+          const scopeDigest=hash(JSON.stringify(lease.snapshot));
+          const selected=retained.priorIds ?? [];
+          if (entry?.history.some(turn=>turn.scopeDigest!==scopeDigest || turn.configuration!==config
+              || turn.generationId!==generation || turn.sourceRevision!==this.sourceRevision)) this.clearRetainedHistory(retained.session);
+          const prior=selected.map(id=>entry?.history.find(turn=>turn.id===id));
+          if (!entry || prior.some((turn):turn is undefined=>!turn)
+            || prior.some(turn=>turn!.scopeDigest!==scopeDigest || turn!.configuration!==config
+              || turn!.generationId!==generation || turn!.sourceRevision!==this.sourceRevision)) {
+            this.clearRetainedHistory(retained.session);
+            throw new StandaloneError('SCOPE_CHANGED');
+          }
+          retained.prior=Object.freeze(prior.map(turn=>Object.freeze({id:turn!.id,question:turn!.question,questionDigest:turn!.questionDigest})));
+          entry.lastUsed=Date.now();
         }
         finish({apiVersion:1,ok:true,value:detached});
       } catch(error) {
@@ -1011,7 +1127,7 @@ export class SearchController {
       const rejectCredential=retained.rejectCredential, rejectPreview=retained.rejectPreview;
       this.generationCredential.revoke(retained.owner);
       retained.rejectCredential=undefined;retained.rejectPreview=undefined;retained.configuration=undefined;
-      retained.question=undefined;
+      retained.question=undefined;retained.prior=undefined;retained.priorIds=undefined;
       this.clearRetainedGeneration(retained);
       retained.lease=undefined;retained.response=undefined;retained.check=undefined;retained.finishRead=undefined;
       finishRead?.(result);
