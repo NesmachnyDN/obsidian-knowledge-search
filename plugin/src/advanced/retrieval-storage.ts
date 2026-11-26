@@ -5,7 +5,7 @@ import { lstat, readdir, rename, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { readSource, type TrustedVaultRoot } from './source';
-import { validateApiDenseGeneration, readBuiltApiDenseGeneration, type ApiDenseGeneration } from '../ai/dense-generation';
+import { validateApiDenseGeneration, readBuiltApiDenseGeneration, isApiDenseGeneration,type ApiDenseGeneration } from '../ai/dense-generation';
 import { privateIndexPath } from '../standalone/source';
 import { verifySpan } from '../search/navigation';
 import { canonical, sha, validRelative, IngestError } from './protocol';
@@ -67,7 +67,7 @@ export function validateRetrievalGeneration(v:unknown,rootId:string):asserts v i
   if(generationDigest({schemaVersion:1,rootId:g.rootId,model:g.model,entries:g.entries})!==g.generationId)invalid();
 }
 function validateActive(v:unknown,rootId:string):asserts v is ActiveGeneration {
-  if((v as {schemaVersion?:unknown}|null)?.schemaVersion===2)validateApiDenseGeneration(v,rootId);
+  if(isApiDenseGeneration(v as {schemaVersion:unknown}|null))validateApiDenseGeneration(v,rootId);
   else validateRetrievalGeneration(v,rootId);
 }
 export class AdvancedRetrievalStore {
@@ -182,7 +182,7 @@ export class AdvancedRetrievalStore {
   async snapshotApi(spaceId:string,lexicalGenerationId:string,signal?:AbortSignal):Promise<ApiDenseGeneration|null>{
     this.assertCurrent();
     const state=this.lifecycle;
-    if(this.generation?.schemaVersion!==2||state.blocked||state.revoked.size)return null;
+    if(!isApiDenseGeneration(this.generation)||state.blocked||state.revoked.size)return null;
     const value=this.generation,revision=state.revision;
     if(value.spaceId!==spaceId||value.lexicalGenerationId!==lexicalGenerationId)invalid();
     await withPrivateDerivedDirectory(this.path,this.root.path,async dir=>this.verifyPointer(dir));
@@ -199,7 +199,7 @@ export class AdvancedRetrievalStore {
     const lease=this.apiSnapshots.get(snapshot),state=this.lifecycle;
     return !!lease&&!this.poisoned&&!state.blocked&&!state.revoked.size
       &&lease.epoch===this.epoch&&lease.epoch===state.epoch&&lease.revision===state.revision
-      &&this.generation?.schemaVersion===2&&this.generation.generationId===snapshot.generationId;
+      &&isApiDenseGeneration(this.generation)&&this.generation.generationId===snapshot.generationId;
   }
   revoke(path:string):void{
     // Even an instance with an obsolete snapshot can deliver a source event.
@@ -305,7 +305,7 @@ export class AdvancedRetrievalStore {
       catch{this.poisoned=true;invalid();}
       // Recheck caller-owned state before retiring the last generation.
       // After CURRENT switches, any failure must leave visibility blocked.
-      if(next.schemaVersion===2){await check();fence();}
+      if(isApiDenseGeneration(next)){await check();fence();}
       await this.discardUnpublished((await readdir(dir)).filter(n=>n!==CURRENT&&n!==name),dir);
       await this.verifyPointer(dir);
       fence();
@@ -317,7 +317,7 @@ export class AdvancedRetrievalStore {
       // created, authenticated stage files; ambiguous CURRENT stays poisoned.
       if(!this.poisoned){
         for(const file of [pointerStage,dataStageOwned?stage:null,
-          next.schemaVersion===2&&newFileOwned&&this.committedName!==name?join(dir,name):null]){
+          isApiDenseGeneration(next)&&newFileOwned&&this.committedName!==name?join(dir,name):null]){
           if(!file)continue;
           try{
             const stat=await lstat(file);
@@ -340,7 +340,7 @@ export class AdvancedRetrievalStore {
       // The async check includes source-byte verification. Run it after the
       // descriptor closes, then synchronously fence and publish visibility.
       // No await is permitted between the fence and clearing blocked.
-      if(value.schemaVersion===2)await check();
+      if(isApiDenseGeneration(value))await check();
       fence();
       state.revoked.clear();state.blocked=false;
       return result;

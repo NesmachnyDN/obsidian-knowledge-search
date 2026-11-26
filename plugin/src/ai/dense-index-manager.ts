@@ -13,7 +13,8 @@ import { EvidenceEmbedder, type EmbeddingApproval, type VerifiedEmbeddingResult 
 import { MAX_API_VECTORS, buildApiDenseGeneration } from './dense-generation';
 import type { GenerationPolicyBinding } from './generation-policy';
 
-export const INDEX_PURPOSE_TEXT='selected corpus indexing';
+import {INDEX_PURPOSE_TEXT} from './embedding-policy';
+export {INDEX_PURPOSE_TEXT} from './embedding-policy';
 export type DenseIndexRequest={paths:readonly string[];config:ProviderConfig;space:EmbeddingSpace};
 export type DenseIndexGrantInput={scopeId:string;config:ProviderConfig;space:EmbeddingSpace;
   query:string;evidence:readonly EvidenceHit[]};
@@ -121,7 +122,7 @@ export class ApiDenseIndexManager{
         guard();
       }
       const generation=buildApiDenseGeneration(corpus.rootId,config,space,corpus.lexicalGenerationId,
-        corpus.evidence,results);
+        corpus.evidence,results,approved?.map(a=>a.grant.notePolicyBinding!));
       await this.store.publishApi(generation,async()=>{guard();},context.signal,current);
       guard();
       if(port.publicationFence){

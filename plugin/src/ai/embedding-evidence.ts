@@ -1,6 +1,6 @@
 import type { EvidenceHit } from '../standalone/contracts';
 import { ProviderFailure,type CallContext,type EmbeddingSpace } from './contracts';
-import { type DisclosureGrant } from './disclosure';
+import { configDigest,type DisclosureGrant } from './disclosure';
 import { VerifiedEvidenceOperation,type EvidenceApproval } from './verified-evidence';
 import { embeddingSpaceId,validateEmbeddingSpace } from './embedding-space';
 import type { GenerationPolicyBinding } from './generation-policy';
@@ -12,15 +12,20 @@ export type EmbeddingApproval=Omit<EvidenceApproval,'grant'>&{
 export type VerifiedEmbeddingResult={batch:EmbeddingBatch;evidence:readonly EvidenceHit[]};
 /** In-process provenance capability. Neither wire JSON nor caller-assembled
  * evidence/vector pairs may be promoted to a dense document generation. */
-const issued=new WeakMap<VerifiedEmbeddingResult,{scopeId:string;value:VerifiedEmbeddingResult}>();
-export function readVerifiedDocumentBatch(result:VerifiedEmbeddingResult,scopeId:string):VerifiedEmbeddingResult {
+export type DocumentPolicyProvenance=Readonly<{
+  configDigest:string;bindingDigest:string;scopeBinding:string;payloadDigest:string;sourceDigest:string;
+  queryClassification:'synthetic'|'public';
+}>;
+type VerifiedDocumentBatch=VerifiedEmbeddingResult&{policyProvenance?:DocumentPolicyProvenance};
+const issued=new WeakMap<VerifiedEmbeddingResult,{scopeId:string;value:VerifiedEmbeddingResult;policyProvenance?:DocumentPolicyProvenance}>();
+export function readVerifiedDocumentBatch(result:VerifiedEmbeddingResult,scopeId:string):VerifiedDocumentBatch {
   const binding=issued.get(result);
   if(!binding||binding.scopeId!==scopeId||binding.value.batch.purpose!=='document'
     ||JSON.stringify(result)!==JSON.stringify(binding.value))throw new ProviderFailure('DISCLOSURE_DENIED');
-  return structuredClone(binding.value);
+  return structuredClone({...binding.value,...(binding.policyProvenance?{policyProvenance:binding.policyProvenance}:{})});
 }
-/** Trusted host-issued exact purpose/space grant. This adapter is not wired
- * into production UI or persisted indexing until the subsequent migration. */
+/** Trusted host-issued exact purpose/space grant. Historical lineage is
+ * retained only for verified document results. */
 export class EvidenceEmbedder {
   private readonly operation=new VerifiedEvidenceOperation();
   private readonly transport=new LoopbackEmbeddingTransport();
@@ -42,7 +47,14 @@ export class EvidenceEmbedder {
       (config,input,call)=>this.transport.embed(config,space,snapshot.purpose,input,token,call),
       snapshot.purpose==='query',policyCheck);
     const verified={batch:result,evidence};
-    issued.set(verified,{scopeId:snapshot.scopeId,value:structuredClone(verified)});
+    // Historical non-secret evidence only, minted after all shared verification.
+    // It is never a reusable grant or a caller-controlled result field.
+    const policyProvenance=policy?.embedding&&snapshot.purpose==='document'?{
+      configDigest:configDigest('embedding',snapshot.config),bindingDigest:policy.bindingDigest,
+      scopeBinding:policy.scopeBinding,payloadDigest:policy.payloadDigest,sourceDigest:policy.sourceDigest,
+      queryClassification:policy.embedding.queryClassification
+    }:undefined;
+    issued.set(verified,{scopeId:snapshot.scopeId,value:structuredClone(verified),policyProvenance});
     return verified;
   }
 }

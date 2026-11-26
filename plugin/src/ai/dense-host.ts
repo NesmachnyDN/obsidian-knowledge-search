@@ -314,7 +314,7 @@ export class ApiDenseHost {
         return fail('SOURCE_STALE');
       const snapshot=await store.snapshotApi(spaceId,lease.lexicalGenerationId,abort.signal);
       check();
-      if(!snapshot||snapshot.generationId!==result.indexGenerationId||!lease.current()
+      if(!snapshot||snapshot.schemaVersion!==2||snapshot.generationId!==result.indexGenerationId||!lease.current()
         ||!store.isApiSnapshotCurrent(snapshot))return fail('SOURCE_STALE');
       return ()=>current()&&!signal.aborted&&lease.current()&&store.isApiSnapshotCurrent(snapshot);
     })();
