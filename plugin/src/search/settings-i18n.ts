@@ -21,6 +21,17 @@ export function settingsLocale(language: string): SettingsLocale {
 }
 
 const russian: Readonly<Record<string, string>> = {
+  'Local knowledge graph': 'Локальный граф знаний',
+  'Graph mapping state': 'Состояние конфигурации графа',
+  'Graph mapping configured; readiness not verified.': 'Конфигурация графа сохранена; готовность не проверена.',
+  'Invalid graph mapping; graph disabled.': 'Некорректная конфигурация графа; граф отключён.',
+  'Graph disabled.': 'Граф отключён.',
+  'Graph mapping (JSON)': 'Конфигурация графа (JSON)',
+  'Explicit local typed relations; no source changes, AI calls or automatic expansion.': 'Явно заданные локальные типизированные связи; без изменения источников, обращений к ИИ или автоматического расширения поиска.',
+  'Graph mapping actions': 'Действия с конфигурацией графа',
+  'Save mapping': 'Сохранить конфигурацию',
+  'Disable graph': 'Отключить граф',
+  'Invalid graph mapping.': 'Некорректная конфигурация графа.',
   'marking-reason-existing-material': 'существующий материал',
   'marking-reason-explicit-private': 'явная метка private',
   'marking-reason-already-marked': 'метка уже установлена',

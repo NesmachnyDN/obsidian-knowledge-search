@@ -9,6 +9,7 @@ import { translateSettings, formatSettings, localizeSettingsState, type Settings
 import { applySettingsLayout, restoreSettingsFocus, settingsDisclosure } from './settings-layout';
 import { advancedDraft, ingestionDraft, needsOcr, needsStructure, probeDraft, topKDraft } from './settings-draft';
 import type { IngestionConfig, SearchSettings } from './settings';
+import { configuredGraph, parseGraphDraft } from './graph-settings';
 import type { SearchResponse } from '../standalone/contracts';
 import type { SearchStatus } from './status';
 
@@ -36,6 +37,7 @@ export class SearchSettingsTab extends PluginSettingTab {
   private topKInput?: string;
   private markingDraft?: {defaultAction:MarkAction;rules:string};
   private markingViewEpoch=0;
+  private graphDraft?: string;
   private advancedInput?: AdvancedConfig;
   private ingestionInput?: IngestionConfig;
   private probeInput?: ProbeConfig;
@@ -471,6 +473,50 @@ export class SearchSettingsTab extends PluginSettingTab {
       .addButton(button=>button.setButtonText(t('Cancel')).onClick(()=>{if(this.markingViewEpoch!==epoch)return;this.markingDraft=undefined;this.display();}));
   }
 
+  private showGraphSettings(root:HTMLElement):void {
+    const section=heading(root,'Local knowledge graph');
+    const pref=this.current().graph;
+    new Setting(section).setName(t('Graph mapping state'))
+      .setDesc(t(pref?.state==='configured'?'Graph mapping configured; readiness not verified.':
+        pref?.state==='invalid'?'Invalid graph mapping; graph disabled.':'Graph disabled.'));
+    const mapping=configuredGraph(pref);
+    this.graphDraft ??= JSON.stringify(mapping??{schemaVersion:'oks-06b-mapping-v1',rules:[]});
+    const error=alert(section), epoch=this.markingViewEpoch;
+    let revision=0, saving=false;
+    new Setting(section).setName(t('Graph mapping (JSON)'))
+      .setDesc(t('Explicit local typed relations; no source changes, AI calls or automatic expansion.'))
+      .addTextArea(text=>{
+        text.inputEl.setAttribute('aria-label',t('Graph mapping (JSON)'));
+        text.inputEl.rows=8;text.inputEl.maxLength=16*1024;
+        return text.setValue(this.graphDraft!).onChange(value=>{
+          this.graphDraft=value;revision++;error.textContent='';
+        });
+      });
+    new Setting(section).setName(t('Graph mapping actions'))
+      .addButton(button=>button.setButtonText(t('Save mapping')).onClick(async()=>{
+        if(saving||this.markingViewEpoch!==epoch)return;
+        const value=parseGraphDraft(this.graphDraft??'');
+        if(!value){error.textContent=t('Invalid graph mapping.');return;}
+        const started=revision;saving=true;
+        try {
+          if(await this.commit(s=>{s.graph={state:'configured',mapping:value};},error)
+            &&this.markingViewEpoch===epoch&&started===revision){this.graphDraft=undefined;this.display();}
+        }finally{saving=false;}
+      }))
+      .addButton(button=>button.setButtonText(t('Disable graph')).onClick(async()=>{
+        if(saving||this.markingViewEpoch!==epoch)return;
+        const started=revision;saving=true;
+        try{
+          if(await this.commit(s=>{s.graph={state:'disabled'};},error)
+            &&this.markingViewEpoch===epoch&&started===revision){this.graphDraft=undefined;this.display();}
+        }finally{saving=false;}
+      }))
+      .addButton(button=>button.setButtonText(t('Cancel')).onClick(()=>{
+        if(saving||this.markingViewEpoch!==epoch)return;
+        this.graphDraft=undefined;this.display();
+      }));
+  }
+
   display(focusKey?: string): void {
     this.hide();
     const root = this.containerEl;
@@ -499,7 +545,7 @@ export class SearchSettingsTab extends PluginSettingTab {
     this.showMarkingRules(root);
     this.showDocuments(root);
     this.showIndex(root);
-    if (expert) this.showExpert(root);
+    if (expert) { this.showGraphSettings(root); this.showExpert(root); }
     if (focusKey) restoreSettingsFocus(root, focusKey);
   }
 }

@@ -28,6 +28,7 @@ import { join, resolve } from 'node:path';
 import { SearchController, StandaloneApi } from './search/controller';
 import { purgeDerivedIndex } from './search/purge';
 import { defaultSettings, parseSettings, type SearchSettings } from './search/settings';
+import { configuredGraph } from './search/graph-settings';
 import { SearchSettingsTab } from './search/settings-tab';
 import { SearchView, SEARCH_VIEW } from './search/view';
 import { ChatView, CHAT_VIEW } from './search/chat-view';
@@ -416,6 +417,8 @@ export default class SyntheticEvidencePlugin extends Plugin {
       }
       this.denseSettingsChanging = true;
       try {
+        // Revoke graph leases before any persistence or synchronous observers.
+        this.standalone?.configureGraph(null);
         const retiringHost = this.denseHost;
         this.searchController.beginRuntimeSettingsChange(retiringHost,
           !settings.enabled || JSON.stringify(this.settings.ai.reranking) !== JSON.stringify(settings.ai.reranking));
@@ -486,6 +489,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
           if (settings.paused) this.standalone.cancel(); else this.standalone.resume();
         }
         this.searchController.assertSourceRetirementSettled();
+        this.standalone?.configureGraph(configuredGraph(settings.graph));
         this.settingsRuntimeBase = undefined;
         this.settingsApplyInterrupted = false;
       } finally {
@@ -777,6 +781,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
       await engine.start();
       if (!valid()) { await this.stopStandalone(); return; }
       if (this.settings.paused) engine.cancel();
+      if (!this.denseSettingsChanging) engine.configureGraph(configuredGraph(this.settings.graph));
     } catch (error) {
       await this.stopStandalone();
       if (valid()) {

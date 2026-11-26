@@ -84,3 +84,10 @@ test('CHECK-01: connection check labels and typed errors are localized without t
     {ms:120,reason,code:'UNAUTHENTICATED'},'ru');
   assert.equal(message,'Ошибка проверки (120 мс): Ошибка авторизации. Проверьте bearer-токен. (UNAUTHENTICATED)');
 });
+
+test('06B.2c graph settings distinguish saved mapping from verified readiness in RU/EN',()=>{
+  assert.equal(translateSettings('Local knowledge graph','ru'),'Локальный граф знаний');
+  assert.equal(translateSettings('Disable graph','ru'),'Отключить граф');
+  assert.equal(translateSettings('Graph mapping configured; readiness not verified.','ru'),'Конфигурация графа сохранена; готовность не проверена.');
+  assert.equal(translateSettings('Graph mapping (JSON)','de'),'Graph mapping (JSON)');
+});

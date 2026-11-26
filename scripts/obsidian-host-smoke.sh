@@ -30,6 +30,17 @@ if [[ "${OKS_NATIVE_CHAT_TEST:-0}" == 1 ]]; then
      "${OKS_06UX_L10N_SWITCH_TEST:-0}" == 0 && "${OKS_06UX_L10N_RU_TEST:-0}" == 0 ]] ||
     { echo "HOST_SMOKE_FAILURE: native chat requires isolated verified package and separate mode" >&2; exit 2; }
 fi
+# Graph acceptance is an isolated Basic-only run against the verified package.
+if [[ "${OKS_06B_GRAPH_TEST:-0}" == 1 ]]; then
+  [[ "${OKS_HOST_NO_ROUTE:-0}" == 1 && -n "${OKS_STANDALONE_PACKAGE_DIR:-}" &&
+     -z "${OKS_STANDALONE_PREVIOUS_PACKAGE_DIR:-}" && -z "${OKS_06UX_VISUAL_DIR:-}" &&
+     -z "${OKS_06UX_L10N_RU_VISUAL_DIR:-}" && "${OKS_NATIVE_CHAT_TEST:-0}" == 0 &&
+     "${OKS_AI_RERANK_TEST:-0}" == 0 && "${OKS_ADVANCED_HEALTH_TEST:-0}" == 0 &&
+     "${OKS_ADVANCED_INGESTION_TEST:-0}" == 0 && "${OKS_ADVANCED_RETRIEVAL_TEST:-0}" == 0 &&
+     "${OKS_06UX_TEST:-0}" == 0 && "${OKS_06UX_L10N_SWITCH_TEST:-0}" == 0 &&
+     "${OKS_06UX_L10N_RU_TEST:-0}" == 0 ]] ||
+    { echo "HOST_SMOKE_FAILURE: graph requires isolated verified package and separate mode" >&2; exit 2; }
+fi
 tmp="$(mktemp -d /tmp/oks-native-host-XXXXXXXX)"
 trap 'rm -rf -- "$tmp"' EXIT
 ulimit -c 0
@@ -309,6 +320,18 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
   [[ "$ui" == *"OBSIDIAN_UI_SMOKE_PASS:"* ]] ||
     { echo "HOST_SMOKE_FAILURE: extended UI scenarios ($ui)" >&2; exit 1; }
   printf "%s\n" "$ui"
+  if [[ "${OKS_06B_GRAPH_TEST:-0}" == 1 ]]; then
+    graph="$(timeout 50s "$cli" eval "code=$(cat "$repo/scripts/obsidian-graph-smoke.js")")"
+    [[ "$graph" == *"OBSIDIAN_GRAPH_HOST_BEFORE_RELOAD_PASS:"* ]] ||
+      { echo "HOST_SMOKE_FAILURE: graph before reload ($graph)" >&2; exit 1; }
+    printf "%s\n" "$graph"
+    timeout 8s "$cli" plugin:reload id=oks-synthetic-evidence >/dev/null
+    sleep 3
+    graph="$(timeout 50s "$cli" eval "code=$(cat "$repo/scripts/obsidian-graph-smoke.js")")"
+    [[ "$graph" == *"OBSIDIAN_GRAPH_HOST_PASS:"* ]] ||
+      { echo "HOST_SMOKE_FAILURE: graph after reload ($graph)" >&2; exit 1; }
+    printf "%s\n" "$graph"
+  fi
   if [[ "${OKS_06UX_TEST:-0}" == 1 ]]; then
     settings_ux="$(timeout 45s "$cli" eval "code=$(cat "$repo/scripts/obsidian-settings-ux-smoke.js")")"
     [[ "$settings_ux" == *"OBSIDIAN_SETTINGS_UX_PASS:"* ]] || {
