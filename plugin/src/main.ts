@@ -1,3 +1,6 @@
+import { GenerationPolicyHost } from './ai/generation-policy-host';
+import { policyOriginals } from './ai/generation-policy';
+import { configDigest } from './ai/disclosure';
 import { NewMaterialTracker } from './ai/new-material-tracker';
 import { decideNewMaterialMarking, type NewMaterialRuleConfig, type NewMaterialDecision } from './ai/new-material-policy';
 import { DenseMachine } from './ai/dense-machine';
@@ -108,6 +111,21 @@ export default class SyntheticEvidencePlugin extends Plugin {
     this.searchController.trackSourceDrain(this.trackStorageDrain(work));
   }
   private advancedStartup?: Promise<void>;
+  // Cloud selection is never a local pilot. Actual profile admission is a
+  // later provider-specific gate; a configured URL cannot issue a profile.
+  private readonly generationPolicyHost=new GenerationPolicyHost(
+    ()=>this.settings.ai.generation.state==='configured'&&this.settings.ai.generation.transport==='cloud',
+    ()=>this.standalone,input=>{
+      const config=this.settings.ai.generation,reader=this.sourceReader;
+      if(this.unloaded||this.denseSettingsChanging||!reader||reader.rootId!==input.scopeId||config.state!=='configured')return null;
+      const materials=policyOriginals(input).map(source=>{
+        const file=this.app.vault.getAbstractFileByPath(source.sourceId);
+        const state=file instanceof TFile&&file.path===source.sourceId?this.markingTracker.state(source.sourceId,file):'unresolved' as const;
+        return {lifecycle:{state,sourceId:source.sourceId,sha256:source.sourceSha256,rootId:reader.rootId},provenance:null};
+      });
+      return {config,profile:null,adapter:'unadmitted-cloud',policyRevision:String(this.searchController.sourceAuthorityRevision()),
+        configRevision:configDigest('generation',config),restrictions:[],rules:this.settings.markingRules,materials,complete:true};
+    });
   readonly searchController: SearchController = new SearchController(async hit => {
     if (this.unloaded || this.denseSettingsChanging || !this.navigator) throw new StandaloneError('NAVIGATION_REJECTED');
     await this.navigator.open(hit);
@@ -119,7 +137,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     config: () => this.settings.ai.generation,
     scopeId: () => this.sourceReader?.rootId,
     verify: hit => this.verifyAiEvidence(hit),
-  }, () => this.revokeDenseAuthority());
+  }, () => this.revokeDenseAuthority(),undefined,this.generationPolicyHost);
   private revokeDenseAuthority(): void {
     this.denseUi.authority.revoke(() => {
       // Lexical navigation has its own revision even when both dense owners

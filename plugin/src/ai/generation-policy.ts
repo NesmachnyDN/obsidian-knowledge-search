@@ -1,46 +1,105 @@
-import { hash, isDigest } from '../standalone/contracts';
-import type { CallContext, ProviderConfig } from './contracts';
+import { BOUNDS, hash, isDigest, validPath } from '../standalone/contracts';
+import { ProviderFailure, type CallContext, type ProviderConfig } from './contracts';
+import { bindActiveDeadline, remainingOperationMs, deadlineFailure, expireActiveDeadline } from './active-deadline';
 import type { PolicyEnvelope } from './processing-policy';
 
-/**
- * Host-owned bridge between the generation controller and the canonical policy
- * evaluator.  It deliberately carries neither a provider capability nor a
- * grant: real profile admission remains outside this repository slice.
- */
+/** Trusted host port; a caller cannot submit a profile, verdict or credential. */
 export type GenerationPolicyInput = Readonly<{
   role: 'generation'; config: ProviderConfig; scopeId: string; ownerId: string;
   hostId: string; credentialEpoch: number; deadlineUnixMs: number;
-  payloadDigest: string;
+  payloadDigest: string; scopeBinding:string;
+  scopeSources:readonly Readonly<{sourceId:string;sourceSha256:string}>[];
   sources: readonly Readonly<{sourceId:string; sourceSha256:string; excerptDigest:string}>[];
 }>;
 export type GenerationPolicyPort = Readonly<{
-  evaluate(input: GenerationPolicyInput, context: CallContext): Promise<PolicyEnvelope>;
+  selected?():boolean;
+  current(input:GenerationPolicyInput,binding:GenerationPolicyBinding):boolean;
+  evaluate(input:GenerationPolicyInput,context:CallContext,current:()=>boolean):Promise<PolicyEnvelope>;
 }>;
 export type GenerationPolicyBinding = Readonly<{
-  bindingDigest: string; payloadDigest: string; sourceDigest: string; deadlineUnixMs:number;
+  bindingDigest:string; payloadDigest:string; sourceDigest:string; scopeBinding:string; deadlineUnixMs:number;
 }>;
-
-export function generationPolicyInput(input: GenerationPolicyInput): GenerationPolicyInput {
-  if (!isDigest(input.scopeId) || !isDigest(input.payloadDigest)
-    || !input.ownerId || !input.hostId || !Number.isSafeInteger(input.credentialEpoch) || input.credentialEpoch < 1
-    || !Number.isSafeInteger(input.deadlineUnixMs) || input.deadlineUnixMs < 1
-    || !Array.isArray(input.sources) || !input.sources.length || new Set(input.sources.map(x=>x.sourceId)).size !== input.sources.length
-    || input.sources.some(x=>!x.sourceId || !isDigest(x.sourceSha256) || !isDigest(x.excerptDigest))) throw Error('invalid policy input');
-  return Object.freeze({ ...input, config: structuredClone(input.config),
-    sources: Object.freeze(input.sources.map(x=>Object.freeze({...x}))) });
+export function generationPolicyInput(input:GenerationPolicyInput):GenerationPolicyInput {
+  if(input.role!=='generation'||!isDigest(input.scopeId)||!isDigest(input.payloadDigest)||!isDigest(input.scopeBinding)
+    ||!input.ownerId||!input.hostId||!Number.isSafeInteger(input.credentialEpoch)||input.credentialEpoch<1
+    ||!Number.isSafeInteger(input.deadlineUnixMs)||input.deadlineUnixMs<1
+    ||!Array.isArray(input.sources)||!input.sources.length||input.sources.length>BOUNDS.limit
+    ||input.sources.some(x=>!validPath(x.sourceId)||!isDigest(x.sourceSha256)||!isDigest(x.excerptDigest)))
+    throw new ProviderFailure('DISCLOSURE_DENIED');
+  if(!Array.isArray(input.scopeSources)||!input.scopeSources.length||input.scopeSources.length>BOUNDS.sources
+    ||input.scopeSources.some(x=>!validPath(x.sourceId)||!isDigest(x.sourceSha256)))throw new ProviderFailure('DISCLOSURE_DENIED');
+  policyOriginals(input); // repeated passages allowed, conflicting versions never allowed
+  const config=structuredClone(input.config);
+  Object.freeze(config.identity);Object.freeze(config.limits);Object.freeze(config);
+  return Object.freeze({...input,config,scopeSources:Object.freeze(input.scopeSources.map(x=>Object.freeze({...x}))),sources:Object.freeze(input.sources.map(x=>Object.freeze({...x})))});
 }
-export function generationPolicyPayload(query: string, candidates: readonly {sourceId:string;sourceSha256:string;text:string}[]): string {
+export function policyOriginals(input:Pick<GenerationPolicyInput,'sources'|'scopeSources'>):readonly {sourceId:string;sourceSha256:string}[] {
+  const originals=new Map<string,string>();
+  for(const source of input.scopeSources){
+    if(originals.has(source.sourceId))throw new ProviderFailure('DISCLOSURE_DENIED');
+    originals.set(source.sourceId,source.sourceSha256);
+  }
+  for(const source of input.sources)
+    if(originals.get(source.sourceId)!==source.sourceSha256)throw new ProviderFailure('DISCLOSURE_DENIED');
+  return [...originals].map(([sourceId,sourceSha256])=>({sourceId,sourceSha256}));
+}
+export function uniquePolicySources(sources:readonly {sourceId:string;sourceSha256:string}[]):readonly {sourceId:string;sourceSha256:string}[]{
+  const originals=new Map<string,string>();
+  for(const source of sources){
+    if(originals.has(source.sourceId)&&originals.get(source.sourceId)!==source.sourceSha256)
+      throw new ProviderFailure('DISCLOSURE_DENIED');
+    originals.set(source.sourceId,source.sourceSha256);
+  }
+  return [...originals].map(([sourceId,sourceSha256])=>({sourceId,sourceSha256}));
+}
+export function generationPolicyPayload(query:string,candidates:readonly {sourceId:string;sourceSha256:string;text:string}[]):string {
   return hash(JSON.stringify([query,candidates.map(x=>[x.sourceId,x.sourceSha256,hash(x.text)])]));
 }
-export function generationPolicySourceDigest(input: GenerationPolicyInput): string {
+export function generationPolicySourceDigest(input:Pick<GenerationPolicyInput,'sources'>):string {
   return hash(JSON.stringify(input.sources.map(x=>[x.sourceId,x.sourceSha256,x.excerptDigest])));
 }
-export async function evaluateGenerationPolicy(port: GenerationPolicyPort, input: GenerationPolicyInput,
-  context: CallContext): Promise<GenerationPolicyBinding> {
-  const exact=generationPolicyInput(input), result=await port.evaluate(exact,context);
-  if (!result.allowed || !isDigest(result.bindingDigest) || result.policyVersion !== 'oks-policy-1b'
-    || result.sourceVersions.length !== exact.sources.length
-    || result.sourceVersions.some((x,index)=>x.sourceId!==exact.sources[index]!.sourceId
-      || x.sha256!==exact.sources[index]!.sourceSha256)) throw Error('policy denied');
-  return Object.freeze({bindingDigest:result.bindingDigest,payloadDigest:exact.payloadDigest,sourceDigest:generationPolicySourceDigest(exact),deadlineUnixMs:exact.deadlineUnixMs});
+export function sameGenerationPolicy(a:GenerationPolicyBinding|undefined,b:GenerationPolicyBinding|undefined):boolean {
+  return !!a&&!!b&&a.bindingDigest===b.bindingDigest&&a.payloadDigest===b.payloadDigest
+    &&a.sourceDigest===b.sourceDigest&&a.scopeBinding===b.scopeBinding&&a.deadlineUnixMs===b.deadlineUnixMs;
+}
+/** One physical dependency slot per controller, even after logical timeout.
+ * No capability or policy decision can be minted here. */
+export class GenerationPolicyGate {
+  private pending=false;
+  get busy():boolean{return this.pending;}
+  async evaluate(port:GenerationPolicyPort,input:GenerationPolicyInput,context:CallContext,current:()=>boolean):Promise<GenerationPolicyBinding> {
+    if(this.pending)throw new ProviderFailure('BUSY');
+    const exact=generationPolicyInput(input), originals=policyOriginals(exact);
+    if(context.deadlineUnixMs!==exact.deadlineUnixMs)throw new ProviderFailure('DISCLOSURE_DENIED');
+    context=bindActiveDeadline(context,30000,exact.deadlineUnixMs);
+    const check=()=>{remainingOperationMs(context);if(!current())throw new ProviderFailure('CANCELLED');remainingOperationMs(context);};
+    const remaining=remainingOperationMs(context);
+    this.pending=true;
+    return new Promise((resolve,reject)=>{
+      let settled=false;
+      const finish=(result?:PolicyEnvelope,error?:unknown)=>{
+        if(settled)return;
+        settled=true;clearTimeout(timer);context.signal.removeEventListener('abort',cancel);
+        try{
+          const failure=deadlineFailure(context);if(failure)throw failure;
+          if(error!==undefined)throw error;
+          check();
+          if(!result?.allowed||result.reason!=='eligible'||!isDigest(result.bindingDigest)||result.policyVersion!=='oks-policy-1b'
+            ||result.rootId!==exact.scopeId||result.sourceVersions.length!==originals.length
+            ||result.sourceVersions.some((x,i)=>x.sourceId!==originals[i]!.sourceId||x.sha256!==originals[i]!.sourceSha256
+              ||x.metadataState==='unresolved'))throw new ProviderFailure('DISCLOSURE_DENIED');
+          const binding=Object.freeze({bindingDigest:result.bindingDigest,payloadDigest:exact.payloadDigest,
+            sourceDigest:generationPolicySourceDigest(exact),scopeBinding:exact.scopeBinding,deadlineUnixMs:exact.deadlineUnixMs});
+          if(!port.current(exact,binding))throw new ProviderFailure('CANCELLED');
+          check();resolve(binding);
+        }catch(error){reject(error instanceof ProviderFailure?error:new ProviderFailure('DISCLOSURE_DENIED'));}
+      };
+      const cancel=()=>finish(undefined,new ProviderFailure('CANCELLED'));
+      const timer=setTimeout(()=>{expireActiveDeadline(context);finish(undefined,new ProviderFailure('TIMEOUT'));},remaining);
+      context.signal.addEventListener('abort',cancel,{once:true});
+      Promise.resolve().then(()=>{check();return port.evaluate(exact,context,current);})
+        .then(value=>{finish(value);this.pending=false;},error=>{finish(undefined,error??new ProviderFailure('DISCLOSURE_DENIED'));this.pending=false;});
+      if(context.signal.aborted)cancel();
+    });
+  }
 }

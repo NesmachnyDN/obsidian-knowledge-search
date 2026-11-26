@@ -172,7 +172,7 @@ test('POLICY.3a generation uses only an admitted host port, binds full payload, 
     const response:SearchResponse={protocolVersion:2,requestId:'policy',requestedMode:'lexical',executedMode:'lexical',status:'ok',
       indexGenerationId:hash('generation'),hits,capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0};
     let denyDispatch=true;
-    const policy:GenerationPolicyPort={evaluate:async(input,context)=>{
+    const policy:GenerationPolicyPort={current:(i,b)=>b.bindingDigest===hash(JSON.stringify([i.payloadDigest,i.credentialEpoch])),evaluate:async(input,context)=>{
       evaluations.push(structuredClone(input));
       assert.equal(input.role,'generation');assert.match(input.payloadDigest,/^[a-f0-9]{64}$/);
       // The exact payload digest and source/excerpt digests are local policy
@@ -205,12 +205,13 @@ test('POLICY.3a canonical original-byte evaluator allows the same admitted paylo
   await fixture(async cfg=>{
     const response:SearchResponse={protocolVersion:2,requestId:'canonical-policy',requestedMode:'lexical',executedMode:'lexical',status:'ok',
       indexGenerationId:hash('generation'),hits,capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0};
-    const policy:GenerationPolicyPort={evaluate:async(input,context)=>{
-      const snapshot:PolicySnapshot={subjects:input.sources.map(x=>({sourceId:x.sourceId,expectedSha256:x.sourceSha256,kind:'original',ownerIds:[x.sourceId]})),
+    const snapshotFor=(input:GenerationPolicyInput):PolicySnapshot=>({subjects:input.sources.map(x=>({sourceId:x.sourceId,expectedSha256:x.sourceSha256,kind:'original',ownerIds:[x.sourceId]})),
         profile:{profileId:'synthetic-admitted',admissionId:'test-fixture',role:'generation',configDigest:configDigest('generation',cfg),adapter:'fixture',classification:'external'},
         role:'generation',config:input.config,adapter:'fixture',ownerId:input.ownerId,hostId:input.hostId,scopeId:input.scopeId,
         policyRevision:'p1',configRevision:'c1',credentialEpoch:input.credentialEpoch,deadlineUnixMs:input.deadlineUnixMs,
-        payloadDigest:input.payloadDigest,restrictions:[],evaluationComplete:true};
+        payloadDigest:input.payloadDigest,restrictions:[],evaluationComplete:true});
+    const policy:GenerationPolicyPort={current:(i,b)=>hash(JSON.stringify(['oks-policy-1b',scopeId,snapshotFor(i)]))===b.bindingDigest,evaluate:async(input,context)=>{
+      const snapshot=snapshotFor(input);
       const reader={rootId:scopeId,list:async()=>hits.map(h=>h.sourceId),versionHints:async()=>[],
         read:async(path:string)=>{const i=hits.findIndex(h=>h.sourceId===path);if(i<0)throw Error('missing');return bytes[i]!;}};
       return new EligibilityEvaluator(reader,{policyMetadata:async(path,raw,root)=>parsePolicyMetadata(path,raw,root,hash(raw))},
