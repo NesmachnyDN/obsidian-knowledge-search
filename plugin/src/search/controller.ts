@@ -7,7 +7,7 @@ import { bindActiveDeadline, remainingOperationMs, deadlineFailure, cancelActive
 import { RerankRuntimeProfiles, type RerankAdmission } from '../ai/rerank-profile';
 import { configDigest, type Classification, type DisclosureGrant } from '../ai/disclosure';
 import { GenerationCredentialAuthority, type GenerationCredentialStamp } from '../ai/generation-credential';
-import { GenerationPolicyGate, generationPolicyPayload, uniquePolicySources, type GenerationPolicyBinding, type GenerationPolicyInput, type GenerationPolicyPort, type RerankPolicyPort, type ProcessingPolicyInput } from '../ai/generation-policy';
+import { GenerationPolicyGate, generationPolicyPayload, generationPolicySourceDigest, uniquePolicySources, type GenerationPolicyBinding, type GenerationPolicyInput, type GenerationPolicyPort, type RerankPolicyPort, type ProcessingPolicyInput } from '../ai/generation-policy';
 import { ProviderFailure, type ProviderConfig, type ProviderPreference, type ProviderFailureCode, type AiOperationStatus, type CallContext, type CredentialResolver } from '../ai/contracts';
 import { hash, isDigest } from '../standalone/contracts';
 import type { AdvancedHealth } from '../advanced/health';
@@ -78,7 +78,7 @@ export type RerankPreview = { role: EvidenceRole; sequence: number; revision: nu
 // Internal elapsed-time deadlines are never taken from the returned preview.
 type BoundGenerationCredential = {owner:object;viewOwner:object;configuration:string;stamp:GenerationCredentialStamp};
 type ActiveEvidenceOperation = { abort: AbortController; context: CallContext; revision: number; credential?:BoundGenerationCredential };
-type PendingEvidencePreview = { preview: RerankPreview; monotonicStartedMs: number; bootStartedSeconds: number; credential?:BoundGenerationCredential; policyContext?:CallContext;policyAbort?:AbortController };
+type PendingEvidencePreview = { preview: RerankPreview; monotonicStartedMs: number; bootStartedSeconds: number; credential?:BoundGenerationCredential; policyContext?:CallContext;policyAbort?:AbortController; policyPort?:GenerationPolicyPort|RerankPolicyPort };
 export type ScopedRetrievalTurn = Readonly<{ result: Promise<ApiResult<SearchResponse>>; cancel(): void }>;
 /** Opaque host identities. They only select host-owned state; they never carry
  * a lease, grant, configuration, credential, or transport capability. */
@@ -116,7 +116,7 @@ type RetainedScopedTurn = { readonly session: RetainedChatSessionOwner; readonly
   credentialBound?:boolean; };
 type RetainedDraft = { readonly view: RetainedChatClassificationDraft; readonly configuration:string;
   readonly stamp:GenerationCredentialStamp; readonly labels:Map<string,Classification>; };
-type RetainedPreview = { readonly view:RetainedChatGenerationPreview; readonly draft:RetainedDraft };
+type RetainedPreview = { readonly view:RetainedChatGenerationPreview; readonly draft:RetainedDraft; readonly policyPort?:GenerationPolicyPort };
 type ActiveScopedRetrieval = { readonly abort: AbortController; readonly context: CallContext;
   readonly revision: number; readonly sourceRevision: number; readonly finish: (value: ApiResult<SearchResponse>) => void;
   readonly retained?: RetainedScopedTurn;
@@ -150,6 +150,7 @@ export class SearchController {
   private generationTransitionRole?:EvidenceRole;
   private generationTransitionView?:object;
   private generationPreviewReading = false;
+  private previewNotificationDeferred = false;
   private readonly generationPolicyGate=new GenerationPolicyGate();
   private generationPolicyPreparation?: {role:EvidenceRole;abort:AbortController;pending?:PendingEvidencePreview;context?:CallContext};
   private readonly defaultGenerationView = Object.freeze({});
@@ -259,8 +260,8 @@ export class SearchController {
     const pending = this.currentPreview(role);
     const state = role === 'reranking' ? this.state.rerank : this.state.generation;
     if (this.roleRetirement(role)) return {phase:'failed',error:state?.error ?? 'NOT_READY'};
-    if (state?.phase === 'running'||(this.generationPolicyPreparation?.role===role||this.generationPolicyGate.busy&&role==='generation')) return {phase:'busy',error:null};
     if (pending) return {phase:'permission-required',error:null};
+    if (state?.phase === 'running'||(this.generationPolicyPreparation?.role===role||this.generationPolicyGate.busy&&role==='generation')) return {phase:'busy',error:null};
     if (state?.phase === 'error') return {phase:'failed',error:state.error ?? 'NOT_READY'};
     return {phase:state?.phase === 'results' ? 'complete' : 'idle',error:null};
   }
@@ -309,6 +310,15 @@ export class SearchController {
   }
   private drainNotifications(continueWave = false): void {
     if (this.notifying || this.revokingSharedAuthority || this.retirement.running || this.retirement.sourceRunning) return;
+    // A trusted synchronous policy callback may itself request publication.
+    // Finish the preview read/retirement before exposing any observer state.
+    if(this.generationPreviewReading){
+      if(!this.previewNotificationDeferred){
+        this.previewNotificationDeferred=true;
+        queueMicrotask(()=>{this.previewNotificationDeferred=false;this.drainNotifications(continueWave);});
+      }
+      return;
+    }
     this.notifying = true;
     if (!continueWave) this.waveAdditions = 0;
     const mutations = new Map<() => void, number>();
@@ -319,6 +329,10 @@ export class SearchController {
         const evidence = revision === undefined ? [] : [...this.evidenceListeners];
         this.lifecyclePending = undefined;
         this.evidencePending = undefined;
+        const refreshPolicyPreviews=():void=>{
+          for(const role of ['reranking','generation'] as const)
+            if(this.prepared[role]?.preview.policy)this.currentPreview(role);
+        };
         const deliver = (listener: () => void): void => {
           if (this.quarantined.has(listener)) return;
           const before = this.notificationVersion;
@@ -333,11 +347,13 @@ export class SearchController {
         this.deliveringLifecycle = !!lifecycle;
         try {
           for (const listener of lifecycle?.listeners ?? []) {
+            refreshPolicyPreviews();
             if (this.revision !== lifecycle!.revision || this.disposed !== lifecycle!.final) break;
             if (this.listeners.has(listener)) deliver(listener);
           }
         } finally { this.deliveringLifecycle = false; }
         for (const listener of evidence) {
+          refreshPolicyPreviews();
           if (this.disposed || this.revision !== revision) break;
           if (this.evidenceListeners.has(listener)) deliver(listener);
         }
@@ -821,10 +837,12 @@ export class SearchController {
           Object.freeze(config.identity);Object.freeze(config.limits);Object.freeze(config);
           const bare={...draft,config,scopeId,scopeDigest,composedQuestion:Object.freeze(composed),
             expiresUnixMs:operation.context.deadlineUnixMs,inputBytes};
-          const policy=this.selectedGenerationPolicy()?await this.evaluateRetainedGenerationPolicy(bare,lease.snapshot,hits,record.stamp,operation.context,()=>{current();return retained.draft===record;}):undefined;
+          const policyPort=this.selectedGenerationPolicy();
+          const policy=policyPort?await this.evaluateRetainedGenerationPolicy(bare,lease.snapshot,hits,record.stamp,operation.context,()=>{current();return retained.draft===record&&this.selectedGenerationPolicy()===policyPort;}):undefined;
           current();
+          if(this.selectedGenerationPolicy()!==policyPort)throw new ProviderFailure('CANCELLED');
           const preview=Object.freeze({...bare,...(policy?{policy}:{})});
-          retained.preview={view:preview,draft:record};
+          retained.preview={view:preview,draft:record,policyPort};
           resolve(preview);
         } catch(error) {
           const reason=deadlineFailure(operation.context)??(error instanceof ProviderFailure?error:new ProviderFailure('SOURCE_STALE'));
@@ -876,11 +894,11 @@ export class SearchController {
         try {
           this.retainedGenerationCurrent(operation,retained,envelope.draft.stamp);
           const policyPort=this.selectedGenerationPolicy();
-          if(!!preview.policy!==!!policyPort)return false;
+          if(!!preview.policy!==!!policyPort||policyPort!==envelope.policyPort)return false;
           if(preview.policy&&policyPort&&!policyPort.current(this.retainedPolicyInput(preview,retained.lease!.snapshot,
             retained.response!.hits,envelope.draft.stamp,context),preview.policy))return false;
           this.retainedGenerationCurrent(operation,retained,envelope.draft.stamp);
-          return !operation.retired&&operation.inFlight;
+          return !operation.retired&&operation.inFlight&&this.selectedGenerationPolicy()===policyPort;
         }
         catch { return false; }
       };
@@ -1267,8 +1285,12 @@ export class SearchController {
     this.generationPolicyPreparation=preparation;
     let pending:PendingEvidencePreview|undefined;
     try{
-      const preview=role==='generation'?this.prepareGenerationUnchecked(token,viewOwner):this.prepareEvidence(role,token,viewOwner);
+      // Do not publish a credential-bearing policy preview before the exact
+      // host binding exists.  An observer must only ever see a preview whose
+      // synchronous currentness guard can validate its selected policy port.
+      const preview=role==='generation'?this.prepareGenerationUnchecked(token,viewOwner,false):this.prepareEvidence(role,token,viewOwner,false);
       pending=this.prepared[role];preparation.pending=pending;
+      if(pending)pending.policyPort=policy;
       const owns=()=>!!pending&&this.generationPolicyPreparation===preparation&&!preparation.abort.signal.aborted
         &&this.prepared[role]===pending&&pending.preview.sequence===preview.sequence
         &&this.revision===preview.revision&&!this.sharedAuthorityTransition()&&!this.disposed
@@ -1281,24 +1303,29 @@ export class SearchController {
         deadlineUnixMs:Math.min(preview.expiresUnixMs,Date.now()+preview.config.limits.timeoutMs)},preview.config.limits.timeoutMs);
       preparation.context=context;
       const binding=await this.evaluatePolicy(preview,context,pending!.credential!,owns);
-      if(!owns()||this.currentPreview(role)!==pending)throw new ProviderFailure('CANCELLED');
+      if(!owns())throw new ProviderFailure('CANCELLED');
       pending!.preview=Object.freeze({...preview,policy:binding,expiresUnixMs:binding.deadlineUnixMs}) as RerankPreview;
       pending!.policyContext=context;pending!.policyAbort=preparation.abort;
       clearTimeout(this.previewTimers[role]);
       this.previewTimers[role]=setTimeout(()=>this.expirePreview(role,pending!),remainingOperationMs(context));
+      if(this.currentPreview(role)!==pending)throw new ProviderFailure('CANCELLED');
+      this.emitEvidence();
+      // Evidence listeners are synchronous and may replace or revoke policy.
+      // Recheck after publication before returning a usable preview capability.
+      if(this.currentPreview(role)!==pending)throw new ProviderFailure('CANCELLED');
       return structuredClone(pending!.preview);
     }catch(error){
       if(pending&&this.prepared[role]===pending)this.cancelEvidence(role);
       throw error instanceof ProviderFailure?error:new ProviderFailure('DISCLOSURE_DENIED');
     }finally{if(this.generationPolicyPreparation===preparation)this.generationPolicyPreparation=undefined;}
   }
-  private prepareGenerationUnchecked(token:string,viewOwner:object):RerankPreview {
+  private prepareGenerationUnchecked(token:string,viewOwner:object,publish=true):RerankPreview {
     if (!this.generationViewCurrent(viewOwner)) throw new ProviderFailure('NOT_READY');
     if (this.scopedRetrieval || this.generationTransition || this.generationPreviewReading
       ||this.generationPolicyPreparation?.role==='reranking'||this.prepared.reranking?.credential||this.activeEvidence.reranking?.credential
       || (this.prepared.generation && !this.ownsGenerationView(viewOwner))) throw new ProviderFailure('BUSY');
     this.generationAdmissionDepth++;
-    try { return this.prepareEvidence('generation',token,viewOwner); }
+    try { return this.prepareEvidence('generation',token,viewOwner,publish); }
     finally { this.generationAdmissionDepth--; }
   }
   /** Settings changes revoke admission itself, not just pending consent. */
@@ -1325,11 +1352,14 @@ export class SearchController {
     const pending = this.prepared[role];
     const credentialRead=role==='generation'||!!pending?.credential;
     if(!pending||credentialRead&&this.generationPreviewReading)return undefined;
+    // Unbound asynchronous preparation remains private, but a poll must not cancel it.
+    if(!pending.preview.policy&&this.generationPolicyPreparation?.pending===pending)return undefined;
     if(credentialRead)this.generationPreviewReading=true;
     // performance.now covers elapsed execution (including delayed callbacks).
     // Linux desktop uptime includes suspend; wall time is only an additional
     // conservative expiry fence, never authority to extend an elapsed deadline.
     try {
+      const notificationVersion=this.notificationVersion;
       const monotonic = performance.now(), boot = os.uptime(), wall = Date.now();
       if (Number.isFinite(monotonic) && monotonic >= pending.monotonicStartedMs
         && monotonic - pending.monotonicStartedMs < EVIDENCE_PREVIEW_TTL_MS
@@ -1341,6 +1371,9 @@ export class SearchController {
         && (role!=='generation'||!!pending.credential)
         && (!pending.credential||(!checkConfig||this.evidencePreviewConfigurationCurrent(pending.preview))
           &&this.boundCredentialCurrent(pending.credential))
+        && this.policyPreviewCurrent(role,pending)
+        && (!pending.preview.policy||this.notificationVersion===notificationVersion)
+        && (!pending.credential||this.boundCredentialCurrent(pending.credential))
         && this.prepared[role] === pending && !this.disposed) return pending;
     } catch { /* An unavailable clock cannot authorize disclosure. */ }
     finally { if(credentialRead)this.generationPreviewReading=false; }
@@ -1350,7 +1383,6 @@ export class SearchController {
   isEvidencePreviewCurrent(role: EvidenceRole, sequence: number,viewOwner?:object): boolean {
     const pending=this.currentPreview(role);
     return !!pending && pending.preview.sequence===sequence
-      && (!!(role==='generation'?this.selectedGenerationPolicy():this.selectedRerankPolicy())===!!pending.preview.policy)
       && (!pending.credential||viewOwner===undefined||pending.credential.viewOwner===viewOwner)
       &&this.prepared[role]===pending&&!this.disposed;
   }
@@ -1389,6 +1421,32 @@ export class SearchController {
     return scope===preview.scopeId && scopeAgain===scope && pref?.state==='configured' && again?.state==='configured'
       && configDigest(preview.role,pref)===digest && configDigest(preview.role,again)===digest;
   }
+  /** This guard is intentionally synchronous: it is used while revoking a
+   * preview and before notifying observers, so it must never dispatch work. */
+  private policyPreviewCurrent(role:EvidenceRole,pending:PendingEvidencePreview):boolean {
+    const binding=pending.preview.policy;
+    // Policy preparation is private (and unobservable) until its binding is
+    // installed. Historical attested previews have neither policy nor lease.
+    if(!binding)return !(role==='generation'?this.selectedGenerationPolicy():this.selectedRerankPolicy());
+    if(!pending.credential||binding.deadlineUnixMs!==pending.preview.expiresUnixMs
+      ||binding.deadlineUnixMs!==pending.policyContext?.deadlineUnixMs)return false;
+    try {
+      // Re-read the selected port after the host check: a synchronous host
+      // callback may revoke/reselect it, but it cannot authorize a stale port.
+      if(role==='generation'){
+        const port=this.selectedGenerationPolicy();
+        const input=this.policyInput(pending.preview,pending.credential,binding.deadlineUnixMs,'generation');
+        return !!port&&port===pending.policyPort&&binding.payloadDigest===input.payloadDigest&&binding.sourceDigest===generationPolicySourceDigest(input)
+          &&binding.scopeBinding===input.scopeBinding&&port.current(input,binding)
+          &&this.selectedGenerationPolicy()===port;
+      }
+      const port=this.selectedRerankPolicy();
+      const input=this.policyInput(pending.preview,pending.credential,binding.deadlineUnixMs,'reranking');
+      return !!port&&port===pending.policyPort&&binding.payloadDigest===input.payloadDigest&&binding.sourceDigest===generationPolicySourceDigest(input)
+        &&binding.scopeBinding===input.scopeBinding&&port.current(input,binding)
+        &&this.selectedRerankPolicy()===port;
+    } catch { return false; }
+  }
   private boundCredentialCurrent(binding:BoundGenerationCredential):boolean {
     return this.generationViewCurrent(binding.viewOwner)
       && this.generationCredential.current(binding.owner,binding.configuration,binding.stamp);
@@ -1419,7 +1477,7 @@ export class SearchController {
     const owner=this.generationTransition;this.generationTransition=undefined;this.generationTransitionView=undefined;this.generationTransitionRole=undefined;
     if(owner)this.generationCredential.revoke(owner);
   }
-  private prepareEvidence(role: EvidenceRole,token?:string,viewOwner:object=this.defaultGenerationView): RerankPreview {
+  private prepareEvidence(role: EvidenceRole,token?:string,viewOwner:object=this.defaultGenerationView,publish=true): RerankPreview {
     if (this.sharedAuthorityTransition() || this.roleRetirement(role)) throw new ProviderFailure('NOT_READY');
     // Replacing consent is a single commit. In particular no observer can
     // prepare another preview between clearing the old timer and owning the new one.
@@ -1480,7 +1538,7 @@ export class SearchController {
         this.generationTransition=undefined;this.generationTransitionView=undefined;this.generationTransitionRole=undefined;
         if(this.prepared[role]?.credential?.owner!==transition)this.generationCredential.revoke(transition);
       }
-      if (changed) this.emitEvidence();
+      if (changed&&publish) this.emitEvidence();
     }
   }
   private revokeEvidence(): void {
@@ -1570,7 +1628,7 @@ export class SearchController {
     if(this.generationAdmissionDepth||this.generationTransition||this.generationPreviewReading||this.generationPolicyPreparation||this.generationPolicyGate.busy||this.scopedRetrieval)
       return Promise.reject(new ProviderFailure('BUSY'));
     const pending=this.prepared.reranking;
-    if(!this.selectedRerankPolicy()||!pending?.preview.policy||!pending.credential||pending.credential.viewOwner!==viewOwner
+    if(!pending?.preview.policy||!pending.credential||pending.credential.viewOwner!==viewOwner
       ||!this.generationViewCurrent(viewOwner)||preview.credentialStamp?.hostId!==pending.credential.stamp.hostId)
       return Promise.reject(new ProviderFailure('DISCLOSURE_DENIED'));
     this.generationAdmissionDepth++;
@@ -1590,8 +1648,10 @@ export class SearchController {
   }
   private async confirmEvidence(role: EvidenceRole, preview: RerankPreview, classification: 'synthetic' | 'public', token?: string): Promise<void> {
     if (this.sharedAuthorityTransition() || this.roleRetirement(role)) throw new ProviderFailure('DISCLOSURE_DENIED');
+    const prior=this.prepared[role];
     const pending = this.currentPreview(role,false);
-    if (!pending) throw new ProviderFailure('DISCLOSURE_DENIED');
+    if (!pending) throw new ProviderFailure(prior?.preview.policy&&prior.preview.sequence===preview?.sequence
+      &&prior.preview.revision===preview?.revision?'CANCELLED':'DISCLOSURE_DENIED');
     const {preview:approved,credential}=pending;
     if(credential){this.generationTransition=credential.owner;this.generationTransitionView=credential.viewOwner;this.generationTransitionRole=role;}
     this.clearPreview(role,true);
@@ -1609,7 +1669,7 @@ export class SearchController {
     const generationPolicy=role==='generation'?this.selectedGenerationPolicy():undefined;
     const rerankPolicy=role==='reranking'?this.selectedRerankPolicy():undefined;
     const policyPort=generationPolicy??rerankPolicy;
-    if(!!approved.policy!==!!policyPort||approved.policy&&!credential)throw new ProviderFailure('DISCLOSURE_DENIED');
+    if(!!approved.policy!==!!policyPort||approved.policy&&(!credential||policyPort!==pending.policyPort))throw new ProviderFailure('DISCLOSURE_DENIED');
     let operation:ActiveEvidenceOperation|undefined;
     const current = (): boolean => {
       const config = port.config();
@@ -1623,9 +1683,9 @@ export class SearchController {
           && this.boundCredentialCurrent(credential)
           && (operation ? this.activeEvidence[role]===operation : this.generationTransition===credential.owner))
         && (role==='generation'?this.selectedGenerationPolicy():this.selectedRerankPolicy())===policyPort
-        && (!approved.policy||!!credential&&(role==='generation'
-          ?generationPolicy?.current(this.policyInput(approved,credential,approved.policy.deadlineUnixMs,'generation'),approved.policy)
-          :rerankPolicy?.current(this.policyInput(approved,credential,approved.policy.deadlineUnixMs,'reranking'),approved.policy))===true)
+        && this.policyPreviewCurrent(role,pending)
+        && (!credential||this.boundCredentialCurrent(credential)
+          && (operation ? this.activeEvidence[role]===operation : this.generationTransition===credential.owner))
         && this.revision === approved.revision && !this.disposed && !this.sharedAuthorityTransition();
     };
     if (!current()) { retireCredential(); this.emitEvidence(); throw new ProviderFailure('CANCELLED'); }
