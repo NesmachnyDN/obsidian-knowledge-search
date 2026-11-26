@@ -92,6 +92,11 @@ No production-Vault adoption, public release or external data egress is authoriz
 
 Basic typed Properties filtering and preservation of resolvable wiki-link metadata belong to MVP; link traversal and cross-source graph expansion remain optional. Source freshness, no-truncation, confidentiality and exact original provenance are hard gates for every supported mode.
 
+## Optional source-aware graph acceptance (OKS-06B)
+
+[ADR-0020](adr/0020-source-aware-graph-projection.md) defines an optional, local-only, read-only graph projection and explicit bounded context expansion. **AC-11-GRAPH-01:** versioned configurable typed Property mapping, deterministic exact identity and ambiguity handling, directed authored relations distinguished from navigation links, complete coverage/typed failure and exact original edge anchors. **AC-11-GRAPH-02:** one derived graph per authenticated current lexical generation and mapping, bounded incremental/rebuild lifecycle, no stale or foreign publication, no separate source authority or writes. **AC-11-GRAPH-03:** explicit opt-in bounded scope-preserving traversal with source/citation verification, no silent fallback or inferred semantic facts, all constituents subject to existing role admission and processing policy before any disclosure. **AC-11-GRAPH-04:** independently frozen RU/EN paired retrieval, provenance/coverage, resource/lifecycle and real-host/CLI evidence against preregistered ADR-0020 gates; unchanged Gate A. Graph acceptance does not admit any AI role or attachment format.
+
+
 ## Standalone UI candidate traceability
 
 OKS-04B implements the CAP-07/AC-07 candidate search panel, commands, typed settings, safe status/diagnostic export and [in-process API v1](standalone-api.md). Source-open validation supports CAP-06/AC-06 and event revocation CAP-01/AC-01; lifecycle uses the existing CAP-08/09 generation/worker controls. Dense/hybrid remain unavailable. These implementation references do not mark acceptance: independent review and real-host smoke remain required, with [current validation limits](../benchmarks/standalone/04b-validation.md) explicitly recorded.

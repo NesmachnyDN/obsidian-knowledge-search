@@ -58,6 +58,10 @@ For every turn, bind an explicit Vault-wide or Selected-material scope to the cu
 
 The 06H.1 design is specified in [ADR-0018](adr/0018-scoped-conversation-authority.md) and the [bounded execution contract](prompts/OKS-06H.md): one host authority, explicit scope snapshots, per-turn disclosure and ephemeral bounded history. 06H.2 implements against independently accepted dependencies; 06H.3 proves both scopes and failure paths on claimed hosts/APIs without requiring dense/hybrid, reranking or graph expansion. Existing autonomous basic search remains independent (Gate A); chat is conditional B-Generation under CAP-11 and [SPEC](SPEC.md).
 
+## Optional source-aware graph projection
+
+[ADR-0020](adr/0020-source-aware-graph-projection.md) binds the graph to the existing authenticated Standalone lexical generation and an explicitly configured versioned mapping. Derived nodes and authored directed edges carry canonical original identity/version/locator; navigation-only links do not imply facts. One rebuildable in-memory projection initially, no separate graph database or writer. Graph use requires fresh exact source set, complete resolution, explicit scope and bounded traversal; use the existing host/evidence/processing authority for any downstream role. 06B.2 implements local projection, 06B.3 explicit context expansion, 06B.4 measured independent acceptance. Basic search and all existing role/format gates stay independent.
+
 ## Readiness, algorithm identity and compatibility
 
 An observable feature matrix distinguishes `lexical`, `dense`, and `hybrid` requests and executed modes; leg readiness and errors are not implicit. Standalone defaults to lexical. Hybrid is valid only when independently ready lexical and real dense legs both run and deterministic rank fusion completes against one compatible source/index generation. An unavailable dense leg returns a typed error, **not** a disguised lexical result. Readiness progresses through disabled/unavailable/provisioning/initializing/ready/degraded/failed; failed advanced provisioning does not invalidate the standalone index.
