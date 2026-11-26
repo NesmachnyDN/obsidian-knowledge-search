@@ -2094,19 +2094,8 @@ const nativeLifecycleOwner=(plugin:InstanceType<typeof PluginClass>)=>
 
 test('POLICY.2e3c production adapter restores a committed ledger and retires before source observers',async()=>{
   const f=await fixture();
-  const file=Object.assign(new Empty(),{path:'fixture.md'});
-  const events=new Map<string,(file:unknown,oldPath?:string)=>void>();
-  Object.assign(f.plugin.app.vault,{on:(name:string,fn:(file:unknown,oldPath?:string)=>void)=>{events.set(name,fn);return {};},
-    getMarkdownFiles:()=>[file],getAbstractFileByPath:(path:string)=>path===file.path?file:null});
   try{
-    await mkdir(join(f.root,'data'),{mode:0o700});
-    const reader=await BoundedVaultReader.open(f.vault,()=>[file.path]);
-    const proof=await reader.readLifecycleProof(file.path);
-    const seed=await DurableLifecycleLedger.open({path:f.vault,rootId:reader.rootId},f.plugin.manifest.id);
-    try{
-      const initial=await seed.initializeEmptyEpoch();
-      await seed.commit(initial.anchor.snapshotSha256,true,[{sourceId:file.path,state:'existing',origin:'baseline',originVersionId:proof.version.versionId,proof}]);
-    }finally{await seed.close();}
+    const {file,events,reader}=await lifecycleFixture(f);
     await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
     const owner=nativeLifecycleOwner(f.plugin)!.owner;await owner.opening;
     assert.equal(owner.exactAuthorityActive(),true);
@@ -2140,6 +2129,120 @@ test('POLICY.2e3c pending prior lifecycle drain does not block Basic and unload 
     assert.ok(barriers.has(key)); // physical prior obligation still retained
     release();await barriers.get(key);
   }finally{release();await f.cleanup();}
+});
+
+/** Seed actual private durable state; only the Node host boundary is synthetic. */
+async function lifecycleFixture(f:Awaited<ReturnType<typeof fixture>>) {
+  const file=Object.assign(new Empty(),{path:'fixture.md'});
+  const events=new Map<string,(file:unknown,oldPath?:string)=>void>();
+  Object.assign(f.plugin.app.vault,{on:(name:string,fn:(file:unknown,oldPath?:string)=>void)=>{events.set(name,fn);return {};},
+    getMarkdownFiles:()=>[file],getAbstractFileByPath:(path:string)=>path===file.path?file:null});
+  await mkdir(join(f.root,'data'),{mode:0o700});
+  const reader=await BoundedVaultReader.open(f.vault,()=>[file.path]);
+  const proof=await reader.readLifecycleProof(file.path);
+  const seed=await DurableLifecycleLedger.open({path:f.vault,rootId:reader.rootId},f.plugin.manifest.id);
+  try{
+    const initial=await seed.initializeEmptyEpoch();
+    await seed.commit(initial.anchor.snapshotSha256,true,[{sourceId:file.path,state:'existing',origin:'baseline',originVersionId:proof.version.versionId,proof}]);
+  }finally{await seed.close();}
+  return {file,events,reader};
+}
+
+type LifecycleTestPlugin=InstanceType<typeof PluginClass>;
+/** Pause the production reader's descriptor proof, not the owner or its restore logic. */
+function gateNativeRestore(plugin:LifecycleTestPlugin) {
+  let release!:()=>void,entered!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  const reading=new Promise<void>(resolve=>{entered=resolve;});
+  const p=plugin as unknown as {startLifecycleOwner(reader:BoundedVaultReader,root:string,revision:number):void};
+  const start=p.startLifecycleOwner.bind(p);
+  p.startLifecycleOwner=(reader,root,revision)=>{
+    const read=reader.readLifecycleProof.bind(reader);
+    reader.readLifecycleProof=async path=>{entered();await gate;return read(path);};
+    start(reader,root,revision);
+  };
+  return {reading,release};
+}
+
+for(const event of ['modify','folder-rename','root-switch'] as const)
+test('POLICY.2e3c native '+event+' during actual asynchronous restoration permanently fences the old epoch',{timeout:8000},async()=>{
+  const f=await fixture();const gate=gateNativeRestore(f.plugin);
+  try{
+    const {file,events,reader}=await lifecycleFixture(f);
+    await f.plugin.onload();f.layout();await gate.reading;
+    const owner=nativeLifecycleOwner(f.plugin)!.owner;
+    assert.equal(owner.exactAuthorityActive(),false);
+    const invalidate=f.plugin.searchController.invalidateSource.bind(f.plugin.searchController);
+    let observed=false;
+    f.plugin.searchController.invalidateSource=obligations=>{
+      observed=true;assert.equal(owner.exactAuthorityActive(),false);return invalidate(obligations);
+    };
+    const originalAdapter=f.plugin.app.vault.adapter;
+    if(event==='root-switch'){
+      const other=join(f.root,'other-vault');await mkdir(other);
+      Object.assign(f.plugin.app.vault,{adapter:new FileSystemAdapter(other)});
+      gate.release();await owner.opening;assert.equal(owner.exactAuthorityActive(),false);
+      Object.assign(f.plugin.app.vault,{adapter:originalAdapter});
+      assert.equal(owner.exactAuthorityActive(),false);await owner.close();
+    }else{
+      if(event==='modify')events.get('modify')!(file);
+      else events.get('rename')!({path:'moved-folder'},'old-folder');
+      assert.equal(observed,true);
+      gate.release();await owner.opening;assert.equal(owner.exactAuthorityActive(),false);await owner.close();
+    }
+    assert.equal(owner.exactAuthorityActive(),false);
+    const reopened=await DurableLifecycleLedger.open({path:f.vault,rootId:reader.rootId},f.plugin.manifest.id);
+    try{assert.equal((await reopened.read())?.snapshot.baselineAdmitted,true);}finally{await reopened.close();}
+    await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    assert.equal(f.plugin.standalone!.status().status,'ready');
+  }finally{gate.release();await f.cleanup();}
+});
+
+test('POLICY.2e3c folder rename retires restored native authority before source observers',async()=>{
+  const f=await fixture();
+  try{
+    const {events}=await lifecycleFixture(f);
+    await f.plugin.onload();f.layout();await f.internal.initializing;
+    const owner=nativeLifecycleOwner(f.plugin)!.owner;await owner.opening;
+    assert.equal(owner.exactAuthorityActive(),true);
+    const invalidate=f.plugin.searchController.invalidateSource.bind(f.plugin.searchController);
+    let observed=false;
+    f.plugin.searchController.invalidateSource=obligations=>{
+      observed=true;assert.equal(owner.exactAuthorityActive(),false);return invalidate(obligations);
+    };
+    events.get('rename')!({path:'moved-folder'},'old-folder');
+    assert.equal(observed,true);assert.equal(owner.exactAuthorityActive(),false);
+    await owner.close();
+  }finally{await f.cleanup();}
+});
+
+test('POLICY.2e3c replacement native plugin waits for actual old ledger drain while Basic is ready',{timeout:8000},async()=>{
+  const f=await fixture();let replacement:LifecycleTestPlugin|undefined;
+  let release!:()=>void,entered!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  const closing=new Promise<void>(resolve=>{entered=resolve;});
+  try{
+    const {reader}=await lifecycleFixture(f);
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    const old=nativeLifecycleOwner(f.plugin)!.owner;await old.opening;
+    assert.equal(old.exactAuthorityActive(),true);
+    const ledger=(old as unknown as {ledger:DurableLifecycleLedger}).ledger;
+    const close=ledger.close.bind(ledger);
+    ledger.close=async()=>{entered();await gate;await close();};
+    f.plugin.onunload();await closing;assert.equal(old.exactAuthorityActive(),false);
+    replacement=replacementPlugin(f);await replacement.onload();f.layout();
+    await (replacement as unknown as {initializing:Promise<void>}).initializing;
+    await replacement.standalone!.whenIdle();
+    const next=nativeLifecycleOwner(replacement)!.owner;
+    let opened=false;void next.opening!.then(()=>{opened=true;});
+    await new Promise(resolve=>setTimeout(resolve,30));
+    assert.equal(opened,false);assert.equal(next.exactAuthorityActive(),false);
+    assert.equal(replacement.standalone!.status().status,'ready');
+    await assert.rejects(DurableLifecycleLedger.open({path:f.vault,rootId:reader.rootId},f.plugin.manifest.id),/LIFECYCLE_LEDGER_UNAVAILABLE/);
+    release();await old.close();await next.opening;
+    assert.equal(old.exactAuthorityActive(),false);assert.equal(next.exactAuthorityActive(),true);
+    await next.close();
+  }finally{release();replacement?.onunload();await f.cleanup();}
 });
 
 test('POLICY.2c native create, same-owner edits and exact rename preserve new identity while preview verifies current bytes',async()=>{
