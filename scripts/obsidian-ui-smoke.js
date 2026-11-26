@@ -121,24 +121,46 @@
   app.setting.openTabById(p.manifest.id);
   await new Promise(r => setTimeout(r, 250));
   const settingDoc = app.setting.activeTab.containerEl.ownerDocument;
+  const ru = {
+    "Enable offline search": "Включить автономный поиск",
+    "Provider state": "Состояние провайдера",
+    "Semantic search": "Семантический поиск",
+    "Improve result ranking": "Улучшение ранжирования",
+    "Evidence-based answers": "Ответы по источникам",
+    "Connection": "Подключение",
+    "Configure": "Настроить",
+    "Model ID": "Идентификатор модели",
+    "Model revision": "Ревизия модели",
+    "Draft preferences": "Черновик параметров",
+    "Save connection": "Сохранить подключение",
+    "Disable role": "Отключить роль",
+    "Disabled": "Отключён",
+    "Delete derived offline index": "Удалить производный автономный индекс",
+    "Confirm derived-index cleanup": "Подтвердить очистку производного индекса",
+    "Delete derived files": "Удалить производные файлы",
+    "API origin": "Базовый адрес API"
+  };
+  const exactLabel = (actual,name) => actual === name || (ru[name] !== undefined && actual === ru[name]);
+  const containsLabel = (actual,name) => !!actual && (actual.includes(name) || (ru[name] !== undefined && actual.includes(ru[name])));
+  const startsLabel = (actual,name) => !!actual && (actual.startsWith(name) || (ru[name] !== undefined && actual.startsWith(ru[name])));
   const settingRow = name => [...app.setting.activeTab.containerEl.querySelectorAll('.setting-item')]
-    .find(el => el.querySelector('.setting-item-name')?.textContent?.trim() === name);
+    .find(el => exactLabel(el.querySelector('.setting-item-name')?.textContent?.trim(),name));
   await wait(() => settingRow('Enable offline search'), 'SETTINGS_VISIBLE');
   const roleCard = role => {
     const title = { embedding:'Semantic search', reranking:'Improve result ranking',
       generation:'Evidence-based answers' }[role];
     return [...app.setting.activeTab.containerEl.querySelectorAll('.oks-settings-role')]
-      .find(section => section.getAttribute('aria-label')?.startsWith(title));
+      .find(section => startsLabel(section.getAttribute('aria-label'),title));
   };
   const cardRow = (role,name) => [...roleCard(role).querySelectorAll('.setting-item')]
-    .find(el => el.querySelector('.setting-item-name')?.textContent?.trim() === name);
+    .find(el => exactLabel(el.querySelector('.setting-item-name')?.textContent?.trim(),name));
   const clickButton = (row,label) => {
-    const button = [...row.querySelectorAll('button')].find(button => button.textContent === label);
+    const button = [...row.querySelectorAll('button')].find(button => exactLabel(button.textContent,label));
     assert(button, 'SETTINGS_BUTTON_'+label); button.click();
   };
   for (const role of ['embedding','reranking','generation']) {
     assert(p.settings.ai[role].state === 'disabled', 'AI_DEFAULT_DISABLED');
-    assert(cardRow(role,'Provider state')?.textContent?.includes('Disabled'), 'AI_ROLE_SETTINGS');
+    assert(containsLabel(cardRow(role,'Provider state')?.textContent,'Disabled'), 'AI_ROLE_SETTINGS');
   }
   clickButton(cardRow('reranking','Connection'), 'Configure');
   const setText = (row,value) => {
@@ -165,7 +187,7 @@
   clickButton(cardRow('reranking','Connection'), 'Configure');
   clickButton(cardRow('reranking','Draft preferences'), 'Disable role');
   await wait(() => p.settings.ai.reranking.state === 'disabled', 'AI_DISABLE');
-  await wait(() => cardRow('reranking','Provider state')?.textContent?.includes('Disabled'), 'AI_DISABLE_UI');
+  await wait(() => containsLabel(cardRow('reranking','Provider state')?.textContent,'Disabled'), 'AI_DISABLE_UI');
   const host = p.denseHost;
   assert(host, 'D6_HOST_ATTACHED');
   const embedding = {state:'configured',transport:'local',origin:'http://127.0.0.1:1',
@@ -203,9 +225,9 @@
     'PURGE_BUTTON_REFRESH');
   settingRow('Delete derived offline index').querySelector('button').click();
   const modal = () => [...settingDoc.querySelectorAll('.modal-container, .modal')]
-    .find(el => el.textContent?.includes('Confirm derived-index cleanup'));
+    .find(el => containsLabel(el.textContent,'Confirm derived-index cleanup'));
   await wait(() => modal(), 'PURGE_CONFIRM_MODAL');
-  const confirm = [...modal().querySelectorAll('button')].find(el => el.textContent?.includes('Delete derived files'));
+  const confirm = [...modal().querySelectorAll('button')].find(el => containsLabel(el.textContent,'Delete derived files'));
   assert(confirm, 'PURGE_CONFIRM_BUTTON'); confirm.click();
   await wait(() => !modal(), 'PURGE_CONFIRM_CLOSED');
   const remaining = await p.purgeIndex();

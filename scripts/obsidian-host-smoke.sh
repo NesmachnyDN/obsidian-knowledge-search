@@ -21,6 +21,15 @@ if [[ "${OKS_06UX_L10N_SWITCH_TEST:-0}" == 1 || "${OKS_06UX_L10N_RU_TEST:-0}" ==
   [[ "${OKS_06UX_L10N_SWITCH_TEST:-0}" != 1 || "${OKS_06UX_L10N_RU_TEST:-0}" != 1 ]] ||
     { echo "HOST_SMOKE_FAILURE: L10N scenarios must run separately" >&2; exit 2; }
 fi
+# The targeted native-chat scenario is independent of cumulative host acceptance.
+# Require the verified package and a fresh isolated no-route profile.
+if [[ "${OKS_NATIVE_CHAT_TEST:-0}" == 1 ]]; then
+  [[ "${OKS_HOST_NO_ROUTE:-0}" == 1 && -n "${OKS_STANDALONE_PACKAGE_DIR:-}" && -z "${OKS_STANDALONE_PREVIOUS_PACKAGE_DIR:-}" &&
+     -z "${OKS_06UX_VISUAL_DIR:-}" && -z "${OKS_06UX_L10N_RU_VISUAL_DIR:-}" && "${OKS_AI_RERANK_TEST:-0}" == 0 && "${OKS_ADVANCED_HEALTH_TEST:-0}" == 0 &&
+     "${OKS_ADVANCED_INGESTION_TEST:-0}" == 0 && "${OKS_ADVANCED_RETRIEVAL_TEST:-0}" == 0 && "${OKS_06UX_TEST:-0}" == 0 &&
+     "${OKS_06UX_L10N_SWITCH_TEST:-0}" == 0 && "${OKS_06UX_L10N_RU_TEST:-0}" == 0 ]] ||
+    { echo "HOST_SMOKE_FAILURE: native chat requires isolated verified package and separate mode" >&2; exit 2; }
+fi
 tmp="$(mktemp -d /tmp/oks-native-host-XXXXXXXX)"
 trap 'rm -rf -- "$tmp"' EXIT
 ulimit -c 0
@@ -146,7 +155,7 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
     test "$(ip -o link show | wc -l)" -eq 1
     test -z "$(ip route show default)"
   fi
-  if [[ "${OKS_AI_RERANK_TEST:-0}" == 1 ]]; then
+  if [[ "${OKS_AI_RERANK_TEST:-0}" == 1 || "${OKS_NATIVE_CHAT_TEST:-0}" == 1 ]]; then
     ip link set lo up
     test "$(ip -o link show | wc -l)" -eq 1
     test -z "$(ip route show default)"
@@ -167,6 +176,16 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
   initial="$(timeout 8s "$cli" eval "code=JSON.stringify({plugin:!!app.plugins.plugins[\"oks-synthetic-evidence\"],status:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standalone?.status(),error:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standaloneError})")"
   [[ "$initial" == *"\"status\":\"ready\""* && "$initial" == *"\"sources\":2"* ]] ||
     { printf "HOST_SMOKE_FAILURE: native plugin not indexed; result=%s\n" "$initial" >&2; exit 1; }
+  if [[ "${OKS_NATIVE_CHAT_TEST:-0}" == 1 ]]; then
+    chat="$(timeout 65s "$cli" eval "code=$(cat "$repo/scripts/obsidian-native-chat-smoke.js")")"
+    [[ "$chat" == *"OBSIDIAN_NATIVE_CHAT_PASS:"* ]] ||
+      { echo "HOST_SMOKE_FAILURE: native chat ($chat)" >&2; exit 1; }
+    printf "%s\n" "$chat"
+    test "$(cat "$tmp/rerank-ready.generation-count")" = 2 ||
+      { echo "HOST_SMOKE_FAILURE: expected exactly two authorized native chat requests" >&2; exit 1; }
+    echo "OBSIDIAN_NATIVE_CHAT_WIRE_PASS: exactly two authorized fixture requests"
+    exit 0
+  fi
   if [[ "${OKS_06UX_L10N_SWITCH_TEST:-0}" == 1 ]]; then
     language_phase() {
       local action="$1" result
@@ -397,4 +416,8 @@ if [[ -n "${OKS_STANDALONE_PACKAGE_DIR:-}" ]]; then
   test "$(sha256sum "$tmp/vault/second.md" | cut -d' ' -f1)" = "$fixture_sha" ||
     { echo "HOST_SMOKE_FAILURE: uninstall changed original bytes" >&2; exit 1; }
   printf '%s\n' 'OBSIDIAN_HOST_CLEAN_REMOVAL_PASS: packaged plugin files removed; source Markdown preserved'
+fi
+
+if [[ "${OKS_NATIVE_CHAT_TEST:-0}" == 1 ]]; then
+  echo "OBSIDIAN_NATIVE_CHAT_TARGETED_HOST_DONE: no cumulative host pass claimed"
 fi
