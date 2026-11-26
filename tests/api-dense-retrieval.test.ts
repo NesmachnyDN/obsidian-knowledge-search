@@ -1,6 +1,7 @@
 import {ApiDenseHost} from '../plugin/src/ai/dense-host';
 import {GenerationCredentialAuthority} from '../plugin/src/ai/generation-credential';
-import {GenerationPolicyGate} from '../plugin/src/ai/generation-policy';
+import {GenerationPolicyGate,type GenerationPolicyBinding} from '../plugin/src/ai/generation-policy';
+import {resolveEmbeddingPolicyScope,embeddingPolicyPayload,INDEX_PURPOSE_TEXT,type EmbeddingPolicyScope,type EmbeddingPolicyInput} from '../plugin/src/ai/embedding-policy';
 import {ProcessingPolicyHost} from '../plugin/src/ai/generation-policy-host';
 import {SearchController,uiRequest} from '../plugin/src/search/controller';
 import {DenseUiController} from '../plugin/src/ai/dense-ui-controller';
@@ -14,7 +15,8 @@ import {join} from 'node:path';
 import {ApiDenseSearch,type ApiRetrievalInput,type ApiRetrievalPort} from '../plugin/src/ai/dense-retrieval';
 import {ApiDenseIndexManager,type DenseIndexPort} from '../plugin/src/ai/dense-index-manager';
 import {EvidenceEmbedder,type EmbeddingApproval} from '../plugin/src/ai/embedding-evidence';
-import {buildApiDenseGeneration} from '../plugin/src/ai/dense-generation';
+import {buildApiDenseGeneration,validateApiDenseGeneration,assertDensePolicyReuse} from '../plugin/src/ai/dense-generation';
+import {canonical,sha} from '../plugin/src/advanced/protocol';
 import {embeddingSpaceId} from '../plugin/src/ai/embedding-space';
 import {configDigest} from '../plugin/src/ai/disclosure';
 import type {EmbeddingSpace,ProviderConfig} from '../plugin/src/ai/contracts';
@@ -613,9 +615,9 @@ test('D6 storage admission refuses failed prior writer shutdown and cancellation
 });
 
 
-test('POLICY.3c2 dense host exact preflight, one-shot credential, shared role slot and revocation',async()=>{
+test('POLICY.3c2/3d1 dense host exact preflight, shared role slot, revocation and durable lineage',async()=>{
   await fixture(async f=>{
-    const config={...f.config,limits:{...f.config.limits,maxCandidates:1}};
+    let config={...f.config,limits:{...f.config.limits,maxCandidates:1}};
     const rootId=f.input('common','hybrid').approval.scopeId;
     const credential=new GenerationCredentialAuthority(),gate=new GenerationPolicyGate();
     let revision='p1',selected=true,admitted=true;
@@ -636,16 +638,20 @@ test('POLICY.3c2 dense host exact preflight, one-shot credential, shared role sl
     const search=new SearchController(async()=>{},undefined,undefined,evidencePort,evidencePort,undefined,undefined,
       undefined,undefined,credential,gate);
     search.attach(f.engine);
-    host=new ApiDenseHost(f.engine,f.vault,rootId,'oks-synthetic-evidence',
+    const openHost=()=>new ApiDenseHost(f.engine,f.vault,rootId,'oks-synthetic-evidence',
       {config:()=>config,enabled:()=>true,allowedPath:()=>true,admitStorage:async()=>{}},Date.now,
       policyPort);
+    host=openHost();
     const ui=new DenseUiController({host:()=>host,revokeNavigation:()=>{},navigate:async()=>{}});
     const owner=Symbol(),rebuild={kind:'rebuild' as const,paths:['a.md','b.md'],space};
     const query={kind:'search' as const,paths:['a.md','b.md'],space,request:request('common','hybrid')};
     const prepare=(op:typeof rebuild|typeof query=rebuild)=>host.prepareWithCredential(op,'synthetic',token);
     try{
       assert.equal((await search.search(uiRequest('common',1))).ok,true);
-      const before=f.calls();
+      const before=f.calls(),pointer=join(f.store.path,'CURRENT'),priorPointer=await readFile(pointer);
+      const old=await host.confirm(await prepare(query),'synthetic','');
+      assert.equal(old.error,'DISCLOSURE_DENIED');assert.equal(f.calls(),before);
+      assert.deepEqual(await readFile(pointer),priorPointer);
       await assert.rejects(host.prepare(rebuild),{message:'NOT_READY'});
       admitted=false;await assert.rejects(prepare(),{message:'DISCLOSURE_DENIED'});admitted=true;
       assert.equal(credential.exclusiveBusy,false);assert.equal(f.calls(),before);
@@ -696,6 +702,44 @@ test('POLICY.3c2 dense host exact preflight, one-shot credential, shared role sl
       assert.equal(built.status,'ok');assert.equal(f.calls(),before+2);assert.equal(credential.exclusiveBusy,false);
       assert.equal(host.isResultCurrent(built),true);
       assert.deepEqual(f.wireRequests().slice(-2).map(x=>x.texts),[['common alpha storage'],['common beta archive']]);
+      // POLICY.3d1: recover the same single CURRENT in a fresh store and host.
+      const root=await trustedVaultRoot(f.vault),reopened=await AdvancedRetrievalStore.open(root,'oks-synthetic-evidence');
+      const snapshot=await reopened.snapshotApi(embeddingSpaceId(config,space),f.engine.status().generationId!);
+      assert.ok(snapshot?.schemaVersion===3);
+      assert.equal(snapshot.lineage.kind,'verified-originals-v1');
+      assert.equal(snapshot.lineage.reuse,'local-retrieval-only');assert.equal(snapshot.lineage.batches.length,2);
+      assert.equal(snapshot.lineage.batches.every(b=>b.configDigest===configDigest('embedding',config)),true);
+      assert.equal('generationId' in built&&snapshot.generationId===built.generationId,true);
+      const manifest=JSON.stringify(snapshot);
+      for(const secret of [token,'credentialEpoch','hostId','deadlineUnixMs','expiresUnixMs','common alpha storage'])
+        assert.equal(manifest.includes(secret),false);
+      const lease=await f.engine.captureDenseCorpus(rebuild.paths,256,context().signal);
+      const rehash=(g:typeof snapshot)=>{const {generationId:_,...base}=g;return {...base,generationId:sha(canonical(base))};};
+      for(const batches of [snapshot.lineage.batches.slice(0,1),
+        [snapshot.lineage.batches[0]!,snapshot.lineage.batches[0]!],
+        snapshot.lineage.batches.map((b,i)=>i?{...b,payloadDigest:hash('substituted')}:b)]){
+        const forged=rehash({...snapshot,lineage:{...snapshot.lineage,batches}});
+        assert.throws(()=>validateApiDenseGeneration(forged,rootId));
+      }
+      const reversed=rehash({...snapshot,lineage:{...snapshot.lineage,batches:[...snapshot.lineage.batches].reverse()}});
+      assert.throws(()=>assertDensePolicyReuse(reversed,config,lease.evidence,true),{message:'DISCLOSURE_DENIED'});
+      const foreign=rehash({...snapshot,lineage:{...snapshot.lineage,batches:snapshot.lineage.batches.map(b=>({...b,scopeBinding:hash('foreign')}))}});
+      assert.throws(()=>assertDensePolicyReuse(foreign,config,lease.evidence,true),{message:'DISCLOSURE_DENIED'});
+      const currentPointer=await readFile(pointer);
+      await assert.rejects(reopened.publishApi(structuredClone(snapshot),async()=>{},context().signal,()=>true),{message:'DISCLOSURE_DENIED'});
+      assert.deepEqual(await readFile(pointer),currentPointer);
+      await host.close();host=openHost();revision='reopened-policy';
+      const wireBefore=f.calls();
+      selected=false;
+      const legacy=await host.confirm(await host.prepare(query),'synthetic',token);
+      assert.equal(legacy.error,'DISCLOSURE_DENIED');assert.equal(f.calls(),wireBefore);
+      selected=true;
+      const originalConfig=config;
+      config={...config,limits:{...config.limits,timeoutMs:config.limits.timeoutMs+1}};
+      const changedConfig=await host.confirm(await prepare(query),'synthetic','');
+      assert.equal(changedConfig.error,'DISCLOSURE_DENIED');assert.equal(f.calls(),wireBefore);
+      assert.deepEqual(await readFile(pointer),currentPointer);
+      config=originalConfig;
       p=await prepare(query);const retrieved=await host.confirm(p,'synthetic','');
       assert.equal(retrieved.status,'ok');assert.deepEqual(f.wireRequests().at(-1)?.texts,['common']);
       const prior=f.calls();
@@ -712,5 +756,51 @@ test('POLICY.3c2 dense host exact preflight, one-shot credential, shared role sl
       await assert.rejects(prepare(query),{message:'DISCLOSURE_DENIED'});
       assert.equal(f.calls(),noWire);assert.equal(credential.exclusiveBusy,false);
     }finally{ui.dispose();await host.close();search.dispose();}
+  });
+});
+
+
+test('POLICY.3d1 exact current approved plan owns persisted derivative provenance; mixed and substituted batches cannot publish',async()=>{
+  await fixture(async f=>{
+    const lease=await f.engine.captureDenseCorpus(['a.md','b.md'],256,context().signal);
+    const cfg=f.config,spaceId=embeddingSpaceId(cfg,space),digest=configDigest('embedding',cfg);
+    let scope:EmbeddingPolicyScope|null=null;
+    const host=new ProcessingPolicyHost<'embedding'>(()=>true,()=>f.engine,()=>({
+      config:cfg,profile:{profileId:'fixture',admissionId:'review',role:'embedding',configDigest:digest,
+        adapter:'fixture',classification:'external'},adapter:'fixture',policyRevision:'p1',configRevision:'c1',
+      restrictions:[],materials:[],complete:true
+    }),'embedding',()=>scope);
+    const gate=new GenerationPolicyGate(),embedder=new EvidenceEmbedder();
+    const approved:GenerationPolicyBinding[]=[],results:Awaited<ReturnType<EvidenceEmbedder['run']>>[]=[];
+    for(const hit of lease.evidence){
+      scope=resolveEmbeddingPolicyScope(lease,'document',[hit]);
+      const i:EmbeddingPolicyInput={role:'embedding',config:cfg,scopeId:lease.rootId,ownerId:'fixture-owner',hostId:'fixture-host',
+        credentialEpoch:1,deadlineUnixMs:Date.now()+5000,scopeBinding:scope.scopeBinding,
+        scopeSources:scope.scopeSources,sources:scope.sources,embedding:{purpose:'document',space,spaceId,
+          query:INDEX_PURPOSE_TEXT,queryClassification:'synthetic'},
+        payloadDigest:embeddingPolicyPayload('document',spaceId,INDEX_PURPOSE_TEXT,'synthetic',scope.sources)};
+      const ctx={signal:context().signal,deadlineUnixMs:i.deadlineUnixMs};
+      const evaluate=()=>gate.evaluate(host,i,ctx,lease.current);
+      const binding=await evaluate();
+      const legacy=f.makeApproval('document',INDEX_PURPOSE_TEXT,[hit]);
+      const policy:EmbeddingApproval={...legacy,candidates:legacy.candidates.map(c=>({...c,classification:'unknown'})),
+        grant:{...legacy.grant,expiresUnixMs:i.deadlineUnixMs,notePolicyBinding:binding,
+          sources:legacy.grant.sources.map(x=>({...x,classification:'unknown'}))}};
+      results.push(await embedder.run(policy,token,ctx,lease.verify,lease.current,evaluate));approved.push(binding);
+    }
+    const build=(batches:typeof results,plan?:readonly GenerationPolicyBinding[])=>
+      buildApiDenseGeneration(lease.rootId,cfg,space,lease.lexicalGenerationId,lease.evidence,batches,plan);
+    const built=build(results,approved);
+    assert.equal(built.schemaVersion,3);
+    assert.throws(()=>build(results)); // no implicit policy-plan authority
+    assert.throws(()=>build(results,[...approved].reverse()));
+    assert.throws(()=>build(results,[approved[0]!,{...approved[1]!,bindingDigest:hash('foreign operation')}]));
+    const legacy=await embedder.run(f.makeApproval('document',INDEX_PURPOSE_TEXT,[lease.evidence[1]!]),token,context(),lease.verify,lease.current);
+    assert.throws(()=>build([results[0]!,legacy],approved));
+    assert.throws(()=>build([results[0]!,legacy]));
+    assert.throws(()=>build([structuredClone(results[0]!),results[1]!],approved),{message:'DISCLOSURE_DENIED'});
+    const pointer=join(f.store.path,'CURRENT'),before=await readFile(pointer);
+    await assert.rejects(f.store.publishApi(structuredClone(built),async()=>{},context().signal,lease.current),{message:'DISCLOSURE_DENIED'});
+    assert.deepEqual(await readFile(pointer),before);
   });
 });

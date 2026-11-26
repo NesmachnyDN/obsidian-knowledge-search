@@ -6,6 +6,11 @@ import type { EmbeddingSpace } from './contracts';
 import type { ProcessingPolicyInput } from './generation-policy';
 import type { EmbeddingPurpose } from './loopback-embedding';
 
+export const INDEX_PURPOSE_TEXT='selected corpus indexing';
+export function embeddingScopeBinding(rootId:string,lexicalGenerationId:string,evidence:readonly EvidenceHit[],
+  purpose:EmbeddingPurpose,batch:readonly EvidenceHit[]):string {
+  return hash(canonical(['oks-embedding-scope-v1',purpose,rootId,lexicalGenerationId,evidence,batch]));
+}
 export type EmbeddingPolicyDetails=Readonly<{purpose:EmbeddingPurpose;space:EmbeddingSpace;spaceId:string;
   query:string;queryClassification:'synthetic'|'public'}>;
 export type EmbeddingPolicyInput=ProcessingPolicyInput<'embedding'>&Readonly<{embedding:EmbeddingPolicyDetails}>;
@@ -43,8 +48,7 @@ export function resolveEmbeddingPolicyScope(lease:SelectedCorpus,purpose:Embeddi
   const scopeSources=Object.freeze([...originals].map(([sourceId,sourceSha256])=>Object.freeze({sourceId,sourceSha256})));
   const sources=Object.freeze(batch.map(hit=>Object.freeze({sourceId:hit.sourceId,sourceSha256:hit.sourceSha256,
     excerptDigest:hash(hit.originalExcerpt)})));
-  const scopeBinding=hash(canonical(['oks-embedding-scope-v1',purpose,lease.rootId,lease.lexicalGenerationId,
-    lease.evidence,batch]));
+  const scopeBinding=embeddingScopeBinding(lease.rootId,lease.lexicalGenerationId,lease.evidence,purpose,batch);
   if(!lease.current())throw new ProviderFailure('CANCELLED');
   return Object.freeze({purpose,scopeId:lease.rootId,scopeBinding,scopeSources,sources,current:()=>lease.current()});
 }

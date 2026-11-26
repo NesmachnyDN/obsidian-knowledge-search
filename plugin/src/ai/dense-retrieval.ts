@@ -5,7 +5,7 @@ import type { AdvancedRetrievalStore } from '../advanced/retrieval-storage';
 import { ProviderFailure, type CallContext, type ProviderFailureCode } from './contracts';
 import { EvidenceEmbedder, type EmbeddingApproval } from './embedding-evidence';
 import { checkedVector, embeddingSpaceId, validateEmbeddingSpace } from './embedding-space';
-import { MAX_API_VECTORS, apiDenseEntryKey, apiDenseEvidenceKey, type ApiDenseGeneration } from './dense-generation';
+import { MAX_API_VECTORS, apiDenseEntryKey, apiDenseEvidenceKey,assertDensePolicyReuse,type ApiDenseGeneration } from './dense-generation';
 import type { GenerationPolicyBinding } from './generation-policy';
 
 type Mode='dense'|'hybrid';
@@ -117,6 +117,9 @@ export class ApiDenseSearch {
       check();
       if(!generation||!this.store.isApiSnapshotCurrent(generation))return fail('NOT_READY');
       if(generation.rootId!==value.approval.scopeId)return fail('DISCLOSURE_DENIED');
+      const policySelected=!!value.approval.grant.notePolicyBinding;
+      if(policySelected!==!!port.policyCheck)return fail('DISCLOSURE_DENIED');
+      assertDensePolicyReuse(generation,value.approval.config,value.evidence,policySelected);
       const map=selected(generation,value.evidence);
       const scope=req.scope?new Set(req.scope):null;
       let metadata:Set<string>|null=null;
