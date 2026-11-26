@@ -234,7 +234,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
       if(!this.unloaded&&this.layoutReady&&file instanceof TFile)this.markingTracker.created(file.path,file);
       nativeChange(file);
     }));
-    this.registerEvent(this.app.vault.on('modify', file => nativeChange(file, undefined, true)));
+    this.registerEvent(this.app.vault.on('modify', file => {this.markingTracker.invalidate(file.path);nativeChange(file, undefined, true);}));
     this.registerEvent(this.app.vault.on('delete', file => {this.markingTracker.invalidate(file.path);nativeChange(file, undefined, true);}));
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {this.markingTracker.invalidate(oldPath);this.markingTracker.invalidate(file.path);nativeChange(file, oldPath, true);}));
     this.registerEvent(this.app.metadataCache.on('changed', file => nativeChange(file)));

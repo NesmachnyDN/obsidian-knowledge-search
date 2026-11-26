@@ -2078,9 +2078,15 @@ test('POLICY.2b native create identity, saved rules, rename and unload guard rea
     events.get('create')!(file);await f.plugin.standalone!.whenIdle();
     const decision=await preview(rules);
     assert.equal(decision.action,'set-private');assert.equal(decision.externalBlocked,true);
+    const modified=Buffer.concat([original,Buffer.from('\n# Modified synthetic')]);
+    await writeFile(join(f.vault,file.path),modified);
+    events.get('modify')!(file);await f.plugin.standalone!.whenIdle();
+    assert.equal((await preview(rules)).reason,'lifecycle-unresolved');
+    events.get('create')!(file);await f.plugin.standalone!.whenIdle();
+    assert.equal((await preview(rules)).action,'set-private');
     events.get('rename')!(file,'old.md');await f.plugin.standalone!.whenIdle();
     assert.equal((await preview(rules)).reason,'lifecycle-unresolved');
-    assert.deepEqual(await readFile(join(f.vault,file.path)),original);
+    assert.deepEqual(await readFile(join(f.vault,file.path)),modified);
     f.plugin.onunload();await assert.rejects(preview(rules),/SOURCE_REJECTED/);
   }finally{await f.cleanup();}
 });
