@@ -5,12 +5,13 @@ import type { StandaloneEngine } from '../standalone/engine';
 import type { AdvancedRetrievalStore } from '../advanced/retrieval-storage';
 import { canonical } from '../advanced/protocol';
 import { ProviderFailure, type ProviderFailureCode, type ProviderConfig, type EmbeddingSpace, type CallContext } from './contracts';
-import { configDigest } from './disclosure';
+import { configDigest,projectDisclosure } from './disclosure';
 import { pilotConfig } from './loopback-json';
 import { preflightDocumentEmbedding } from './loopback-embedding';
 import { embeddingSpaceId, validateEmbeddingSpace } from './embedding-space';
 import { EvidenceEmbedder, type EmbeddingApproval, type VerifiedEmbeddingResult } from './embedding-evidence';
 import { MAX_API_VECTORS, buildApiDenseGeneration } from './dense-generation';
+import type { GenerationPolicyBinding } from './generation-policy';
 
 export const INDEX_PURPOSE_TEXT='selected corpus indexing';
 export type DenseIndexRequest={paths:readonly string[];config:ProviderConfig;space:EmbeddingSpace};
@@ -22,6 +23,11 @@ export type DenseIndexPort={
   /** Side-effect-free policy predicate over authoritative original evidence. */
   allowed(hit:EvidenceHit):boolean;
   authorize(input:DenseIndexGrantInput):EmbeddingApproval;
+  /** Policy mode authorizes the complete immutable batch plan before the
+   * first transport dispatch.  Legacy pilot callers deliberately omit this. */
+  authorizePlan?(inputs:readonly DenseIndexGrantInput[]):Promise<readonly EmbeddingApproval[]>;
+  publicationFence?(current:()=>boolean):void;
+  policyCheck?(approval:EmbeddingApproval):()=>Promise<GenerationPolicyBinding>;
 };
 export type DenseIndexResult={status:'ok'|'failed';error:ProviderFailureCode|null;
   generationId:string|null;count:number};
@@ -37,7 +43,7 @@ function errorCode(error:unknown):ProviderFailureCode{
   }
   return 'NOT_READY';
 }
-function batches(evidence:readonly EvidenceHit[],config:ProviderConfig):EvidenceHit[][]{
+export function planDenseBatches(evidence:readonly EvidenceHit[],config:ProviderConfig):EvidenceHit[][]{
   const result:EvidenceHit[][]=[];
   let batch:EvidenceHit[]=[];
   const preflight=(hits:readonly EvidenceHit[])=>preflightDocumentEmbedding(config,{
@@ -85,25 +91,46 @@ export class ApiDenseIndexManager{
       };
       guard();
       // Plan every batch first, including the reserved grant-purpose text.
-      const planned=batches(corpus.evidence,config),results:VerifiedEmbeddingResult[]=[];
-      for(const batch of planned){
-        guard();
-        const approval=structuredClone(port.authorize(structuredClone({
-          scopeId:corpus.rootId,config,space,query:INDEX_PURPOSE_TEXT,evidence:batch})));
-        if(approval.purpose!=='document'||approval.scopeId!==corpus.rootId
+      const planned=planDenseBatches(corpus.evidence,config),results:VerifiedEmbeddingResult[]=[];
+      const inputs=planned.map(evidence=>({scopeId:corpus.rootId,config,space,query:INDEX_PURPOSE_TEXT,evidence}));
+      if(!!port.authorizePlan!==!!port.policyCheck)return fail('DISCLOSURE_DENIED');
+      const grants=port.authorizePlan?await port.authorizePlan(structuredClone(inputs)):undefined;
+      if(port.authorizePlan&&(!Array.isArray(grants)||grants.length!==planned.length))return fail('DISCLOSURE_DENIED');
+      const validate=(approval:EmbeddingApproval,batch:readonly EvidenceHit[]):EmbeddingApproval=>{
+        if(!approval||approval.purpose!=='document'||approval.scopeId!==corpus.rootId
           ||approval.query.text!==INDEX_PURPOSE_TEXT||approval.grant?.sources.length!==batch.length
+          ||approval.grant.purpose!=='document'||approval.grant.spaceId!==spaceId
+          ||!!approval.grant.notePolicyBinding!==!!port.authorizePlan
           ||configDigest('embedding',approval.config)!==configDigest('embedding',config)
           ||embeddingSpaceId(approval.config,approval.space)!==spaceId
           ||canonical(approval.candidates.map(row=>row.hit))!==canonical(batch))
           return fail('DISCLOSURE_DENIED');
+        if(port.authorizePlan)projectDisclosure('embedding',config,corpus.rootId,approval.query,
+          approval.candidates.map(({hit,classification})=>({text:hit.originalExcerpt,sourceId:hit.sourceId,sourceSha256:hit.sourceSha256,classification})),
+          approval.grant,context.signal,Date.now(),approval.grant.notePolicyBinding);
+        return structuredClone(approval);
+      };
+      // All policy grants must match the entire plan before any batch can send.
+      const approved=grants?Array.from(grants,(grant,i)=>validate(grant,planned[i]!)):undefined;
+      guard();
+      for(const [batchId,batch] of planned.entries()){
         guard();
-        results.push(await this.embedder.run(approval,token,context,corpus.verify,current));
+        const approval=approved?approved[batchId]!:validate(port.authorize(structuredClone(inputs[batchId]!)),batch);
+        guard();
+        results.push(await this.embedder.run(approval,token,context,corpus.verify,current,port.policyCheck?.(approval)));
         guard();
       }
       const generation=buildApiDenseGeneration(corpus.rootId,config,space,corpus.lexicalGenerationId,
         corpus.evidence,results);
       await this.store.publishApi(generation,async()=>{guard();},context.signal,current);
       guard();
+      if(port.publicationFence){
+        const snapshot=await this.store.snapshotApi(spaceId,corpus.lexicalGenerationId,context.signal);
+        guard();
+        if(!snapshot||snapshot.generationId!==generation.generationId||!this.store.isApiSnapshotCurrent(snapshot))return fail('SOURCE_STALE');
+        port.publicationFence(()=>this.store.isApiSnapshotCurrent(snapshot));
+        guard();
+      }
       return {status:'ok',error:null,generationId:generation.generationId,count:corpus.evidence.length};
     }catch(error){return failed(errorCode(error));}
     finally{this.busy=false;}

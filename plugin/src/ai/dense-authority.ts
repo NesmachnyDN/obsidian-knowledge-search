@@ -19,9 +19,10 @@ export class DenseAuthority {
   private readonly pending = new Set<Channel>();
   private readonly retired = new Set<Channel>();
   private readonly channels = new Set<Channel>();
+  private readonly beforeDelivery=new WeakMap<Channel,()=>void>();
   private readonly quarantined = new WeakSet<Listener>();
   constructor(private readonly sharedFence: () => boolean = () => false) {}
-  channel(): Channel { const channel = new Set<Listener>(); this.channels.add(channel); return channel; }
+  channel(before?:()=>void): Channel { const channel = new Set<Listener>(); this.channels.add(channel); if(before)this.beforeDelivery.set(channel,before);return channel; }
   /** Permanent, synchronous admission/publication-rights fence. Retire the
    * actual owners afterwards; existing observers still receive final snapshots. */
   sealTerminal(): void {
@@ -88,7 +89,7 @@ export class DenseAuthority {
         for (const channel of wave) {
           for (const listener of [...channel]) {
             if (!channel.has(listener) || this.quarantined.has(listener)) continue;
-            try { listener(); }
+            try { this.beforeDelivery.get(channel)?.();listener(); }
             catch {
               this.quarantined.add(listener);
               for (const registered of this.channels) registered.delete(listener);

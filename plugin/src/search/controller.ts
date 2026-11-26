@@ -151,11 +151,11 @@ export class SearchController {
   private generationTransitionView?:object;
   private generationPreviewReading = false;
   private previewNotificationDeferred = false;
-  private readonly generationPolicyGate=new GenerationPolicyGate();
+  private readonly generationPolicyGate:GenerationPolicyGate;
   private generationPolicyPreparation?: {role:EvidenceRole;abort:AbortController;pending?:PendingEvidencePreview;context?:CallContext};
   private readonly defaultGenerationView = Object.freeze({});
   private readonly generationViews = new WeakSet<object>();
-  private readonly generationCredential = new GenerationCredentialAuthority();
+  private readonly generationCredential: GenerationCredentialAuthority;
   private readonly generator = new EvidenceGenerator();
   private readonly reranker = new EvidenceReranker();
   private readonly rerankProfiles = new RerankRuntimeProfiles(()=>this.invalidateRerankProfile());
@@ -230,7 +230,11 @@ export class SearchController {
     private readonly credentialResolver?: CredentialResolver,
     /** Explicit host-selected target path; unadmitted profiles fail closed. */
     private readonly generationPolicyPort?: GenerationPolicyPort,
-    private readonly rerankPolicyPort?:RerankPolicyPort) {}
+    private readonly rerankPolicyPort?:RerankPolicyPort,
+    credentialAuthority?:GenerationCredentialAuthority,policyGate?:GenerationPolicyGate) {
+      this.generationCredential=credentialAuthority??new GenerationCredentialAuthority();
+      this.generationPolicyGate=policyGate??new GenerationPolicyGate();
+  }
   attach(engine: Engine): void {
     if (this.disposed) return;
     const replaced = this.engine !== undefined && this.engine !== engine;
@@ -435,6 +439,12 @@ export class SearchController {
   }
   /** Host admission stays closed through shared revocation and lifecycle delivery,
    * never through independent evidence-only notifications. */
+  embeddingAdmissionAvailable():boolean {
+    return !this.sharedAuthorityTransition()&&!this.generationAdmissionDepth&&!this.generationTransition
+      &&!this.generationPreviewReading&&!this.generationPolicyPreparation&&!this.generationPolicyGate.busy
+      &&!this.generationCredential.exclusiveBusy&&!this.scopedRetrieval
+      &&!this.prepared.generation&&!this.prepared.reranking&&!this.activeEvidence.generation&&!this.activeEvidence.reranking;
+  }
   sharedAuthorityTransition(): boolean {
     return this.disposed || this.runtimeSettingsChanging || this.sharedAuthorityFault || this.sharedResetDepth > 0 || this.revokingSharedAuthority || this.deliveringLifecycle || !!this.lifecyclePending;
   }
@@ -1076,7 +1086,7 @@ export class SearchController {
     if (this.sharedAuthorityTransition()) return rejected('SUPERSEDED');
     const engine = this.engine;
     if (!engine?.captureChatScope) return rejected('CAPABILITY_UNAVAILABLE');
-    if (this.generationAdmissionDepth || this.generationPolicyPreparation || this.generationPolicyGate.busy || this.prepared.generation || this.activeEvidence.generation
+    if (this.generationCredential.exclusiveBusy || this.generationAdmissionDepth || this.generationPolicyPreparation || this.generationPolicyGate.busy || this.prepared.generation || this.activeEvidence.generation
       || this.prepared.reranking?.credential || this.activeEvidence.reranking?.credential
       || this.scopedRetrieval || this.active || this.pending) return rejected('BUSY');
     const abort = new AbortController();
@@ -1275,7 +1285,7 @@ export class SearchController {
   private async preparePolicyEvidence(role:EvidenceRole,token:string,viewOwner:object):Promise<RerankPreview>{
     const policy=role==='generation'?this.selectedGenerationPolicy():this.selectedRerankPolicy();
     if(!policy)throw new ProviderFailure('NOT_READY');
-    if(this.generationAdmissionDepth||this.generationPolicyPreparation||this.generationPolicyGate.busy||this.generationTransition||this.generationPreviewReading
+    if(this.generationCredential.exclusiveBusy||this.generationAdmissionDepth||this.generationPolicyPreparation||this.generationPolicyGate.busy||this.generationTransition||this.generationPreviewReading
       ||this.scopedRetrieval||role==='reranking'&&(this.prepared.generation||this.activeEvidence.generation
         ||this.prepared.reranking?.credential&&this.prepared.reranking.credential.viewOwner!==viewOwner)
       ||role==='generation'&&(this.prepared.reranking?.credential||this.activeEvidence.reranking?.credential))
@@ -1478,6 +1488,7 @@ export class SearchController {
     if(owner)this.generationCredential.revoke(owner);
   }
   private prepareEvidence(role: EvidenceRole,token?:string,viewOwner:object=this.defaultGenerationView,publish=true): RerankPreview {
+    if(this.generationCredential.exclusiveBusy)throw new ProviderFailure('BUSY');
     if (this.sharedAuthorityTransition() || this.roleRetirement(role)) throw new ProviderFailure('NOT_READY');
     // Replacing consent is a single commit. In particular no observer can
     // prepare another preview between clearing the old timer and owning the new one.
@@ -1647,6 +1658,7 @@ export class SearchController {
     finally { this.generationAdmissionDepth--; }
   }
   private async confirmEvidence(role: EvidenceRole, preview: RerankPreview, classification: 'synthetic' | 'public', token?: string): Promise<void> {
+    if(this.generationCredential.exclusiveBusy)throw new ProviderFailure('BUSY');
     if (this.sharedAuthorityTransition() || this.roleRetirement(role)) throw new ProviderFailure('DISCLOSURE_DENIED');
     const prior=this.prepared[role];
     const pending = this.currentPreview(role,false);

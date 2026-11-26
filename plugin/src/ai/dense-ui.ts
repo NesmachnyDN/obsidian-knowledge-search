@@ -48,6 +48,15 @@ export function mountDensePanel(root:HTMLElement, controller:DenseUiController,
   for(const [v,t] of [['','Select API search mode'],['dense','Dense (terms mode only)'],['hybrid','Hybrid (lexical + dense)']]){
     const opt=add(mode,'option',t!);opt.value=v!;
   }
+  const policyInput=add(panel,'section','','oks-dense-policy-input');
+  const policyClass=add(policyInput,'select','','oks-dense-policy-classification');
+  policyClass.setAttribute('aria-label','Free-text classification');
+  for(const [v,t] of [['','Select free-text classification'],['synthetic','Synthetic test data'],['public','Public data']]){
+    const opt=add(policyClass,'option',t!);opt.value=v!;
+  }
+  const policyToken=add(policyInput,'input','','oks-dense-policy-token');policyToken.type='password';
+  policyToken.autocomplete='off';policyToken.setAttribute('aria-label','One-operation bearer token for policy preview');
+  policyInput.hidden=!controller.policySelected();
   const message=add(panel,'p','','oks-dense-message');message.setAttribute('aria-live','polite');
   const previewArea=add(panel,'section','','oks-dense-preview');
   const rows=add(panel,'ol','','oks-dense-results');
@@ -56,14 +65,19 @@ export function mountDensePanel(root:HTMLElement, controller:DenseUiController,
     if(token)token.value='';
     previewArea.replaceChildren();rows.replaceChildren();
   };
-  const cancel=()=>controller.cancel(owner);
+  const cancel=()=>{policyToken.value='';controller.cancel(owner);};
   const error=(e:unknown)=>{if(!disposed)message.textContent='API dense: '+(e instanceof ProviderFailure?e.code:'CONFIG_INVALID');};
   const prepare=(kind:'rebuild'|'search')=>{
-    machine?.invalidate();cancel();
+    const preparedToken=policyToken.value;policyToken.value='';
+    machine?.invalidate();controller.cancel(owner);
     try{
       const request=denseUiRequest(kind,paths.value,Number(dimension.value),preference(),
         mode.value as 'dense'|'hybrid',kind==='search'?search():undefined);
-      void controller.prepare(owner,request);
+      if(controller.policySelected()){
+        if(!preparedToken||!['synthetic','public'].includes(policyClass.value))throw new ProviderFailure('DISCLOSURE_DENIED');
+        const token=preparedToken;
+        void controller.prepare(owner,request,undefined,{classification:policyClass.value as 'synthetic'|'public',token});
+      }else void controller.prepare(owner,request);
     }catch(e){error(e);}
   };
   add(panel,'button','Prepare explicit dense index rebuild','oks-dense-rebuild').onclick=()=>{if(!disposed)prepare('rebuild');};
@@ -75,6 +89,7 @@ export function mountDensePanel(root:HTMLElement, controller:DenseUiController,
   const render=()=>{
     if(disposed)return;
     clear();
+    policyInput.hidden=!controller.policySelected();if(policyInput.hidden)policyToken.value='';
     const state=controller.snapshot(owner),machineOwned=machine?.owns(owner)??false;
     if(review)review.disabled=!machine?.pending();
     message.textContent='API dense: '+(state.phase==='error'?state.error:state.phase);
@@ -94,6 +109,18 @@ export function mountDensePanel(root:HTMLElement, controller:DenseUiController,
         add(previewArea,'pre',JSON.stringify(p.operation.request,null,2),'oks-dense-request-preview');
       }else add(previewArea,'p','All original excerpts below are sent in bounded document batches.');
       add(previewArea,'pre',p.evidence.map(hit=>hit.sourceId+':'+hit.sourceLocators[0]?.lineStart+'\n'+hit.originalExcerpt).join('\n\n'),'oks-dense-excerpt-preview');
+      if(p.credentialStamp){
+        add(previewArea,'p','Policy preview: '+p.policyBindings?.length+' verified batch binding(s); free text: '+p.policyClassification+
+          '. No request has been sent. Provider admission and exact consent remain mandatory.');
+        const label=add(previewArea,'label','');const check=add(label,'input','','oks-dense-confirm-check');check.type='checkbox';
+        label.append(doc.createTextNode(' I authorize this exact policy-bound operation once.'));
+        const confirm=add(previewArea,'button','Send once','oks-dense-confirm');confirm.disabled=true;
+        check.onchange=()=>{confirm.disabled=!check.checked;};
+        confirm.onclick=()=>{if(!disposed&&previewArea.contains(confirm)&&check.checked&&!confirm.disabled&&p.policyClassification){
+          confirm.disabled=true;void controller.confirm(owner,p.nonce,p.policyClassification,'');
+        }};
+        return;
+      }
       const classification=add(previewArea,'select','','oks-dense-classification');
       classification.setAttribute('aria-label','Classification of query and all selected evidence');
       for(const [v,t] of [['','Select classification'],['synthetic','Synthetic test data'],['public','Public data']]){

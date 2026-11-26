@@ -97,6 +97,8 @@ export function sameGenerationPolicy(a:GenerationPolicyBinding|undefined,b:Gener
  * No capability or policy decision can be minted here. */
 export class GenerationPolicyGate {
   private pending=false;
+  private physicalDrain:Promise<void>=Promise.resolve();
+  drain():Promise<void>{return this.physicalDrain;}
   get busy():boolean{return this.pending;}
   async evaluate<R extends AiRole>(port:ProcessingPolicyPort<R>,input:ProcessingPolicyInput<R>,context:CallContext,current:()=>boolean):Promise<GenerationPolicyBinding> {
     if(this.pending)throw new ProviderFailure('BUSY');
@@ -106,6 +108,7 @@ export class GenerationPolicyGate {
     const check=()=>{remainingOperationMs(context);if(!current())throw new ProviderFailure('CANCELLED');remainingOperationMs(context);};
     const remaining=remainingOperationMs(context);
     this.pending=true;
+    let drained!:()=>void;this.physicalDrain=new Promise<void>(resolve=>{drained=resolve;});
     return new Promise((resolve,reject)=>{
       let settled=false;
       const finish=(result?:PolicyEnvelope,error?:unknown)=>{
@@ -131,7 +134,7 @@ export class GenerationPolicyGate {
       const timer=setTimeout(()=>{expireActiveDeadline(context);finish(undefined,new ProviderFailure('TIMEOUT'));},remaining);
       context.signal.addEventListener('abort',cancel,{once:true});
       Promise.resolve().then(()=>{check();return port.evaluate(exact,context,current);})
-        .then(value=>{finish(value);this.pending=false;},error=>{finish(undefined,error??new ProviderFailure('DISCLOSURE_DENIED'));this.pending=false;});
+        .then(value=>{finish(value);this.pending=false;drained();},error=>{finish(undefined,error??new ProviderFailure('DISCLOSURE_DENIED'));this.pending=false;drained();});
       if(context.signal.aborted)cancel();
     });
   }
