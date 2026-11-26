@@ -1865,3 +1865,187 @@ test('06UX-INDEX.1 active storm, rename and delete retain dirty work in bounded 
     assert.equal((await engine.search(search('REQ-OLD-C'))).hits.length,0);
   }finally{gate.release();reader.read=actualRead;await cleanup();}
 });
+
+const graphMapping = {
+  schemaVersion:'oks-06b-mapping-v1', businessIdKey:'id',
+  rules:[{relationId:'depends-on',propertyKey:'depends',direction:'author-to-target',targetEncoding:'business-id'}],
+};
+const graphCard = (id:string, rest='') => '---\nid: '+id+'\n'+rest+'---\nA synthetic card.\n';
+test('06B.2b disabled default, explicit mapping and scoped graph exclude foreign identities and edges', async()=>{
+  const {engine,cleanup}=await setup({'a.md':graphCard('A','depends: B\n'),'b.md':graphCard('B'),
+    'c.md':graphCard('C','depends: A\n')});
+  try {
+    const signal=new AbortController().signal, all={mode:'vault-wide'};
+    assert.throws(()=>engine.captureGraphScope(all,signal),error('GRAPH_DISABLED'));
+    engine.configureGraph(graphMapping);
+    const full=engine.captureGraphScope(all,signal);
+    const graph=await full.read();
+    assert.equal(graph.nodes.length,3); assert.equal(graph.edges.length,2);
+    assert.notEqual(graph.coverage,'not-disclosed');
+    const lease=engine.captureGraphScope({mode:'selected',kind:'files',sourceIds:['a.md','b.md']},signal);
+    const scoped=await lease.read();
+    assert.deepEqual(scoped.nodes.map(n=>n.sourceId),['a.md','b.md']);
+    assert.equal(scoped.edges.length,1);
+    assert.equal(scoped.coverage,'not-disclosed');
+    assert.ok(!JSON.stringify(scoped).includes('c.md'));
+    assert.equal((await lease.read()).scopedProjectionId,scoped.scopedProjectionId);
+    assert.ok(Object.isFrozen(scoped.edges));
+    assert.throws(()=>engine.configureGraph({...graphMapping, unexpected:true}),error('GRAPH_MAPPING_INVALID'));
+    assert.equal(full.current(),false);assert.equal(lease.current(),false);
+    assert.throws(()=>engine.captureGraphScope({mode:'vault-wide'},new AbortController().signal),error('GRAPH_DISABLED'));
+    assert.equal((await engine.search(search('synthetic'))).status,'ok');
+  } finally {await cleanup();}
+});
+
+test('06B.2b full catalog authentication rejects missed event on excluded identity competitor',async()=>{
+  const {root,engine,cleanup}=await setup({'a.md':graphCard('A','depends: B\n'),'b.md':graphCard('B'),'other.md':graphCard('C')});
+  try {
+    engine.configureGraph(graphMapping);
+    const selector={mode:'selected',kind:'files',sourceIds:['a.md','b.md']};
+    const signal=new AbortController().signal;
+    const lease=engine.captureGraphScope(selector,signal);
+    assert.equal((await lease.read()).edges.length,1);
+    await writeFile(join(root,'other.md'),graphCard('B'));
+    await assert.rejects(lease.read(),error('GRAPH_SOURCE_STALE'));
+    assert.equal(lease.current(),false);
+    await engine.whenIdle();
+    const updated=await engine.captureGraphScope(selector,signal).read();
+    assert.equal(updated.edges.length,0);
+    assert.equal(updated.coverage,'not-disclosed');
+  } finally {await cleanup();}
+});
+
+test('06B.2b one physical slot, source mutation and config revision retire active lease before publication',async()=>{
+  const {root,reader,engine,cleanup}=await setup({'a.md':graphCard('A','depends: B\n'),'b.md':graphCard('B')});
+  const actual=reader.read.bind(reader),gate=asynchronousGate();
+  try {
+    engine.configureGraph(graphMapping);
+    const signal=new AbortController().signal, scope={mode:'vault-wide'};
+    const lease=engine.captureGraphScope(scope,signal);
+    reader.read=async path=>{gate.enter();await gate.held;return actual(path);};
+    const work=lease.read(); await gate.entered;
+    await assert.rejects(engine.captureGraphScope(scope,signal).read(),error('GRAPH_BUSY'));
+    await assert.rejects(engine.previewPolicyMetadata('a.md',()=>true),error('PARSER_BUSY'));
+    engine.configureGraph(null);
+    assert.equal(lease.current(),false);
+    await writeFile(join(root,'a.md'),graphCard('A'));
+    engine.changed('a.md');
+    assert.equal(engine.status().busy,false); // queued until physical read drains
+    gate.release();
+    await assert.rejects(work,error('GRAPH_SOURCE_STALE'));
+    reader.read=actual; await engine.whenIdle();
+    engine.configureGraph(graphMapping);
+    assert.equal((await engine.captureGraphScope(scope,signal).read()).edges.length,0);
+  } finally {gate.release();reader.read=actual;await cleanup();}
+});
+
+test('06B.2b abort, pause, rename, restart and close retire graph leases',async()=>{
+  const {root,paths,reader,store,engine,cleanup}=await setup({'a.md':graphCard('A','depends: B\n'),'b.md':graphCard('B')});
+  const abort=new AbortController(), scope={mode:'vault-wide'};
+  try {
+    engine.configureGraph(graphMapping);
+    const lease=engine.captureGraphScope(scope,abort.signal);
+    assert.equal((await lease.read()).edges.length,1);
+    abort.abort();
+    assert.equal(lease.current(),false); await assert.rejects(lease.read(),error('GRAPH_CANCELLED'));
+    const next=engine.captureGraphScope(scope,new AbortController().signal);
+    engine.cancel();assert.equal(next.current(),false);
+    assert.throws(()=>engine.captureGraphScope(scope,new AbortController().signal),error('GRAPH_UNAVAILABLE'));
+    await rename(join(root,'b.md'),join(root,'renamed.md'));
+    paths.delete('b.md');paths.add('renamed.md');
+    engine.resume();await engine.whenIdle();
+    const after=engine.captureGraphScope(scope,new AbortController().signal);
+    assert.equal((await after.read()).edges[0]?.to,'renamed.md');
+    await engine.close();assert.equal(after.current(),false);
+    const restarted=newEngine(reader,store);
+    try {
+      await restarted.start();await restarted.whenIdle();
+      assert.throws(()=>restarted.captureGraphScope(scope,new AbortController().signal),error('GRAPH_DISABLED'));
+      restarted.configureGraph(graphMapping);
+      assert.equal((await restarted.captureGraphScope(scope,new AbortController().signal).read()).edges[0]?.to,'renamed.md');
+    } finally {await restarted.close();}
+  } finally {await cleanup();}
+});
+
+test('06B.2b canonical worker reparse rejects self-consistent but forged index metadata',async()=>{
+  const {engine,reader,store,cleanup}=await setup({'a.md':graphCard('A','depends: B\n'),'b.md':graphCard('B')});
+  try {
+    await engine.close();
+    const loaded=await store.load();assert.ok(loaded.generation);
+    const docs=structuredClone(loaded.generation.documents);
+    docs[0]!.properties.find(p=>p.key==='depends')!.value='A';
+    const forged=makeGeneration(reader.rootId,docs);
+    await store.commit(forged);
+    const restarted=newEngine(reader,store);
+    try {
+      await restarted.start();await restarted.whenIdle();
+      restarted.configureGraph(graphMapping);
+      const lease=restarted.captureGraphScope({mode:'vault-wide'},new AbortController().signal);
+      await assert.rejects(lease.read(),error('GRAPH_INDEX_UNAUTHENTICATED'));
+      assert.equal(lease.current(),false);
+      // An optional graph failure cannot disable ordinary lexical search.
+      assert.equal((await restarted.search(search('synthetic'))).status,'ok');
+    } finally {await restarted.close();}
+  } finally {await cleanup();}
+});
+
+test('06B.2b cached projection rehashes entire catalog without repeated worker reparse',async()=>{
+  const {engine,reader,store,cleanup}=await setup({'a.md':graphCard('A','depends: B\n'),'b.md':graphCard('B')});
+  const parser=new WorkerMarkdownParser(join(process.cwd(),'.test-build','standalone-worker.js'),syntheticNodeWorkerPort);
+  let parses=0,reads=0;
+  const originalParse=parser.parse.bind(parser), originalRead=reader.read.bind(reader);
+  parser.parse=async(...args)=>{parses++;return originalParse(...args);};
+  reader.read=async path=>{reads++;return originalRead(path);};
+  try{
+    await engine.close();
+    const restarted=new StandaloneEngine(reader,store,parser);
+    try{
+      await restarted.start();await restarted.whenIdle();
+      restarted.configureGraph(graphMapping);
+      const lease=restarted.captureGraphScope({mode:'vault-wide'},new AbortController().signal);
+      const p0=parses,r0=reads,first=await lease.read();
+      assert.equal(parses-p0,2);assert.equal(reads-r0,4);
+      const p1=parses,r1=reads,second=await lease.read();
+      assert.equal(parses,p1);assert.equal(reads-r1,2);
+      assert.equal(first.scopedProjectionId,second.scopedProjectionId);
+      restarted.configureGraph({...graphMapping,rules:[]});
+      assert.equal(lease.current(),false);
+      const third=await restarted.captureGraphScope({mode:'vault-wide'},new AbortController().signal).read();
+      assert.equal(third.edges.length,0);assert.notEqual(third.mappingId,first.mappingId);
+    }finally{await restarted.close();}
+  }finally{reader.read=originalRead;await parser.close();await cleanup();}
+});
+
+test('06B.2b close waits for physical graph read and prevents late result',async()=>{
+  const {engine,reader,cleanup}=await setup({'a.md':graphCard('A')});
+  const actual=reader.read.bind(reader), gate=asynchronousGate();
+  try{
+    engine.configureGraph(graphMapping);
+    const lease=engine.captureGraphScope({mode:'vault-wide'},new AbortController().signal);
+    reader.read=async path=>{gate.enter();await gate.held;return actual(path);};
+    const pending=lease.read();
+    const rejected=assert.rejects(pending,error('GRAPH_SOURCE_STALE'));
+    await gate.entered;
+    let done=false;const close=engine.close().then(()=>{done=true;});
+    assert.equal(lease.current(),false);
+    await new Promise<void>(r=>setImmediate(r));assert.equal(done,false);
+    gate.release();await rejected;await close;assert.equal(done,true);
+  }finally{gate.release();reader.read=actual;await cleanup();}
+});
+
+test('06B.2b lexical response mutation cannot alter authenticated graph scope or anchors',async()=>{
+  const {engine,cleanup}=await setup({'a.md':graphCard('A','depends: B\n'),'b.md':graphCard('B')});
+  try {
+    engine.configureGraph(graphMapping);
+    const lease=engine.captureGraphScope({mode:'vault-wide'},new AbortController().signal);
+    const initial=await lease.read();
+    const hit=(await engine.search(search('synthetic'))).hits[0]!;
+    hit.properties.find(p=>p.key==='id')!.value='FORGED';
+    hit.sourceLocators[0]!.byteStart=0;
+    const next=await lease.read();
+    assert.equal(next.scopedProjectionId,initial.scopedProjectionId);
+    const scope=engine.captureGraphScope({mode:'selected',kind:'properties',
+      predicates:[{key:'id',valueType:'string',value:'A',operator:'eq'}]},new AbortController().signal);
+    assert.deepEqual((await scope.read()).nodes.map(n=>n.sourceId),['a.md']);
+  } finally {await cleanup();}
+});

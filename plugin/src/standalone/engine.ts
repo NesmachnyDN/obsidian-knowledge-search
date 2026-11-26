@@ -1,5 +1,5 @@
 import {
-  BOUNDS, PROTOCOL, StandaloneError, hash, makeGeneration, matches, validPath, validateRequest,
+  BOUNDS, PROTOCOL, StandaloneError, hash, generationId, makeGeneration, matches, validPath, validateRequest,
   type IndexGeneration, type SearchRequest, type SearchResponse, type EvidenceHit, type SourceVersion,
   type ParsedBlock,
 } from './contracts';
@@ -14,6 +14,10 @@ import { ProviderFailure, type CallContext } from '../ai/contracts';
 import type { PolicyMetadataProof } from './shared';
 import type { SourceProvider } from './source';
 import type { GenerationStore } from './storage';
+import { validateGraphMapping, type GraphMapping } from './graph-mapping';
+import type { GraphProjection } from './graph-projection';
+import { authenticateGraphCatalog, buildAuthenticatedGraph, scopeGraph, type GraphScopeLease,
+  type ScopedGraphSnapshot } from './graph-lifecycle';
 
 export type EngineState = {
   status: 'initializing' | 'ready' | 'degraded' | 'failed' | 'unavailable';
@@ -45,7 +49,11 @@ export class StandaloneEngine {
   private state: EngineState = { status: 'unavailable', generationId: null, sources: 0, records: 0,
     error: null, maintenanceWarning: null, busy: false };
   private work: Promise<void> | null = null;
-  private policyRead: Promise<unknown> | null = null;
+  // One shared physical slot for parser-backed local policy/graph operations.
+  private localRead: Promise<unknown> | null = null;
+  private graphMapping: GraphMapping | null = null;
+  private graphRevision = 0;
+  private graphCache: GraphProjection | null = null;
   private pending = new Set<string>();
   private all = false;
   private revision = 0;
@@ -64,7 +72,12 @@ export class StandaloneEngine {
     if (provider.rootId !== store.rootId) throw new StandaloneError('VAULT_IDENTITY_CHANGED');
   }
   status(): EngineState { return { ...this.state }; }
+  private retireGraph(): void {
+    this.graphRevision++;
+    this.graphCache = null;
+  }
   private recordState(status: EngineState['status'], error: string | null): void {
+    if (status !== 'ready') this.retireGraph();
     this.state = {
       status, error, maintenanceWarning: this.maintenanceWarning,
       generationId: this.generation?.generationId ?? null,
@@ -98,6 +111,7 @@ export class StandaloneEngine {
   changed(path?: string): void {
     if (this.stopped) return;
     this.revision++;
+    this.retireGraph();
     this.enqueueChange(path);
     this.schedule();
   }
@@ -123,6 +137,7 @@ export class StandaloneEngine {
   // boundary: pause later jobs, but never claim that committed work was canceled.
   cancel(): boolean {
     this.paused = true;
+    this.retireGraph();
     this.pending.clear(); this.all = false;
     if (this.publishing) {
       this.recordState(this.generation ? 'degraded' : 'unavailable', 'CANCEL_DEFERRED');
@@ -138,7 +153,7 @@ export class StandaloneEngine {
     this.reconcile();
   }
   private schedule(): void {
-    if (!this.initialized || this.stopped || this.paused || this.work || this.policyRead) return;
+    if (!this.initialized || this.stopped || this.paused || this.work || this.localRead) return;
     this.work = this.run().catch(error => {
       this.recordState(this.generation ? 'degraded' : 'failed', code(error));
     }).finally(() => {
@@ -149,15 +164,15 @@ export class StandaloneEngine {
     this.state.busy = true;
   }
   async whenIdle(): Promise<void> {
-    while (this.work||this.policyRead) {
-      if(this.work)await this.work;else await this.policyRead?.catch(()=>{});
+    while (this.work||this.localRead) {
+      if(this.work)await this.work;else await this.localRead?.catch(()=>{});
     }
   }
   /** Local preview only. Share the existing worker and hold the physical slot
    * through late read/parser completion; a timeout never publishes a proof. */
   previewPolicyMetadata(path:string,current:()=>boolean):Promise<PolicyMetadataProof> {
     const parser=this.parser as MarkdownParser & Partial<PolicyMetadataParser>;
-    if(this.stopped||!this.initialized||this.paused||this.work||this.policyRead||!validPath(path)||!parser.policyMetadata)
+    if(this.stopped||!this.initialized||this.paused||this.work||this.localRead||!validPath(path)||!parser.policyMetadata)
       return Promise.reject(new StandaloneError('PARSER_BUSY'));
     const revision=this.revision,root=this.provider.rootId;
     let expired=false;
@@ -171,8 +186,8 @@ export class StandaloneEngine {
         throw new StandaloneError('SOURCE_CHANGED');
       check();return proof;
     });
-    this.policyRead=physical;
-    const drain=()=>{if(this.policyRead===physical){this.policyRead=null;
+    this.localRead=physical;
+    const drain=()=>{if(this.localRead===physical){this.localRead=null;
       if(!this.stopped&&!this.paused&&(this.all||this.pending.size))this.schedule();}};
     void physical.then(drain,drain);
     return new Promise((resolve,reject)=>{
@@ -183,7 +198,7 @@ export class StandaloneEngine {
   /** One existing worker/source owner, shared with lexical indexing and dry-run. */
   evaluateProcessingPolicy(host:PolicyHost,context:CallContext):Promise<PolicyEnvelope>{
     const parser=this.parser as MarkdownParser & Partial<PolicyMetadataParser>;
-    if(this.stopped||!this.initialized||this.paused||this.work||this.policyRead||!parser.policyMetadata)
+    if(this.stopped||!this.initialized||this.paused||this.work||this.localRead||!parser.policyMetadata)
       return Promise.reject(new ProviderFailure('BUSY'));
     const revision=this.revision;
     const live=()=>!this.stopped&&!this.paused&&this.revision===revision;
@@ -192,8 +207,8 @@ export class StandaloneEngine {
       {snapshot:()=>host.snapshot(),current,...(host.marking?{marking:(proof:PolicyMetadataProof)=>host.marking!(proof)}:{})});
     const result=Promise.resolve().then(()=>evaluator.evaluate(context));
     const physical=result.then(()=>evaluator.drain(),()=>evaluator.drain());
-    this.policyRead=physical;
-    const release=()=>{if(this.policyRead===physical){this.policyRead=null;
+    this.localRead=physical;
+    const release=()=>{if(this.localRead===physical){this.localRead=null;
       if(!this.stopped&&!this.paused&&(this.all||this.pending.size))this.schedule();}};
     void physical.then(release,release);
     return result.then(async envelope=>{
@@ -202,7 +217,84 @@ export class StandaloneEngine {
       return envelope;
     });
   }
-  processingPolicyDrain():Promise<void>{return (this.policyRead??Promise.resolve()).then(()=>{},()=>{});}
+  processingPolicyDrain():Promise<void>{return (this.localRead??Promise.resolve()).then(()=>{},()=>{});}
+  /** Explicit internal host configuration. Invalid or null input revokes the
+   * prior graph; ordinary lexical search is unchanged. */
+  configureGraph(input: unknown): void {
+    if (this.stopped) throw new StandaloneError('LIFECYCLE_INVALID');
+    this.retireGraph();
+    this.graphMapping = null;
+    if (input === null) return;
+    const mapping = validateGraphMapping(input);
+    if ('code' in mapping) throw new StandaloneError(mapping.code);
+    this.graphMapping = mapping;
+  }
+  captureGraphScope(input: unknown, signal: AbortSignal): GraphScopeLease {
+    const selector = parseScopeSelector(input);
+    if (selector.mode==='selected' && selector.kind==='editor-selection')
+      throw new StandaloneError('GRAPH_SCOPE_UNSUPPORTED');
+    const gen = this.generation, mapping = this.graphMapping, revision = this.graphRevision;
+    if (!mapping) throw new StandaloneError('GRAPH_DISABLED');
+    if (!gen || this.stopped || this.paused || this.state.status!=='ready'
+      || this.work || this.all || this.pending.size || this.store.isPublicationUncertain())
+      throw new StandaloneError('GRAPH_UNAVAILABLE');
+    let retired = false;
+    const current = (): boolean => {
+      if (!retired && (signal.aborted || this.stopped || this.paused || this.graphRevision!==revision
+        || this.generation!==gen || this.graphMapping!==mapping || this.state.status!=='ready'
+        || this.work || this.all || this.pending.size || this.store.isPublicationUncertain())) retired=true;
+      return !retired;
+    };
+    const check = (): void => {
+      if (!current()) throw new StandaloneError(signal.aborted?'GRAPH_CANCELLED':'GRAPH_SOURCE_STALE');
+    };
+    check();
+    const read = async (): Promise<ScopedGraphSnapshot> => {
+      check();
+      if (this.localRead) throw new StandaloneError('GRAPH_BUSY');
+      // Reserve synchronously before starting any asynchronous source read.
+      const physical = Promise.resolve().then(async () => {
+        try {
+          check();
+          const cached = this.graphCache;
+          let graph: GraphProjection;
+          if (cached) {
+            await authenticateGraphCatalog(gen,this.provider,this.parser,false,check,this.yieldJob);
+            graph = cached;
+          } else {
+            graph = await buildAuthenticatedGraph(gen,mapping,this.provider,this.parser,current,check,this.yieldJob);
+          }
+          check();
+          // Graph reuse must never trust a mutated in-memory parsed record.
+          if (graph.lexicalGenerationId!==gen.generationId || generationId(gen.rootId,gen.documents)!==gen.generationId)
+            throw new StandaloneError('GRAPH_INDEX_UNAUTHENTICATED');
+          const snapshot = scopeGraph(gen,mapping,graph,selector);
+          check();
+          this.graphCache = graph;
+          return snapshot;
+        } catch (error) {
+          retired = true;
+          if (this.graphRevision===revision) {
+            this.retireGraph();
+            if (error instanceof StandaloneError && error.code==='GRAPH_SOURCE_STALE'
+              && !signal.aborted && !this.stopped && !this.paused) this.reconcile();
+          }
+          throw error;
+        }
+      });
+      this.localRead = physical;
+      const release = () => {
+        if (this.localRead===physical) {
+          this.localRead=null;
+          if (!this.stopped && !this.paused && (this.all || this.pending.size)) this.schedule();
+        }
+      };
+      void physical.then(release,release);
+      const snapshot = await physical;
+      check(); return snapshot;
+    };
+    return Object.freeze({current,read});
+  }
   private async run(): Promise<void> {
     const revision = this.revision;
     const full = this.all || !this.generation;
@@ -581,10 +673,10 @@ export class StandaloneEngine {
         }
         const hit: EvidenceHit = {
           sourceId: row.doc.sourceId, sourceSha256: row.doc.sha256, originalExcerpt: original,
-          sourceLocators: [loc], rank: hits.length + 1, lexicalRank: hits.length + 1,
+          sourceLocators: [{...loc}], rank: hits.length + 1, lexicalRank: hits.length + 1,
           retrievalMode: 'lexical', indexGenerationId: gen.generationId, score: row.score,
           headings: range ? [] : [...row.block.headings], wikiLinks: [...row.block.wikiLinks],
-          properties: range ? [] : row.doc.properties,
+          properties: range ? [] : structuredClone(row.doc.properties),
         };
         if (range) {
           if (hit.sourceId !== range.sourceId || !containsLocator(range,loc)) throw new StandaloneError('EVIDENCE_INCOMPLETE');
@@ -619,11 +711,12 @@ export class StandaloneEngine {
   }
   async close(): Promise<void> {
     this.stopped = true;
+    this.retireGraph();
     this.revision++;
     this.pending.clear(); this.all = false;
     await this.parser.close(); // Interrupt CPU-bound parse immediately on unload.
     if (this.work) await this.work;
-    if(this.policyRead)await this.policyRead.catch(()=>{});
+    if(this.localRead)await this.localRead.catch(()=>{});
     this.recordState('unavailable', 'LIFECYCLE_INVALID');
   }
 }
