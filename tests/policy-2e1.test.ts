@@ -169,3 +169,16 @@ test('folder deletion or uncertainty seals descendants even for a Markdown-suffi
   assert.equal(tracker.retire(c,{kind:'delete',sequence:1},'folder.md','folder'),false);
   assert.equal(tracker.observeCreate(c,owner,{kind:'create',sequence:2},proof(c,'folder.md/a.md')),'unresolved');
 });
+
+test('descriptor lifecycle proof rejects unsupported nonpositive birth time before identity derivation',async()=>{
+  // Deterministic fault injection into this isolated reader instance only.
+  // This is a unit failure-path test, not a claim about a real filesystem.
+  const root=await mkdtemp(join(tmpdir(),'oks-lifecycle-birth-negative-'));
+  try{
+    const reader=await BoundedVaultReader.open(root,()=>[]);
+    for(const birthtimeNs of [0n,-1n]){
+      Object.defineProperty(reader,'readOriginal',{configurable:true,value:async()=>({info:{birthtimeNs}})});
+      await assert.rejects(reader.readLifecycleProof('a.md'),{code:'LIFECYCLE_IDENTITY_UNSUPPORTED'});
+    }
+  }finally{await rm(root,{recursive:true,force:true});}
+});
