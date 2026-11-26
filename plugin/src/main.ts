@@ -3,6 +3,7 @@ import { GenerationCredentialAuthority } from './ai/generation-credential';
 import { GenerationPolicyGate,policyOriginals, type ProcessingPolicyInput } from './ai/generation-policy';
 import { configDigest } from './ai/disclosure';
 import { NewMaterialTracker } from './ai/new-material-tracker';
+import { NativeLifecycleOwner } from './ai/native-lifecycle-owner';
 import { decideNewMaterialMarking, type NewMaterialRuleConfig, type NewMaterialDecision } from './ai/new-material-policy';
 import { DenseMachine } from './ai/dense-machine';
 import { DenseUiController } from './ai/dense-ui-controller';
@@ -23,7 +24,7 @@ import { StandaloneEngine } from './standalone/engine';
 import { BoundedVaultReader, privateIndexPath } from './standalone/source';
 import { GenerationStore } from './standalone/storage';
 import { WorkerMarkdownParser } from './standalone/worker';
-import { StandaloneError, type EvidenceHit } from './standalone/contracts';
+import { hash, StandaloneError, type EvidenceHit } from './standalone/contracts';
 import { join, resolve } from 'node:path';
 import { SearchController, StandaloneApi } from './search/controller';
 import { purgeDerivedIndex } from './search/purge';
@@ -56,6 +57,12 @@ const advancedBarriers = advancedHost[advancedBarrierKey] ??= new Map<string, Pr
 const ingestionBarrierKey = Symbol.for('oks.ingestion.close-barriers.v1');
 const ingestionHost = globalThis as typeof globalThis & { [ingestionBarrierKey]?: Map<string, Promise<void>> };
 const ingestionBarriers = ingestionHost[ingestionBarrierKey] ??= new Map<string, Promise<void>>();
+// Restored lifecycle authority has its own durable kernel lock.  This in-memory
+// barrier additionally prevents a reload from even attempting replacement
+// ownership while the prior native owner is still draining.
+const lifecycleBarrierKey = Symbol.for('oks.policy.lifecycle-owner.close-barriers.v1');
+const lifecycleHost = globalThis as typeof globalThis & { [lifecycleBarrierKey]?: Map<string, Promise<void>> };
+const lifecycleBarriers = lifecycleHost[lifecycleBarrierKey] ??= new Map<string, Promise<void>>();
 
 // A reload must not read a settings snapshot while the old instance can
 // still persist a different configuration. Scope to the same Vault/plugin.
@@ -82,6 +89,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private retiringNavigator?: SourceNavigator<TFile>;
   private sourceReader?: BoundedVaultReader;
   private readonly markingTracker=new NewMaterialTracker<TFile>();
+  private lifecycleOwner?: {owner:NativeLifecycleOwner<TFile>;key:string};
   private denseHost?: ApiDenseHost;
   private denseSettingsChanging = false;
   // Retain the last completely applied runtime configuration until a
@@ -138,11 +146,11 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private policyHostState(input:Pick<ProcessingPolicyInput<'generation'|'reranking'|'embedding'>,'role'|'scopeId'|'scopeSources'|'sources'>):GenerationPolicyHostState|null {
     const config=this.settings.ai[input.role],reader=this.sourceReader;
     if(this.unloaded||this.denseSettingsChanging||!reader||reader.rootId!==input.scopeId||config.state!=='configured')return null;
-    const materials=policyOriginals(input).map(source=>{
-      const file=this.app.vault.getAbstractFileByPath(source.sourceId);
-      const state=file instanceof TFile&&file.path===source.sourceId?this.markingTracker.state(source.sourceId,file):'unresolved' as const;
-      return {lifecycle:{state,sourceId:source.sourceId,sha256:source.sourceSha256,rootId:reader.rootId},provenance:null};
-    });
+    // The prospective shared policy has no fresh descriptor proof at this
+    // synchronous boundary. Never substitute ephemeral dry-run provenance.
+    const materials=policyOriginals(input).map(source=>({
+      lifecycle:{state:'unresolved' as const,sourceId:source.sourceId,sha256:source.sourceSha256,rootId:reader.rootId},provenance:null,
+    }));
     return {config,profile:null,adapter:'unadmitted-cloud',policyRevision:String(this.searchController.sourceAuthorityRevision()),
       configRevision:configDigest(input.role,config),restrictions:[],rules:this.settings.markingRules,materials,complete:true};
   }
@@ -259,6 +267,9 @@ export default class SyntheticEvidencePlugin extends Plugin {
     // a full authoritative reconciliation after the event handlers are registered.
     const nativeChange = (file: TAbstractFile, oldPath?: string, fixtureChange = false, event: 'create'|'modify'|'delete'|'rename'|'metadata' = 'metadata'): void => {
       if (this.unloaded) return;
+      // Do this before consulting paths or notifying any other observer.  A
+      // native event is not yet an accepted exact-version transition.
+      this.retireLifecycleOwner();
       const paths = oldPath === undefined ? [file.path] : [file.path, oldPath];
       if(this.layoutReady&&file instanceof TFile&&this.app.vault.getAbstractFileByPath(file.path)===file){
         if(event==='create')this.markingTracker.created(file.path,file);
@@ -420,6 +431,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
         return;
       }
       this.denseSettingsChanging = true;
+      this.retireLifecycleOwner();
       try {
         // Revoke graph leases before any persistence or synchronous observers.
         this.standalone?.configureGraph(null);
@@ -540,6 +552,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     return purgeDerivedIndex(dir, provider.rootId, dir);
   }
   async controlSearch(action: 'pause' | 'cancel' | 'resume' | 'rebuild'): Promise<void> {
+    this.retireLifecycleOwner();
     const retiringHost = this.denseHost;
     const result = this.searchController.control(action, retiringHost);
     if (!result.ok) { new Notice(`OKS: ${result.error}`); return; }
@@ -780,6 +793,8 @@ export default class SyntheticEvidencePlugin extends Plugin {
       this.standalone = engine;
       this.navigator = obsidianNavigator(this.app, provider, () => this.searchController.sharedAuthorityTransition());
       this.sourceReader = provider;
+      try { this.startLifecycleOwner(provider, root, revision); }
+      catch { this.retireLifecycleOwner(); /* optional authority remains unavailable */ }
       this.attachDenseHost();
       this.searchController.attach(engine);
       await engine.start();
@@ -835,6 +850,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private async stopStandalone(): Promise<void> {
     const navigator=this.navigator, engine=this.standalone, rootId=this.rootId;
     this.navigator=undefined;this.sourceReader=undefined;this.standalone=undefined;
+    const lifecycle=this.reserveLifecycleClose();
     // Reserve Basic's writer barrier before any callback; retain rejected
     // close, never substitute a new owner for an ambiguous old writer.
     let complete!:(value:PromiseLike<void>)=>void,fail!:(error:unknown)=>void;
@@ -852,9 +868,64 @@ export default class SyntheticEvidencePlugin extends Plugin {
     if(engine){
       try {complete(engine.close());}catch(error){fail(error);}
     }
+    lifecycle.start();
+    // The optional lifecycle drain is tracked separately: its failure or
+    // latency cannot block the Basic engine's physical shutdown/restart.
+    void lifecycle.drain.catch(()=>{});
     const results=await Promise.allSettled([closing,drain]);
     if(failure||results.some(result=>result.status==='rejected'))
       throw new StandaloneError('INTERNAL_FAILURE');
+  }
+  private startLifecycleOwner(reader:BoundedVaultReader,root:string,revision:number):void {
+    const vault=this.app.vault,adapter=vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter) || this.unloaded || this.sourceReader!==reader
+        || adapter.getBasePath()!==root || this.lifecycleOwner) return;
+    const owner=new NativeLifecycleOwner(this.markingTracker);
+    const rootPath=resolve(root),pluginId=this.manifest.id;
+    const key=JSON.stringify([rootPath,pluginId]);
+    const binding={owner,key};
+    this.lifecycleOwner=binding;
+    const rulesRevision=hash(JSON.stringify(this.settings.markingRules??null));
+    // Optional restoration may wait for a prior lifecycle drain, never for
+    // Basic Search. Capture the owner before any asynchronous work begins.
+    void owner.start({
+      context:{rootId:reader.rootId,scopeId:reader.rootId,rulesRevision,host:this,session:{}},
+      reader,rootPath,pluginId,priorDrain:lifecycleBarriers.get(key),
+      current:()=>!this.unloaded&&this.layoutReady&&this.settings.enabled&&!this.denseSettingsChanging
+        &&this.lifecycleRevision===revision&&this.sourceReader===reader&&this.app.vault===vault
+        &&vault.adapter===adapter&&adapter.getBasePath()===root&&this.manifest.id===pluginId
+        &&hash(JSON.stringify(this.settings.markingRules??null))===rulesRevision&&this.lifecycleOwner===binding,
+      resolveNativeOwner:path=>{
+        const file=vault.getAbstractFileByPath(path);
+        return file instanceof TFile&&file.path===path?file:null;
+      },
+    }).catch(()=>{/* any failed release remains in the owner's drain */});
+  }
+  private retireLifecycleOwner():void {
+    const owner=this.lifecycleOwner?.owner;
+    owner?.retire();
+    void owner?.close().catch(()=>{});
+  }
+  private reserveLifecycleClose():{start:()=>void;drain:Promise<void>} {
+    const binding=this.lifecycleOwner;
+    this.lifecycleOwner=undefined;
+    if(!binding)return {start:()=>{},drain:Promise.resolve()};
+    const {owner,key}=binding;
+    let begin!:(value:PromiseLike<void>)=>void,fail!:(reason:unknown)=>void;
+    const drain=new Promise<void>((resolve,reject)=>{begin=resolve;fail=reject;});
+    const prior=lifecycleBarriers.get(key);
+    // Retain a previous drain, including failure, rather than overwriting it
+    // with an owner that never obtained the underlying lock.
+    const barrier=Promise.all([prior,drain]).then(()=>undefined);
+    lifecycleBarriers.set(key,barrier);
+    void barrier.then(()=>{if(lifecycleBarriers.get(key)===barrier)lifecycleBarriers.delete(key);},()=>{});
+    owner.retire();
+    let started=false;
+    return {drain,start:()=>{
+      if(started)return;
+      started=true;
+      try{begin(owner.close());}catch(error){fail(error);}
+    }};
   }
   private async runProbe(): Promise<void> {
     if (this.unloaded) return;
@@ -875,6 +946,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     // Commit one irreversible terminal boundary across all search authorities
     // before any host, abort, view or observer callback is allowed to run.
     this.unloaded = true;
+    this.retireLifecycleOwner();
     this.markingTracker.clear();
     this.lifecycleRevision++;
     this.denseUi.authority.sealTerminal();

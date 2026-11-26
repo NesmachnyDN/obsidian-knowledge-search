@@ -44,6 +44,12 @@ fi
 if [[ "${OKS_06B4_HOST_TEST:-0}" == 1 && "${OKS_06B_GRAPH_TEST:-0}" != 1 ]]; then
   echo "HOST_SMOKE_FAILURE: graph stress requires isolated graph mode" >&2; exit 2
 fi
+# Native restoration acceptance additionally requires the real-UID isolated mode.
+if [[ "${OKS_POLICY_2E3C_TEST:-0}" == 1 ]]; then
+  [[ "${OKS_POLICY_2E3A_TEST:-0}" == 1 && "${OKS_POLICY_2E3A_NO_IP:-0}" == 1 ]] ||
+    { echo "HOST_SMOKE_FAILURE: production lifecycle test requires isolated real-UID lifecycle mode" >&2; exit 2; }
+  export OKS_POLICY_2E3C_TEST
+fi
 # POLICY.2e3a evidence-only test; never combine with another host scenario.
 # Direct-IP denial is a separate, test-only fallback preserving real system UIDs.
 if [[ "${OKS_POLICY_2E3A_NO_IP:-0}" == 1 ]]; then
@@ -234,6 +240,16 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
     [[ "$lifecycle" == *"OBSIDIAN_POLICY_2E3A_PASS:"* ]] ||
       { echo "HOST_SMOKE_FAILURE: lifecycle capability ($lifecycle)" >&2; exit 1; }
     printf "%s\n" "$lifecycle"
+    if [[ "${OKS_POLICY_2E3C_TEST:-0}" == 1 ]]; then
+      for phase in rules modify changed; do
+        timeout 8s "$cli" plugin:reload id=oks-synthetic-evidence >/dev/null
+        sleep 3
+        production="$(timeout 20s "$cli" eval "code=$(cat "$repo/scripts/obsidian-lifecycle-production-smoke.js")(\"$phase\")")"
+        [[ "$production" == *"OBSIDIAN_POLICY_2E3C_PASS: $phase"* ]] ||
+          { echo "HOST_SMOKE_FAILURE: production lifecycle ($production)" >&2; exit 1; }
+        printf "%s\n" "$production"
+      done
+    fi
     exit 0
   fi
   if [[ "${OKS_NATIVE_CHAT_TEST:-0}" == 1 ]]; then
