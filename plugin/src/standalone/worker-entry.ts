@@ -1,4 +1,4 @@
-import { parseWithDigest } from './markdown-parse';
+import { parseWithDigest, parsePolicyMetadata } from './markdown-parse';
 import { StandaloneError } from './shared';
 // Browser Web Worker; this bundle must contain no Node import, no filesystem API,
 // no network call and no dynamically generated document code.
@@ -19,8 +19,14 @@ scope.onmessage = event => {
       || typeof message.rootId !== 'string' || !/^[a-f0-9]{64}$/.test(String(message.sha))
       || !(message.bytes instanceof Uint8Array))
       throw new StandaloneError('PARSER_PROTOCOL_ERROR');
-    const doc = parseWithDigest(message.path, message.bytes, message.rootId, message.sha as string);
-    scope.postMessage({ id, doc });
+    if(message.kind==='policy-metadata') {
+      const proof=parsePolicyMetadata(message.path,message.bytes,message.rootId,message.sha as string);
+      scope.postMessage({id,proof});
+    } else {
+      if(message.kind!==undefined)throw new StandaloneError('PARSER_PROTOCOL_ERROR');
+      const doc = parseWithDigest(message.path, message.bytes, message.rootId, message.sha as string);
+      scope.postMessage({ id, doc });
+    }
   } catch (error) {
     scope.postMessage({ id, error: error instanceof StandaloneError ? error.code : 'PARSER_FAILURE' });
   }

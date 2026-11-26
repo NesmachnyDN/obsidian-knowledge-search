@@ -52,11 +52,10 @@
     // receive the fourth snapshot synchronously, before polling or any timer.
     const genCount=()=>Number(require('node:fs').readFileSync(require('node:path').join(app.vault.adapter.getBasePath(),'..','rerank-ready.generation-count'),'utf8'));
     const genInitial=genCount();
-    click('.oks-generation-prepare');set('.oks-generation-token','fixture-success');
+    click('.oks-generation-prepare');set('.oks-generation-token','fixture-success');const genToken=el('.oks-generation-token');click('.oks-generation-bind');
     set('.oks-generation-classification','synthetic','change');
     const genCheck=el('.oks-generation-confirm-check');
     genCheck.checked=true;genCheck.dispatchEvent(new Event('change',{bubbles:true}));
-    const genToken=el('.oks-generation-token');
     assert(!el('.oks-generation-confirm').disabled,'WAVE_ARMED');
     click('.oks-rerank-prepare');
     let step=0,depth=0,maxDepth=0;

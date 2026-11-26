@@ -4,9 +4,14 @@ import {
   type ParsedBlock,
 } from './contracts';
 import { terms } from './markdown';
+import { containsLocator, verifyOriginalRange } from './selection-range';
+import { freezeScope, parseScopeSelector, resolveScope, type ScopedSearch, type ScopeSnapshot } from './chat-scope';
 import { metadataAnchor } from './metadata';
 import { verifySpan } from '../search/navigation';
-import type { MarkdownParser } from './worker';
+import type { MarkdownParser, PolicyMetadataParser } from './worker';
+import { EligibilityEvaluator, type PolicyHost, type PolicyEnvelope } from '../ai/processing-policy';
+import { ProviderFailure, type CallContext } from '../ai/contracts';
+import type { PolicyMetadataProof } from './shared';
 import type { SourceProvider } from './source';
 import type { GenerationStore } from './storage';
 
@@ -21,6 +26,13 @@ export type SelectedCorpus = {
   current(): boolean; verify(hit: EvidenceHit): Promise<void>;
   metadataPaths(request: SearchRequest, lexicalGenerationId: string, selectedPaths: readonly string[]): readonly string[];
 };
+/** A host-local retrieval lease. It carries no generation/disclosure authority. */
+export type ChatScopeLease = {
+  snapshot: Readonly<ScopeSnapshot>;
+  current():boolean;
+  verify():Promise<void>;
+  search(request:ScopedSearch):Promise<SearchResponse>;
+};
 // Query-driven bounded audit; no recurring timer or hidden background scanner.
 // lstat-based hints detect normal misses immediately. Unchanged hints are never
 // treated as a cryptographic guarantee: full source hashes are rechecked at most
@@ -33,6 +45,7 @@ export class StandaloneEngine {
   private state: EngineState = { status: 'unavailable', generationId: null, sources: 0, records: 0,
     error: null, maintenanceWarning: null, busy: false };
   private work: Promise<void> | null = null;
+  private policyRead: Promise<unknown> | null = null;
   private pending = new Set<string>();
   private all = false;
   private revision = 0;
@@ -121,7 +134,7 @@ export class StandaloneEngine {
     this.reconcile();
   }
   private schedule(): void {
-    if (!this.initialized || this.stopped || this.paused || this.work) return;
+    if (!this.initialized || this.stopped || this.paused || this.work || this.policyRead) return;
     this.work = this.run().catch(error => {
       this.recordState(this.generation ? 'degraded' : 'failed', code(error));
     }).finally(() => {
@@ -132,7 +145,58 @@ export class StandaloneEngine {
     this.state.busy = true;
   }
   async whenIdle(): Promise<void> {
-    while (this.work) await this.work;
+    while (this.work||this.policyRead) {
+      if(this.work)await this.work;else await this.policyRead?.catch(()=>{});
+    }
+  }
+  /** Local preview only. Share the existing worker and hold the physical slot
+   * through late read/parser completion; a timeout never publishes a proof. */
+  previewPolicyMetadata(path:string,current:()=>boolean):Promise<PolicyMetadataProof> {
+    const parser=this.parser as MarkdownParser & Partial<PolicyMetadataParser>;
+    if(this.stopped||!this.initialized||this.paused||this.work||this.policyRead||!validPath(path)||!parser.policyMetadata)
+      return Promise.reject(new StandaloneError('PARSER_BUSY'));
+    const revision=this.revision,root=this.provider.rootId;
+    let expired=false;
+    const live=()=>!expired&&!this.stopped&&!this.paused&&this.revision===revision;
+    const check=()=>{if(!live()||!current()||!live())throw new StandaloneError('SOURCE_CHANGED');};
+    const physical=Promise.resolve().then(async()=>{
+      check();const bytes=await this.provider.read(path);check();
+      if(bytes.byteLength>BOUNDS.fileBytes)throw new StandaloneError('SOURCE_LIMIT');
+      const sha=hash(bytes),proof=await parser.policyMetadata!(path,bytes,root);check();
+      if(proof.sourceId!==path||proof.sha256!==sha||proof.scopeId!==root||hash(await this.provider.read(path))!==sha)
+        throw new StandaloneError('SOURCE_CHANGED');
+      check();return proof;
+    });
+    this.policyRead=physical;
+    const drain=()=>{if(this.policyRead===physical){this.policyRead=null;
+      if(!this.stopped&&!this.paused&&(this.all||this.pending.size))this.schedule();}};
+    void physical.then(drain,drain);
+    return new Promise((resolve,reject)=>{
+      const timer=setTimeout(()=>{expired=true;reject(new StandaloneError('PARSER_TIMEOUT'));},5000);
+      physical.then(value=>{clearTimeout(timer);if(!expired){try{check();resolve(value);}catch(error){reject(error);}}},error=>{clearTimeout(timer);reject(error);});
+    });
+  }
+  /** One existing worker/source owner, shared with lexical indexing and dry-run. */
+  evaluateProcessingPolicy(host:PolicyHost,context:CallContext):Promise<PolicyEnvelope>{
+    const parser=this.parser as MarkdownParser & Partial<PolicyMetadataParser>;
+    if(this.stopped||!this.initialized||this.paused||this.work||this.policyRead||!parser.policyMetadata)
+      return Promise.reject(new ProviderFailure('BUSY'));
+    const revision=this.revision;
+    const live=()=>!this.stopped&&!this.paused&&this.revision===revision;
+    const current=()=>live()&&host.current()&&live();
+    const evaluator=new EligibilityEvaluator(this.provider,{policyMetadata:(path,bytes,root)=>parser.policyMetadata!(path,bytes,root)},
+      {snapshot:()=>host.snapshot(),current,...(host.marking?{marking:(proof:PolicyMetadataProof)=>host.marking!(proof)}:{})});
+    const result=Promise.resolve().then(()=>evaluator.evaluate(context));
+    const physical=result.then(()=>evaluator.drain(),()=>evaluator.drain());
+    this.policyRead=physical;
+    const release=()=>{if(this.policyRead===physical){this.policyRead=null;
+      if(!this.stopped&&!this.paused&&(this.all||this.pending.size))this.schedule();}};
+    void physical.then(release,release);
+    return result.then(async envelope=>{
+      if(!evaluator.physicallyPending)await physical;
+      if(envelope.allowed&&!current())throw new ProviderFailure('CANCELLED');
+      return envelope;
+    });
   }
   private async run(): Promise<void> {
     const revision = this.revision;
@@ -293,9 +357,87 @@ export class StandaloneEngine {
     return {rootId:gen!.rootId,lexicalGenerationId:gen!.generationId,
       evidence:structuredClone(evidence),current,verify,metadataPaths};
   }
+  /** Capture explicit membership on the same authenticated lexical generation. */
+  async captureChatScope(input:unknown,signal:AbortSignal):Promise<ChatScopeLease> {
+    const selector=parseScopeSelector(input);
+    const gen=this.generation, revision=this.revision;
+    let retired=false, searching=false, verifying=false;
+    const current=():boolean=>{
+      if(!retired&&(signal.aborted||this.stopped||this.paused||this.revision!==revision
+        ||gen===null||this.generation!==gen||this.state.status!=='ready'||this.work||this.store.isPublicationUncertain()))retired=true;
+      return !retired;
+    };
+    const check=():void=>{if(!current())throw new StandaloneError(signal.aborted?'CANCELLED':'SCOPE_CHANGED');};
+    const retire=(reason:string):never=>{retired=true;throw new StandaloneError(reason);};
+    check();
+    const {sources,coverage}=resolveScope(selector,gen!.documents);
+    const snapshot=freezeScope({selector,rootId:gen!.rootId,generationId:gen!.generationId,sources,coverage});
+    const range=selector.mode==='selected'&&selector.kind==='editor-selection'?selector.range:undefined;
+    const properties=selector.mode==='selected'&&selector.kind==='properties'?selector:undefined;
+    // A previously excluded source can enter a bulk selector after an edit.
+    // Authenticate the complete bounded decision universe, not only returned IDs.
+    const decisionDocs=selector.mode==='vault-wide'||properties?gen!.documents
+      :selector.kind==='folder'?gen!.documents.filter(doc=>doc.sourceId.startsWith(selector.path+'/')):sources.map(source=>({sourceId:source.sourceId,sha256:source.sourceSha256}));
+    const membership=async():Promise<void>=>{
+      check();
+      const live=await this.provider.list();check();
+      if(live.length!==gen!.documents.length||live.some((path,i)=>path!==gen!.documents[i]?.sourceId))
+        retire('SCOPE_CHANGED');
+    };
+    const versions=new Map(sources.map(source=>[source.sourceId,source.sourceSha256]));
+    const verify=async(hits:readonly EvidenceHit[]=[]):Promise<void>=>{
+      try{
+        await membership();check();
+        for(const doc of decisionDocs){
+          check();
+          const bytes=await this.provider.read(doc.sourceId);check();
+          if(hash(bytes)!==doc.sha256)retire('SCOPE_CHANGED');
+          if(range)verifyOriginalRange(range,bytes);
+          for(const hit of hits)if(hit.sourceId===doc.sourceId)verifySpan(hit,bytes);
+        }
+        await membership();check();
+      }catch(error){
+        if(signal.aborted)retire('CANCELLED');
+        if(error instanceof StandaloneError&&error.code==='INVALID_REQUEST')retire('SCOPE_INVALID');
+        retire('SCOPE_CHANGED');
+      }
+    };
+    const search=async(input:ScopedSearch):Promise<SearchResponse>=>{
+      check();
+      if(searching||verifying)throw new StandaloneError('BUSY');
+      // Copy only the query parameters; the lease itself supplies every scope field.
+      if(!input||typeof input.query!=='string'||!input.query.trim()
+        ||Object.keys(input).some(k=>!['requestId','query','limit','matchMode'].includes(k)))
+        throw new StandaloneError('SCOPE_INVALID');
+      const request:SearchRequest={protocolVersion:PROTOCOL,requestId:input.requestId,query:input.query,
+        requestedMode:'lexical',limit:input.limit,matchMode:input.matchMode,scope:sources.map(s=>s.sourceId),
+        ...(range?{range}:{}),...(properties?{predicates:properties.predicates,metadata:properties.metadata}:{})};
+      validateRequest(request);
+      searching=true;
+      try{
+        await verify();check();
+        const response=await this.search(request);check();
+        if(response.status!=='ok'||response.executedMode!=='lexical'||response.indexGenerationId!==snapshot.generationId
+          ||response.hits.some(hit=>!versions.has(hit.sourceId)||versions.get(hit.sourceId)!==hit.sourceSha256
+            ||(range&&(hit.sourceLocators.length!==1||!containsLocator(range,hit.sourceLocators[0]!)))))
+          retire('SCOPE_CHANGED');
+        await verify(response.hits);check();
+        return structuredClone(response);
+      }finally{searching=false;}
+    };
+    await verify();check();
+    return {snapshot,current,search,verify:async()=>{
+      check();
+      if(searching||verifying)throw new StandaloneError('BUSY');
+      verifying=true;
+      try{await verify();check();}finally{verifying=false;}
+    }};
+  }
   async search(input: unknown): Promise<SearchResponse> {
     validateRequest(input);
-    const req: SearchRequest = input;
+    const req: SearchRequest = input.range ? structuredClone(input) : input;
+    const range = req.range;
+    const rangeRevision = this.revision;
     const gen = this.generation; // Pin ALL response fields to this immutable snapshot.
     const response = (status: SearchResponse['status'], error: string | null,
       hits: EvidenceHit[], stale: number, snapshot: IndexGeneration | null = gen): SearchResponse => ({
@@ -329,6 +471,13 @@ export class StandaloneEngine {
       const age = this.now() - this.verifiedAt;
       const due = age < 0 || age >= SOURCE_AUDIT_INTERVAL_MS;
       if ((drift || due) && !this.stopped && !this.paused && !this.work) this.reconcile();
+      if (range) {
+        const selected = gen.documents.find(doc => doc.sourceId === range.sourceId);
+        if (!selected || selected.sha256 !== range.sourceSha256 || !paths.includes(range.sourceId))
+          throw new StandaloneError('SOURCE_STALE');
+        verifyOriginalRange(range, await this.provider.read(range.sourceId));
+        if (this.revision !== rangeRevision || this.generation !== gen) throw new StandaloneError('SOURCE_STALE');
+      }
       // Protocol-v2 default is unchanged ranked terms. The explicit literal mode
       // checks original physical source lines, not query tokens or heading context.
       const metadataOnly = req.query === '';
@@ -342,6 +491,7 @@ export class StandaloneEngine {
       const candidates: { doc: SourceVersion; block: ParsedBlock; score: number }[] = [];
       for (const doc of gen.documents) {
         if ((scope && !scope.has(doc.sourceId)) || !matches(doc.properties, predicates)) continue;
+        if (range && doc.sourceId !== range.sourceId) continue;
         if (doc.extractionStatus !== 'ok' && doc.extractionStatus !== 'partial') continue;
         const metadataEvidence = req.metadata || metadataOnly
           ? metadataAnchor(doc, req.metadata, predicates) : null;
@@ -353,6 +503,7 @@ export class StandaloneEngine {
           continue;
         }
         for (const block of doc.blocks) {
+          if (range && !containsLocator(range,block.locator)) continue;
           let score: number;
           if (literal) {
             // Properties are typed metadata, not searchable body lines. Preserve
@@ -366,8 +517,11 @@ export class StandaloneEngine {
               offset = text.indexOf(needle, offset + needle.length)) occurrences++;
             score = 5 + occurrences;
           } else {
-            if (!block.terms.length || mandatoryIds.some(id => !block.terms.includes(id))) continue;
-            const matched = tokens.filter(term => block.terms.includes(term));
+            // Canonical ordinary search includes heading terms; selected-range ranking
+            // must not use headings outside the selection or inject any context.
+            const rankedTerms = range && block.terms.length ? terms(block.originalText) : block.terms;
+            if (!rankedTerms.length || mandatoryIds.some(id => !rankedTerms.includes(id))) continue;
+            const matched = tokens.filter(term => rankedTerms.includes(term));
             if (!matched.length) continue;
             // Complete compound identifier gets stronger weight than individual parts.
             score = matched.reduce((sum, term) =>
@@ -408,14 +562,26 @@ export class StandaloneEngine {
           || [...original].length !== loc.charEnd - loc.charStart || loc.lineEnd !== loc.lineStart) {
           throw new StandaloneError('EVIDENCE_INCOMPLETE');
         }
-        hits.push({
+        const hit: EvidenceHit = {
           sourceId: row.doc.sourceId, sourceSha256: row.doc.sha256, originalExcerpt: original,
           sourceLocators: [loc], rank: hits.length + 1, lexicalRank: hits.length + 1,
           retrievalMode: 'lexical', indexGenerationId: gen.generationId, score: row.score,
-          headings: [...row.block.headings], wikiLinks: [...row.block.wikiLinks],
-          properties: row.doc.properties,
-        });
+          headings: range ? [] : [...row.block.headings], wikiLinks: [...row.block.wikiLinks],
+          properties: range ? [] : row.doc.properties,
+        };
+        if (range) {
+          if (hit.sourceId !== range.sourceId || !containsLocator(range,loc)) throw new StandaloneError('EVIDENCE_INCOMPLETE');
+          verifySpan(hit,bytes);
+        }
+        hits.push(hit);
         if (hits.length >= req.limit) break;
+      }
+      if (range) {
+        // Even a zero-hit answer must authenticate the selected source before publication.
+        const currentPaths=await this.provider.list();
+        verifyOriginalRange(range,await this.provider.read(range.sourceId));
+        if (!currentPaths.includes(range.sourceId) || stale || this.revision !== rangeRevision || this.generation !== gen)
+          throw new StandaloneError('SOURCE_STALE');
       }
       // A missed event never defeats live hash suppression; queue reconciliation for recovery.
       if (stale && !this.stopped && !this.paused && !this.work) this.reconcile();
@@ -440,6 +606,7 @@ export class StandaloneEngine {
     this.pending.clear(); this.all = false;
     await this.parser.close(); // Interrupt CPU-bound parse immediately on unload.
     if (this.work) await this.work;
+    if(this.policyRead)await this.policyRead.catch(()=>{});
     this.recordState('unavailable', 'LIFECYCLE_INVALID');
   }
 }

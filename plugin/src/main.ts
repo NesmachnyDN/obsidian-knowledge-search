@@ -1,3 +1,8 @@
+import { GenerationPolicyHost, RerankPolicyHost, type GenerationPolicyHostState } from './ai/generation-policy-host';
+import { policyOriginals, type ProcessingPolicyInput } from './ai/generation-policy';
+import { configDigest } from './ai/disclosure';
+import { NewMaterialTracker } from './ai/new-material-tracker';
+import { decideNewMaterialMarking, type NewMaterialRuleConfig, type NewMaterialDecision } from './ai/new-material-policy';
 import { DenseMachine } from './ai/dense-machine';
 import { DenseUiController } from './ai/dense-ui-controller';
 import { ApiDenseHost } from './ai/dense-host';
@@ -67,6 +72,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private navigator?: SourceNavigator<TFile>;
   private retiringNavigator?: SourceNavigator<TFile>;
   private sourceReader?: BoundedVaultReader;
+  private readonly markingTracker=new NewMaterialTracker<TFile>();
   private denseHost?: ApiDenseHost;
   private denseSettingsChanging = false;
   // Retain the last completely applied runtime configuration until a
@@ -105,6 +111,25 @@ export default class SyntheticEvidencePlugin extends Plugin {
     this.searchController.trackSourceDrain(this.trackStorageDrain(work));
   }
   private advancedStartup?: Promise<void>;
+  // Cloud selection is never a local pilot. Actual profile admission is a
+  // later provider-specific gate; a configured URL cannot issue a profile.
+  private readonly generationPolicyHost=new GenerationPolicyHost(
+    ()=>this.settings.ai.generation.state==='configured'&&this.settings.ai.generation.transport==='cloud',
+    ()=>this.standalone,input=>this.policyHostState(input));
+  private readonly rerankPolicyHost=new RerankPolicyHost(
+    ()=>this.settings.ai.reranking.state==='configured'&&this.settings.ai.reranking.transport==='cloud',
+    ()=>this.standalone,input=>this.policyHostState(input));
+  private policyHostState(input:ProcessingPolicyInput):GenerationPolicyHostState|null {
+    const config=this.settings.ai[input.role],reader=this.sourceReader;
+    if(this.unloaded||this.denseSettingsChanging||!reader||reader.rootId!==input.scopeId||config.state!=='configured')return null;
+    const materials=policyOriginals(input).map(source=>{
+      const file=this.app.vault.getAbstractFileByPath(source.sourceId);
+      const state=file instanceof TFile&&file.path===source.sourceId?this.markingTracker.state(source.sourceId,file):'unresolved' as const;
+      return {lifecycle:{state,sourceId:source.sourceId,sha256:source.sourceSha256,rootId:reader.rootId},provenance:null};
+    });
+    return {config,profile:null,adapter:'unadmitted-cloud',policyRevision:String(this.searchController.sourceAuthorityRevision()),
+      configRevision:configDigest(input.role,config),restrictions:[],rules:this.settings.markingRules,materials,complete:true};
+  }
   readonly searchController: SearchController = new SearchController(async hit => {
     if (this.unloaded || this.denseSettingsChanging || !this.navigator) throw new StandaloneError('NAVIGATION_REJECTED');
     await this.navigator.open(hit);
@@ -116,7 +141,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     config: () => this.settings.ai.generation,
     scopeId: () => this.sourceReader?.rootId,
     verify: hit => this.verifyAiEvidence(hit),
-  }, () => this.revokeDenseAuthority());
+  }, () => this.revokeDenseAuthority(),undefined,this.generationPolicyHost,this.rerankPolicyHost);
   private revokeDenseAuthority(): void {
     this.denseUi.authority.revoke(() => {
       // Lexical navigation has its own revision even when both dense owners
@@ -190,7 +215,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
       () => this.searchController.snapshot().response ?? undefined,
       role => role === 'embedding' ? this.denseMachine.pending() ?
         {phase:'permission-required',error:null} : this.denseUi.operationStatus() :
-        this.searchController.evidenceOperationStatus(role)));
+        this.searchController.evidenceOperationStatus(role), config=>this.previewNewMaterial(config)));
     this.addCommand({ id:'ingest-active-advanced-source', name:'Ingest active Vault document (Advanced opt-in)',
       callback: () => { void this.ingestAdvancedActiveFile().catch(error =>
         new Notice('OKS Advanced: '+(error instanceof IngestError?error.code:'ADVANCED_UNAVAILABLE'))); } });
@@ -208,9 +233,11 @@ export default class SyntheticEvidencePlugin extends Plugin {
     this.addCommand({ id: 'cancel-synthetic-evidence-probe', name: 'Cancel synthetic evidence probe', callback: () => this.controller?.cancel() });
     // Changes can arrive before the asynchronous core has opened; startup does
     // a full authoritative reconciliation after the event handlers are registered.
-    const nativeChange = (file: TAbstractFile, oldPath?: string, fixtureChange = false): void => {
+    const nativeChange = (file: TAbstractFile, oldPath?: string, fixtureChange = false, created = false): void => {
       if (this.unloaded) return;
       const paths = oldPath === undefined ? [file.path] : [file.path, oldPath];
+      if(created&&this.layoutReady&&file instanceof TFile)this.markingTracker.created(file.path,file);
+      else for(const path of paths)this.markingTracker.invalidate(path);
       // Pin concrete owners and immutable path values before any callback.
       const navigator = this.navigator, engine = this.standalone, dense = this.denseHost;
       const ingestion = this.advancedIngestion, retrieval = this.advancedRetrieval;
@@ -227,7 +254,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
       }
       this.searchController.invalidateSource(obligations);
     };
-    this.registerEvent(this.app.vault.on('create', file => nativeChange(file)));
+    this.registerEvent(this.app.vault.on('create', file => nativeChange(file, undefined, false, true)));
     this.registerEvent(this.app.vault.on('modify', file => nativeChange(file, undefined, true)));
     this.registerEvent(this.app.vault.on('delete', file => nativeChange(file, undefined, true)));
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => nativeChange(file, oldPath, true)));
@@ -238,6 +265,22 @@ export default class SyntheticEvidencePlugin extends Plugin {
       this.layoutReady = true;
       if (!this.unloaded) { void this.initializeStandalone(); void this.initializeAdvanced(); }
     });
+  }
+  /** Explicit, read-only active-note preview, never an admission or a writer. */
+  private async previewNewMaterial(config:NewMaterialRuleConfig):Promise<NewMaterialDecision> {
+    const engine=this.standalone,reader=this.sourceReader,file=this.app.workspace.getActiveFile();
+    if(!engine||!reader||!(file instanceof TFile)||this.unloaded||this.denseSettingsChanging)
+      throw new StandaloneError('SOURCE_REJECTED');
+    const path=file.path,revision=this.searchController.sourceAuthorityRevision();
+    const lifecycle=this.markingTracker.state(path,file);
+    const current=()=>!this.unloaded&&!this.denseSettingsChanging&&this.standalone===engine&&this.sourceReader===reader
+      &&this.searchController.sourceAuthorityCurrent(revision)&&this.app.workspace.getActiveFile()===file
+      &&file.path===path&&this.app.vault.getAbstractFileByPath(path)===file&&this.markingTracker.state(path,file)===lifecycle;
+    if(!current())throw new StandaloneError('SOURCE_CHANGED');
+    const proof=await engine.previewPolicyMetadata(path,current);
+    if(!current())throw new StandaloneError('SOURCE_CHANGED');
+    return decideNewMaterialMarking(config,{sourceId:path,sha256:proof.sha256,rootId:reader.rootId,proof,
+      lifecycle:{state:lifecycle,sourceId:path,sha256:proof.sha256,rootId:reader.rootId},provenance:null});
   }
   async openSearch(): Promise<void> {
     if (this.unloaded) return;
@@ -744,6 +787,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     // Commit one irreversible terminal boundary across all search authorities
     // before any host, abort, view or observer callback is allowed to run.
     this.unloaded = true;
+    this.markingTracker.clear();
     this.lifecycleRevision++;
     this.denseUi.authority.sealTerminal();
     this.searchController.sealTerminal();

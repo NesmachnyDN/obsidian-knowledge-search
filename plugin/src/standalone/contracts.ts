@@ -29,10 +29,15 @@ export type IndexGeneration = {
   lexicalIndexId: typeof SCHEMA; readiness: 'ready'; documents: SourceVersion[];
 };
 export type SearchMetadata = { tag?: string; linkTarget?: string };
+/** Canonical half-open range over one exact source version, never an editor buffer. */
+export type OriginalRange = {
+  sourceId: string; sourceSha256: string;
+  byteStart: number; byteEnd: number; charStart: number; charEnd: number;
+};
 export type SearchRequest = {
   protocolVersion: typeof PROTOCOL; requestId: string; query: string;
   requestedMode: 'lexical' | 'dense' | 'hybrid'; matchMode?: 'terms' | 'literal'; scope?: string[];
-  limit: number; predicates?: Predicate[]; metadata?: SearchMetadata;
+  limit: number; predicates?: Predicate[]; metadata?: SearchMetadata; range?: OriginalRange;
 };
 export type EvidenceHit = {
   sourceId: string; sourceSha256: string; originalExcerpt: string;
@@ -95,6 +100,14 @@ function validMetadata(value: unknown): value is SearchMetadata {
     || !value.linkTarget || /[\0\r\n|\[\]]/.test(value.linkTarget))) return false;
   return value.tag !== undefined || value.linkTarget !== undefined;
 }
+export function validRange(value: unknown): value is OriginalRange {
+  if (!isRecord(value) || !validPath(value.sourceId) || !isDigest(value.sourceSha256)
+    || Object.keys(value).some(key => !['sourceId','sourceSha256','byteStart','byteEnd','charStart','charEnd'].includes(key))) return false;
+  const {byteStart,byteEnd,charStart,charEnd} = value;
+  const offset = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 && v <= BOUNDS.fileBytes;
+  return offset(byteStart) && offset(byteEnd) && offset(charStart) && offset(charEnd)
+    && byteStart < byteEnd && charStart < charEnd && charStart <= byteStart && charEnd <= byteEnd;
+}
 export function validateRequest(value: unknown): asserts value is SearchRequest {
   if (!isRecord(value) || value.protocolVersion !== PROTOCOL
       || typeof value.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(value.requestId)
@@ -106,6 +119,9 @@ export function validateRequest(value: unknown): asserts value is SearchRequest 
       || !['lexical', 'dense', 'hybrid'].includes(String(value.requestedMode))
       || (value.matchMode !== undefined && !['terms', 'literal'].includes(String(value.matchMode)))
       || (value.metadata !== undefined && !validMetadata(value.metadata))
+      || (value.range !== undefined && (!validRange(value.range) || value.requestedMode !== 'lexical'
+        || !value.query.trim() || !Array.isArray(value.scope) || value.scope.length !== 1
+        || value.scope[0] !== value.range.sourceId))
       || (value.scope !== undefined && (!Array.isArray(value.scope)
         || value.scope.length > BOUNDS.sources || !value.scope.every(validPath)))
       || (value.predicates !== undefined && (!Array.isArray(value.predicates)
@@ -113,7 +129,7 @@ export function validateRequest(value: unknown): asserts value is SearchRequest 
         || !value.predicates.every(p => validProperty(p, true))))) {
     throw new StandaloneError('INVALID_REQUEST');
   }
-  if (Object.keys(value).some(key => !['protocolVersion','requestId','query','requestedMode','matchMode','scope','limit','predicates','metadata'].includes(key))) {
+  if (Object.keys(value).some(key => !['protocolVersion','requestId','query','requestedMode','matchMode','scope','limit','predicates','metadata','range'].includes(key))) {
     throw new StandaloneError('INVALID_REQUEST');
   }
 }

@@ -3,6 +3,7 @@ export const AI_CONTRACT_VERSION = 1 as const;
 export const AI_ROLES = ['embedding', 'reranking', 'generation'] as const;
 export type AiRole = typeof AI_ROLES[number];
 export type ProviderFailureCode = 'DISABLED' | 'CONFIG_INVALID' | 'NOT_READY'
+  | 'BUSY'
   | 'ENDPOINT_DENIED' | 'DISCLOSURE_DENIED' | 'MODEL_MISMATCH' | 'LIMIT_EXCEEDED'
   | 'UNAUTHENTICATED' | 'FORBIDDEN' | 'RATE_LIMITED' | 'QUOTA_EXCEEDED'
   | 'TIMEOUT' | 'CANCELLED' | 'NETWORK' | 'SERVER_ERROR' | 'INVALID_RESPONSE' | 'SOURCE_STALE';
@@ -58,4 +59,9 @@ export interface GenerationProvider extends Provider<'generation'> {
 /** Implementations must resolve credentials outside persisted Vault settings. */
 export interface CredentialResolver {
   resolve(role: AiRole, config: ProviderConfig, signal: AbortSignal): Promise<string | null>;
+}
+
+/** Canonical bounded bearer grammar; reject line terminators before header creation. */
+export function isBearerToken(value:unknown):value is string {
+  return typeof value==='string' && /^[A-Za-z0-9._~+\/=-]{1,512}$(?![\s\S])/.test(value);
 }

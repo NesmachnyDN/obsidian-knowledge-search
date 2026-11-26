@@ -9,6 +9,9 @@ import {EvidenceGenerator} from '../plugin/src/ai/generation-evidence';
 import {type ProviderConfig} from '../plugin/src/ai/contracts';
 import {type EvidenceApproval} from '../plugin/src/ai/verified-evidence';
 import {configDigest} from '../plugin/src/ai/disclosure';
+import type {GenerationPolicyInput,GenerationPolicyPort} from '../plugin/src/ai/generation-policy';
+import {EligibilityEvaluator,type PolicySnapshot} from '../plugin/src/ai/processing-policy';
+import {parsePolicyMetadata} from '../plugin/src/standalone/markdown-parse';
 import {hash,type EvidenceHit} from '../plugin/src/standalone/contracts';
 import {parseMarkdown} from '../plugin/src/standalone/markdown';
 import {verifySpan} from '../plugin/src/search/navigation';
@@ -124,7 +127,7 @@ test('generation endpoint denial, authorization, rate limit, abort and no fallba
   },(req,res)=>{req.resume();calls++;if(calls===1)reply(res,{},403);else if(calls===2)reply(res,{},429);else received();});
 });
 
-import {SearchController,uiRequest} from '../plugin/src/search/controller';
+import {EVIDENCE_PREVIEW_TTL_MS,SearchController,uiRequest} from '../plugin/src/search/controller';
 import type {SearchResponse} from '../plugin/src/standalone/contracts';
 test('generation controller uses independent roles, one-shot preview, no lexical mutation, revoke on lifecycle',async()=>{
   let calls=0;
@@ -142,25 +145,201 @@ test('generation controller uses independent roles, one-shot preview, no lexical
       cancel:()=>true,resume:()=>{},rebuild:()=>{}});
     await controller.search(uiRequest(input.query,2));
     assert.throws(()=>controller.prepareRerank(),{message:'DISABLED'});
-    const earlier=controller.prepareGeneration(), newer=controller.prepareGeneration();
-    await assert.rejects(controller.generationConfirmed(earlier,'synthetic',token),{message:'DISCLOSURE_DENIED'});
-    await assert.rejects(controller.generationConfirmed(newer,'synthetic',token),{message:'DISCLOSURE_DENIED'});
-    const preview=controller.prepareGeneration();
-    await assert.rejects(controller.generationConfirmed({...preview,role:'reranking'},'synthetic',token),{message:'DISCLOSURE_DENIED'});
+    const earlier=controller.prepareGeneration(token), newer=controller.prepareGeneration(token);
+    await assert.rejects(controller.generationConfirmed(earlier,'synthetic'),{message:'DISCLOSURE_DENIED'});
+    await assert.rejects(controller.generationConfirmed(newer,'synthetic'),{message:'DISCLOSURE_DENIED'});
+    const preview=controller.prepareGeneration(token);
+    await assert.rejects(controller.generationConfirmed({...preview,role:'reranking'},'synthetic'),{message:'DISCLOSURE_DENIED'});
     assert.equal(calls,0);
-    const approved=controller.prepareGeneration();
-    await controller.generationConfirmed(approved,'synthetic',token);
+    const approved=controller.prepareGeneration(token);
+    await controller.generationConfirmed(approved,'synthetic');
     assert.equal(controller.snapshot().generation?.phase,'results');
     assert.deepEqual(controller.snapshot().generation?.hits.map(x=>x.citations),[[hits[0]],[hits[0],hits[1]]]);
     assert.deepEqual(controller.snapshot().response,response);
     assert.equal(controller.snapshot().rerank,undefined);
-    await assert.rejects(controller.generationConfirmed(approved,'synthetic',token),{message:'DISCLOSURE_DENIED'});
-    const next=controller.prepareGeneration();controller.invalidate();
-    await assert.rejects(controller.generationConfirmed(next,'synthetic',token),{message:'DISCLOSURE_DENIED'});
+    await assert.rejects(controller.generationConfirmed(approved,'synthetic'),{message:'DISCLOSURE_DENIED'});
+    const next=controller.prepareGeneration(token);controller.invalidate();
+    await assert.rejects(controller.generationConfirmed(next,'synthetic'),{message:'DISCLOSURE_DENIED'});
     assert.equal(controller.snapshot().generation,undefined);
     assert.equal(calls,1);
     controller.dispose();
   },(req,res)=>{calls++;req.resume();reply(res,good());});
+});
+
+test('POLICY.3a generation uses only an admitted host port, binds full payload, and denies before dispatch',async()=>{
+  let requests=0, evaluations:GenerationPolicyInput[]=[];
+  await fixture(async cfg=>{
+    const response:SearchResponse={protocolVersion:2,requestId:'policy',requestedMode:'lexical',executedMode:'lexical',status:'ok',
+      indexGenerationId:hash('generation'),hits,capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0};
+    let denyDispatch=true;
+    const policy:GenerationPolicyPort={current:(i,b)=>b.bindingDigest===hash(JSON.stringify([i.payloadDigest,i.credentialEpoch])),evaluate:async(input,context)=>{
+      evaluations.push(structuredClone(input));
+      assert.equal(input.role,'generation');assert.match(input.payloadDigest,/^[a-f0-9]{64}$/);
+      // The exact payload digest and source/excerpt digests are local policy
+      // inputs; neither classification nor policy material may reach transport.
+      assert.equal(input.sources.length,2);assert.ok(input.sources.every(x=>x.excerptDigest===hash(hits.find(h=>h.sourceId===x.sourceId)!.originalExcerpt)));
+      if (denyDispatch && evaluations.length===2) return {policyVersion:'oks-policy-1b',allowed:false,reason:'private',bindingDigest:null,rootId:scopeId,sourceVersions:[]};
+      return {policyVersion:'oks-policy-1b',allowed:true,reason:'eligible',bindingDigest:hash(JSON.stringify([input.payloadDigest,input.credentialEpoch])),
+        rootId:scopeId,sourceVersions:input.sources.map(x=>({sourceId:x.sourceId,sha256:x.sourceSha256,metadataState:'external' as const,reason:'eligible' as const}))};
+    }};
+    const port={config:()=>cfg,scopeId:()=>scopeId,verify:async(hit:EvidenceHit)=>{verifySpan(hit,bytes[hits.findIndex(h=>h.sourceId===hit.sourceId)]!);}};
+    const controller=new SearchController(async()=>{},undefined,undefined,undefined,port,undefined,undefined,policy);
+    controller.attach({search:async()=>response,status:()=>({status:'ready' as const,generationId:hash('generation'),sources:2,records:2,busy:false,error:null,maintenanceWarning:null}),cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+    await controller.search(uiRequest(input.query,2));
+    assert.throws(()=>controller.prepareGeneration(token),{message:'NOT_READY'});
+    const denied=await controller.prepareGenerationWithPolicy(token);
+    await controller.generationConfirmed(denied,'synthetic');
+    assert.equal(requests,0);assert.equal(controller.snapshot().generation?.error,'DISCLOSURE_DENIED');
+    denyDispatch=false;evaluations=[];
+    const admitted=await controller.prepareGenerationWithPolicy(token);
+    await controller.generationConfirmed(admitted,'synthetic');
+    assert.equal(requests,1);assert.equal(evaluations.length,3);
+    assert.ok(evaluations.every(x=>x.payloadDigest===evaluations[0]!.payloadDigest));
+    controller.dispose();
+  },(req,res)=>{requests++;let body='';req.on('data',chunk=>{body+=String(chunk);});req.on('end',()=>{
+    assert.equal(body.includes('llm_processing'),false);assert.equal(body.includes('external'),false);reply(res,good());});});
+});
+
+test('POLICY.3a canonical original-byte evaluator allows the same admitted payload at preview and dispatch',async()=>{
+  let requests=0;
+  await fixture(async cfg=>{
+    const response:SearchResponse={protocolVersion:2,requestId:'canonical-policy',requestedMode:'lexical',executedMode:'lexical',status:'ok',
+      indexGenerationId:hash('generation'),hits,capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0};
+    const snapshotFor=(input:GenerationPolicyInput):PolicySnapshot=>({subjects:input.sources.map(x=>({sourceId:x.sourceId,expectedSha256:x.sourceSha256,kind:'original',ownerIds:[x.sourceId]})),
+        profile:{profileId:'synthetic-admitted',admissionId:'test-fixture',role:'generation',configDigest:configDigest('generation',cfg),adapter:'fixture',classification:'external'},
+        role:'generation',config:input.config,adapter:'fixture',ownerId:input.ownerId,hostId:input.hostId,scopeId:input.scopeId,
+        policyRevision:'p1',configRevision:'c1',credentialEpoch:input.credentialEpoch,deadlineUnixMs:input.deadlineUnixMs,
+        payloadDigest:input.payloadDigest,restrictions:[],evaluationComplete:true});
+    const policy:GenerationPolicyPort={current:(i,b)=>hash(JSON.stringify(['oks-policy-1b',scopeId,snapshotFor(i)]))===b.bindingDigest,evaluate:async(input,context)=>{
+      const snapshot=snapshotFor(input);
+      const reader={rootId:scopeId,list:async()=>hits.map(h=>h.sourceId),versionHints:async()=>[],
+        read:async(path:string)=>{const i=hits.findIndex(h=>h.sourceId===path);if(i<0)throw Error('missing');return bytes[i]!;}};
+      return new EligibilityEvaluator(reader,{policyMetadata:async(path,raw,root)=>parsePolicyMetadata(path,raw,root,hash(raw))},
+        {snapshot:()=>snapshot,current:()=>true}).evaluate(context);
+    }};
+    const port={config:()=>cfg,scopeId:()=>scopeId,verify:async(hit:EvidenceHit)=>{verifySpan(hit,bytes[hits.findIndex(h=>h.sourceId===hit.sourceId)]!);}};
+    const controller=new SearchController(async()=>{},undefined,undefined,undefined,port,undefined,undefined,policy);
+    controller.attach({search:async()=>response,status:()=>({status:'ready' as const,generationId:hash('generation'),sources:2,records:2,busy:false,error:null,maintenanceWarning:null}),cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+    try {
+      await controller.search(uiRequest(input.query,2));
+      const preview=await controller.prepareGenerationWithPolicy(token);
+      await new Promise(r=>setTimeout(r,10));
+      await controller.generationConfirmed(preview,'synthetic');
+      assert.equal(requests,1,'canonical eligibility must survive phase-specific deadlines without weakening exact consent');
+    } finally {controller.dispose();}
+  },(req,res)=>{requests++;req.resume();reply(res,good());});
+});
+
+test('06H.2-A2b2b2: search preview binds one exact host credential and denies stale, foreign, cancelled, changed and reentrant dispatch',async t=>{
+  const requests:string[]=[];
+  await fixture(async cfg=>{
+    const response:SearchResponse={protocolVersion:2,requestId:'ui',requestedMode:'lexical',
+      executedMode:'lexical',status:'ok',indexGenerationId:hash('generation'),hits,
+      capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0};
+    let onConfig=()=>{},onScope=()=>{};
+    const port={config:()=>{onConfig();return cfg;},scopeId:()=>{onScope();return scopeId;},verify:async(hit:EvidenceHit)=>{
+      verifySpan(hit,bytes[hits.findIndex(candidate=>candidate.sourceId===hit.sourceId)]!);
+    }};
+    const make=()=>{
+      const controller=new SearchController(async()=>{},undefined,undefined,undefined,port);
+      controller.attach({search:async()=>response,status:()=>({status:'ready' as const,generationId:hash('generation'),
+        sources:2,records:2,busy:false,error:null,maintenanceWarning:null}),cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+      return controller;
+    };
+    const controller=make(), foreign=make();
+    try {
+      await controller.search(uiRequest(input.query,2));
+      await foreign.search(uiRequest(input.query,2));
+
+      const sameOld=controller.prepareGeneration('same-token');
+      const sameNew=controller.prepareGeneration('same-token');
+      assert.notDeepEqual(sameOld.credentialStamp,sameNew.credentialStamp);
+      await assert.rejects(controller.generationConfirmed(sameOld,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      await assert.rejects(controller.generationConfirmed(sameNew,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      const differentOld=controller.prepareGeneration('different-old-token');
+      const differentNew=controller.prepareGeneration('different-new-token');
+      assert.notDeepEqual(differentOld.credentialStamp,differentNew.credentialStamp);
+      await assert.rejects(controller.generationConfirmed(differentOld,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      await assert.rejects(controller.generationConfirmed(differentNew,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      const approved=controller.prepareGeneration('approved-token');
+      assert.deepEqual(Object.keys(approved.credentialStamp ?? {}).sort(),['epoch','hostId']);
+      assert.equal(JSON.stringify(approved).includes('approved-token'),false);
+      const foreignPreview=foreign.prepareGeneration('foreign-token');
+      await assert.rejects(foreign.generationConfirmed(approved,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      assert.equal(foreign.isEvidencePreviewCurrent('generation',foreignPreview.sequence),true);
+      foreign.cancelGeneration();
+      await assert.rejects(foreign.generationConfirmed(foreignPreview,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      assert.equal(requests.length,0);
+      await controller.generationConfirmed(approved,'synthetic');
+      assert.deepEqual(requests,['Bearer approved-token']);
+
+      const cancelled=controller.prepareGeneration('cancelled-token');
+      controller.cancelGeneration();
+      await assert.rejects(controller.generationConfirmed(cancelled,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      const changed=controller.prepareGeneration('changed-token');
+      cfg.identity.revision='changed';
+      assert.equal(controller.isEvidencePreviewCurrent('generation',changed.sequence),false);
+      await assert.rejects(controller.generationConfirmed(changed,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      cfg.identity.revision='fixture-v1';
+      await controller.search(uiRequest(input.query,2));
+      const sourceChanged=controller.prepareGeneration('source-changed-token');
+      controller.invalidateSource([]);
+      await assert.rejects(controller.generationConfirmed(sourceChanged,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      await controller.search(uiRequest(input.query,2));
+
+      const expiring=controller.prepareGeneration('expired-token');
+      const wall=Date.now(),monotonic=performance.now(),boot=os.uptime();
+      t.mock.method(Date,'now',()=>wall+EVIDENCE_PREVIEW_TTL_MS);
+      t.mock.method(performance,'now',()=>monotonic+EVIDENCE_PREVIEW_TTL_MS);
+      t.mock.method(os,'uptime',()=>boot+EVIDENCE_PREVIEW_TTL_MS/1000);
+      assert.equal(controller.isEvidencePreviewCurrent('generation',expiring.sequence),false);
+      await assert.rejects(controller.generationConfirmed(expiring,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      t.mock.restoreAll();
+
+      const reentrant=controller.prepareGeneration('reentrant-token');
+      const unsubscribe=controller.subscribeEvidence(()=>{
+        if(controller.evidenceOperationStatus('generation').phase==='busy')controller.cancelGeneration();
+      });
+      await controller.generationConfirmed(reentrant,'synthetic');
+      unsubscribe();
+      assert.equal(requests.length,1);
+
+      const polling=controller.prepareGeneration('polling-token');
+      const nested:Promise<void>[]=[];
+      let polls=0;
+      onConfig=()=>{
+        polls++;
+        assert.equal(controller.isEvidencePreviewCurrent('generation',polling.sequence),false);
+        assert.throws(()=>controller.prepareGeneration('nested-token'),{message:'BUSY'});
+        nested.push(assert.rejects(controller.generationConfirmed(polling,'synthetic'),{message:'BUSY'}));
+      };
+      assert.equal(controller.isEvidencePreviewCurrent('generation',polling.sequence),true);
+      onConfig=()=>{};
+      await Promise.all(nested);assert.ok(polls>0);
+      controller.cancelGeneration();
+      const drifting=controller.prepareGeneration('drift-token');
+      onScope=()=>{cfg.identity.revision='drifted';onScope=()=>{};};
+      await assert.rejects(controller.generationConfirmed(drifting,'synthetic'),{message:'CANCELLED'});
+      cfg.identity.revision='fixture-v1';
+      const preflight=controller.prepareGeneration('preflight-token');
+      onConfig=()=>{onConfig=()=>{};controller.cancelGeneration();};
+      await assert.rejects(controller.generationConfirmed(preflight,'synthetic'),{message:'CANCELLED'});
+      assert.equal(requests.length,1);
+
+      const viewA=controller.createGenerationViewOwner(),viewB=controller.createGenerationViewOwner();
+      const viewPreview=controller.prepareGeneration('view-a-token',viewA);
+      assert.throws(()=>controller.prepareGeneration('view-b-token',viewB),{message:'BUSY'});
+      await assert.rejects(controller.generationConfirmed(viewPreview,'synthetic',viewB),{message:'DISCLOSURE_DENIED'});
+      controller.cancelGeneration(viewB);
+      controller.closeGenerationViewOwner(viewB);
+      assert.equal(controller.isEvidencePreviewCurrent('generation',viewPreview.sequence,viewA),true);
+      controller.closeGenerationViewOwner(viewA);
+      await assert.rejects(controller.generationConfirmed(viewPreview,'synthetic',viewA),{message:'DISCLOSURE_DENIED'});
+      assert.equal(requests.length,1);
+    } finally { controller.dispose();foreign.dispose(); }
+  },(req,res)=>{
+    requests.push(String(req.headers.authorization));req.resume();reply(res,good());
+  });
 });
 
 test('B-R2-ERR-01: shared generation transport preserves timeout on late socket error',async t=>{

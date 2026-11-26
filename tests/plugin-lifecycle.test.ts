@@ -10,6 +10,8 @@ import type { IngestResponse } from '../plugin/src/advanced/protocol';
 import type { ModelReply } from '../plugin/src/advanced/model-protocol';
 import { join, resolve } from 'node:path';
 import { parseMarkdown } from '../plugin/src/standalone/markdown';
+import { parsePolicyMetadata } from '../plugin/src/standalone/markdown-parse';
+import { defaultMarkingRules, type NewMaterialRuleConfig, type NewMaterialDecision } from '../plugin/src/ai/new-material-policy';
 import { SourceNavigator } from '../plugin/src/search/navigation';
 import { uiRequest } from '../plugin/src/search/controller';
 import { hash, type EvidenceHit, type SearchRequest, type SearchResponse } from '../plugin/src/standalone/contracts';
@@ -39,9 +41,9 @@ class SyntheticWorker {
   onmessage?: (event: { data: unknown }) => void; onerror?: () => void; onmessageerror?: () => void;
   terminated = false;
   constructor() { SyntheticWorker.instances.push(this); }
-  postMessage(v: { id: number; path: string; bytes: Uint8Array; rootId: string }): void {
+  postMessage(v: { id: number; path: string; bytes: Uint8Array; rootId: string; kind?: string }): void {
     queueMicrotask(() => { if (!this.terminated) this.onmessage?.({ data: {
-      id: v.id, doc: parseMarkdown(v.path, v.bytes, v.rootId),
+      id: v.id, ...(v.kind==='policy-metadata'?{proof:parsePolicyMetadata(v.path,v.bytes,v.rootId,hash(v.bytes))}:{doc:parseMarkdown(v.path, v.bytes, v.rootId)}),
     } }); });
   }
   terminate(): void { this.terminated = true; }
@@ -685,11 +687,11 @@ for (const role of ['reranking','generation'] as const) {
     });
     const denseUi=(f.plugin as unknown as {denseUi:DenseUiController}).denseUi;
     const c=f.plugin.searchController, other=role==='reranking'?'generation':'reranking';
-    const prepare=()=>role==='reranking'?c.prepareRerank():c.prepareGeneration();
-    const prepareOther=()=>other==='reranking'?c.prepareRerank():c.prepareGeneration();
+    const prepare=(credential='fixture-success')=>role==='reranking'?c.prepareRerank():c.prepareGeneration(credential);
+    const prepareOther=()=>other==='reranking'?c.prepareRerank():c.prepareGeneration('fixture');
     const cancel=()=>role==='reranking'?c.cancelRerank():c.cancelGeneration();
     const confirm=(preview:ReturnType<typeof prepare>,token:string)=>role==='reranking'
-      ?c.rerankConfirmed(preview,'synthetic',token):c.generationConfirmed(preview,'synthetic',token);
+      ?c.rerankConfirmed(preview,'synthetic',token):c.generationConfirmed(preview,'synthetic');
     try {
       await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
       const addr=server.address();assert.ok(addr&&typeof addr!=='string');
@@ -742,11 +744,11 @@ for (const role of ['reranking','generation'] as const) {
       assert.equal(c.evidenceOperationStatus(role).phase,'busy');await unchanged();
       await successful;
       assert.equal(c.evidenceOperationStatus(role).phase,'complete');assert.equal(calls,1);await unchanged();
-      await confirm(prepare(),'fixture-deny');
+      await confirm(prepare('fixture-deny'),'fixture-deny');
       assert.deepEqual(c.evidenceOperationStatus(role),{phase:'failed',error:'UNAUTHENTICATED'});
       assert.equal(calls,2);await unchanged();
       const entered=new Promise<void>(resolve=>{onDelayedRequest=resolve;});
-      const running=confirm(prepare(),'fixture-delay');
+      const running=confirm(prepare('fixture-delay'),'fixture-delay');
       await Promise.race([entered,running.then(()=>{throw Error('request did not enter fixture');})]);
       await unchanged();cancel();await running;
       assert.deepEqual(c.evidenceOperationStatus(role),{phase:'failed',error:'CANCELLED'});
@@ -769,7 +771,7 @@ for (const role of ['reranking','generation'] as const) {
       const manual=Symbol('manual-dense');
       await denseUi.prepare(manual,{kind:'rebuild',paths:['fixture.md'],space});
       const manualPreview=denseUi.snapshot(manual);assert.equal(manualPreview.phase,'preview');
-      await confirm(prepare(),'fixture-deny');cancel();
+      await confirm(prepare('fixture-deny'),'fixture-deny');cancel();
       assert.deepEqual(denseUi.snapshot(manual),manualPreview);
       assert.equal(c.isEvidencePreviewCurrent(other,reciprocal.sequence),true);
       assert.equal(calls,5);assert.equal(denseCalls,0);
@@ -906,7 +908,7 @@ test('B-R2-LIFE: failed settings shared retirement must deny lexical navigation 
     assert.equal(result.ok,false,'lexical navigation must remain closed after failed trusted retirement');
     assert.equal(reads,0);
     assert.equal(opens,0);
-    assert.throws(()=>c.prepareGeneration());
+    assert.throws(()=>c.prepareGeneration('fixture'));
     assert.throws(()=>c.prepareRerank());
     assert.equal((await c.search(uiRequest('denied',1))).ok,false);
     fail=false;
@@ -931,13 +933,13 @@ test('B-R2-LIFE: disabling generation with pending settings save must revoke exi
       limits:{timeoutMs:2000,maxInputBytes:4096,maxCandidates:8,maxOutputTokens:32,maxConcurrent:1}} as const;
     await f.plugin.patchSettings(s=>{s.ai.generation=cfg;});
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-    const preview=c.prepareGeneration();
+    const preview=c.prepareGeneration('fixture');
     Object.assign(f.plugin,{verifyAiEvidence:async()=>{verifies++;throw Error('synthetic stop before HTTP');},
       saveData:async(v:unknown)=>{entered.release();await gate.promise;await original(v);}});
     const disable=f.plugin.patchSettings(s=>{s.ai.generation={state:'disabled'};});
     await navigationWatchdog(entered.promise);
     const current=c.isEvidencePreviewCurrent('generation',preview.sequence);
-    await c.generationConfirmed(preview,'synthetic','fixture-token').catch(()=>{});
+    await c.generationConfirmed(preview,'synthetic').catch(()=>{});
     assert.equal(current,false);
     gate.release();await disable;
     assert.equal(verifies,0,'old consent must not read sources after role-disable transition begins');
@@ -957,9 +959,9 @@ for (const role of ['reranking','generation'] as const) {
         limits:{timeoutMs:2000,maxInputBytes:4096,maxCandidates:8,maxOutputTokens:32,maxConcurrent:1}} as const;
       const original=f.plugin.saveData.bind(f.plugin);
       let verifies=0;
-      const prepare=()=>role==='reranking'?c.prepareRerank():c.prepareGeneration();
+      const prepare=()=>role==='reranking'?c.prepareRerank():c.prepareGeneration('fixture');
       const confirm=(p:ReturnType<typeof prepare>)=>role==='reranking'
-        ?c.rerankConfirmed(p,'synthetic','fixture'):c.generationConfirmed(p,'synthetic','fixture');
+        ?c.rerankConfirmed(p,'synthetic','fixture'):c.generationConfirmed(p,'synthetic');
       const provision=()=>{
         const host=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof cfg,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
         host.rerankProfiles.installSyntheticFixture(cfg,host.rerankPort.scopeId(),'settings-fixture');
@@ -976,7 +978,7 @@ for (const role of ['reranking','generation'] as const) {
         provision();
         assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
         const preview=prepare();
-        const other=role==='reranking'?c.prepareGeneration():c.prepareRerank();
+        const other=role==='reranking'?c.prepareGeneration('fixture'):c.prepareRerank();
         Object.assign(f.plugin,{verifyAiEvidence:async()=>{verifies++;verifyEntered.release();await verifyGate.promise;},
           saveData:async()=>{saveEntered.release();await saveGate.promise;throw Error('synthetic save failure');}});
         const operation=active?confirm(preview):undefined;
@@ -988,7 +990,7 @@ for (const role of ['reranking','generation'] as const) {
         assert.equal(c.sharedAuthorityTransition(),true);
         assert.equal(c.isEvidencePreviewCurrent(role,preview.sequence),false);
         assert.equal(c.isEvidencePreviewCurrent(role==='reranking'?'generation':'reranking',other.sequence),false);
-        assert.throws(()=>c.prepareGeneration());assert.throws(()=>c.prepareRerank());
+        assert.throws(()=>c.prepareGeneration('fixture'));assert.throws(()=>c.prepareRerank());
         assert.equal((await c.search(uiRequest('blocked',1))).ok,false);
         assert.equal(c.control('resume').ok,false);
         await assert.rejects(confirm(preview));
@@ -1029,7 +1031,7 @@ test('B-R2-LIFE-11 persisted disable remains committed after post-save trusted h
     await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
     await f.plugin.patchSettings(s=>{s.ai.generation=cfg;});
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-    const preview=c.prepareGeneration();
+    const preview=c.prepareGeneration('fixture');
     const nav=(f.plugin as unknown as {navigator:SourceNavigator<unknown>}).navigator;
     const invalidate=nav.invalidate.bind(nav);
     Object.assign(nav,{invalidate:()=>{if(fail)throw Error('synthetic post-save retirement failure');invalidate();}});
@@ -1039,13 +1041,13 @@ test('B-R2-LIFE-11 persisted disable remains committed after post-save trusted h
     assert.equal((f.plugin as unknown as {saved:{ai:{generation:{state:string}}}}).saved.ai.generation.state,'disabled');
     assert.equal(c.sharedAuthorityTransition(),true);
     assert.equal(c.isEvidencePreviewCurrent('generation',preview.sequence),false);
-    await assert.rejects(c.generationConfirmed(preview,'synthetic','fixture'));
+    await assert.rejects(c.generationConfirmed(preview,'synthetic'));
     assert.equal((await c.open(0)).ok,false);
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,false);
     fail=false;
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-    assert.throws(()=>c.prepareGeneration());
-    await assert.rejects(c.generationConfirmed(preview,'synthetic','fixture'));
+    assert.throws(()=>c.prepareGeneration('fixture'));
+    await assert.rejects(c.generationConfirmed(preview,'synthetic'));
   }finally{fail=false;Object.assign(f.plugin,{saveData:original});await f.cleanup();}
 });
 
@@ -1089,7 +1091,7 @@ test('B-R2-LIFE-11 unload during a pending disable save cannot restore admission
     await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
     await f.plugin.patchSettings(s=>{s.ai.generation=cfg;});
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-    const preview=c.prepareGeneration();
+    const preview=c.prepareGeneration('fixture');
     Object.assign(f.plugin,{saveData:async(v:unknown)=>{entered.release();await gate.promise;await original(v);},
       verifyAiEvidence:async()=>{verifies++;throw Error('unexpected verification');}});
     const saving=f.plugin.patchSettings(s=>{s.ai.generation={state:'disabled'};});
@@ -1099,7 +1101,7 @@ test('B-R2-LIFE-11 unload during a pending disable save cannot restore admission
     assert.equal(c.isEvidencePreviewCurrent('generation',preview.sequence),false);
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,false);
     assert.equal((await c.open(0)).ok,false);
-    await assert.rejects(c.generationConfirmed(preview,'synthetic','fixture'));
+    await assert.rejects(c.generationConfirmed(preview,'synthetic'));
     assert.equal(verifies,0);
   }finally{gate.release();Object.assign(f.plugin,{saveData:original});await f.cleanup();}
 });
@@ -1136,7 +1138,7 @@ test('B-R2-LIFE-11 pending presentation-only save preserves both independent pre
     const host=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof cfg,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
     host.rerankProfiles.installSyntheticFixture(cfg,host.rerankPort.scopeId(),'presentation-fixture');
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-    const generation=c.prepareGeneration(),rerank=c.prepareRerank();
+    const generation=c.prepareGeneration('fixture'),rerank=c.prepareRerank();
     Object.assign(f.plugin,{saveData:async()=>{entered.release();await gate.promise;throw Error('synthetic presentation save failure');}});
     const saving=f.plugin.patchSettings(s=>{s.presentationMode='expert';});
     const rejected=assert.rejects(saving);
@@ -1160,7 +1162,7 @@ test('B-R2-LIFE-12: a write-then-reject disable remains fenced until durable set
     await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
     await f.plugin.patchSettings(s=>{s.ai.generation=cfg;});
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-    const old=c.prepareGeneration();
+    const old=c.prepareGeneration('fixture');
     Object.assign(f.plugin,{verifyAiEvidence:async()=>{verifies++;throw Error('synthetic stop before HTTP');},
       saveData:async(v:unknown)=>{await original(v);throw Error('synthetic ambiguous persistence');}});
     await assert.rejects(f.plugin.patchSettings(s=>{s.ai.generation={state:'disabled'};}),/synthetic ambiguous persistence/);
@@ -1168,13 +1170,13 @@ test('B-R2-LIFE-12: a write-then-reject disable remains fenced until durable set
     assert.equal(c.sharedAuthorityTransition(),true);
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,false);
     assert.equal(c.isEvidencePreviewCurrent('generation',old.sequence),false);
-    await assert.rejects(c.generationConfirmed(old,'synthetic','fixture'));
-    assert.throws(()=>c.prepareGeneration());
+    await assert.rejects(c.generationConfirmed(old,'synthetic'));
+    assert.throws(()=>c.prepareGeneration('fixture'));
     Object.assign(f.plugin,{saveData:original});
     await f.plugin.patchSettings(s=>{s.topK=s.topK===1?2:1;});
     assert.equal(f.plugin.settings.ai.generation.state,'disabled');
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-    assert.throws(()=>c.prepareGeneration());
+    assert.throws(()=>c.prepareGeneration('fixture'));
     assert.equal(verifies,0);
   } finally {Object.assign(f.plugin,{saveData:original});await f.cleanup();}
 });
@@ -1213,7 +1215,7 @@ test('B-R2-LIFE-12: a persisted runtime change with failed application requires 
     await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
     await f.plugin.patchSettings(s=>{s.ai.generation=cfg;});
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-    const old=c.prepareGeneration(),engine=f.plugin.standalone!;
+    const old=c.prepareGeneration('fixture'),engine=f.plugin.standalone!;
     const cancel=engine.cancel.bind(engine);
     restore=()=>{Object.assign(engine,{cancel});};
     Object.assign(engine,{cancel:()=>{throw Error('synthetic apply failure');}});
@@ -1221,12 +1223,12 @@ test('B-R2-LIFE-12: a persisted runtime change with failed application requires 
     assert.equal(f.plugin.settings.ai.generation.state,'disabled');
     assert.equal(c.sharedAuthorityTransition(),true);
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,false);
-    await assert.rejects(c.generationConfirmed(old,'synthetic','fixture'));
+    await assert.rejects(c.generationConfirmed(old,'synthetic'));
     restore();
     await f.plugin.updateSettings(structuredClone(f.plugin.settings));
     assert.equal(c.sharedAuthorityTransition(),false);
     assert.equal(f.plugin.settings.ai.generation.state,'disabled');
-    assert.throws(()=>c.prepareGeneration());
+    assert.throws(()=>c.prepareGeneration('fixture'));
   } finally {restore();await f.cleanup();}
 });
 
@@ -1252,7 +1254,7 @@ test('B-R2-LIFE-12: replacement plugin cannot load stale settings during an old 
     gate.release();await saving;await navigationWatchdog(loading);
     assert.equal(loads,1);
     assert.equal(replacement.settings.ai.generation.state,'disabled');
-    assert.throws(()=>replacement!.searchController.prepareGeneration());
+    assert.throws(()=>replacement!.searchController.prepareGeneration('fixture'));
   } finally {gate.release();replacement?.onunload();Object.assign(f.plugin,{saveData:original});await f.cleanup();}
 });
 
@@ -1274,7 +1276,7 @@ test('B-R2-LIFE-12: a rejected write with unavailable readback retains the reque
     await f.plugin.updateSettings(structuredClone(f.plugin.settings));
     assert.equal(f.plugin.settings.ai.generation.state,'disabled');
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-    assert.throws(()=>c.prepareGeneration());
+    assert.throws(()=>c.prepareGeneration('fixture'));
   }finally{Object.assign(f.plugin,{saveData:save,loadData:load});await f.cleanup();}
 });
 
@@ -1287,7 +1289,7 @@ test('B-R2-LIFE-12: committed disable does not perform the obsolete duplicate id
     await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
     await f.plugin.patchSettings(s=>{s.ai.generation=cfg;});
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-    const old=c.prepareGeneration();
+    const old=c.prepareGeneration('fixture');
     const host=(f.plugin as unknown as {denseHost:ApiDenseHost}).denseHost;
     const invalidate=host.invalidate.bind(host);
     restore=()=>{Object.assign(host,{invalidate});};
@@ -1296,8 +1298,8 @@ test('B-R2-LIFE-12: committed disable does not perform the obsolete duplicate id
     assert.equal(attempts,1);
     assert.equal(f.plugin.settings.ai.generation.state,'disabled');
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-    assert.throws(()=>c.prepareGeneration());
-    await assert.rejects(c.generationConfirmed(old,'synthetic','fixture'));
+    assert.throws(()=>c.prepareGeneration('fixture'));
+    await assert.rejects(c.generationConfirmed(old,'synthetic'));
   }finally{restore();await f.cleanup();}
 });
 
@@ -1317,7 +1319,7 @@ for (const role of ['generation','reranking'] as const) {
       const host=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof reloadFixtureConfig,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
       host.rerankProfiles.installSyntheticFixture(reloadFixtureConfig,host.rerankPort.scopeId(),'reload-fixture');
       assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-      const generation=c.prepareGeneration(),rerank=c.prepareRerank();
+      const generation=c.prepareGeneration('fixture'),rerank=c.prepareRerank();
       Object.assign(old,{saveData:async(v:unknown)=>{writes++;await save(v);},
         verifyAiEvidence:async()=>{verifies++;throw Error('unexpected verification');}});
       let once=false;
@@ -1337,7 +1339,7 @@ for (const role of ['generation','reranking'] as const) {
       assert.equal(c.sharedAuthorityTransition(),true);
       assert.equal(c.isEvidencePreviewCurrent('generation',generation.sequence),false);
       assert.equal(c.isEvidencePreviewCurrent('reranking',rerank.sequence),false);
-      await assert.rejects(c.generationConfirmed(generation,'synthetic','fixture'));
+      await assert.rejects(c.generationConfirmed(generation,'synthetic'));
       await assert.rejects(c.rerankConfirmed(rerank,'synthetic','fixture'));
       assert.equal(verifies,0);
     }finally{replacement?.onunload();Object.assign(old,{saveData:save});await f.cleanup();}
@@ -1375,7 +1377,7 @@ for (const rejects of [false,true]) {
       await replacement.standalone!.whenIdle();
       const c=replacement.searchController;
       assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-      assert.throws(()=>c.prepareGeneration());assert.throws(()=>c.prepareRerank());
+      assert.throws(()=>c.prepareGeneration('fixture'));assert.throws(()=>c.prepareRerank());
       assert.equal(verifies,0);
     }finally{
       gate.release();
@@ -1413,7 +1415,7 @@ test('B-R2-LIFE-14: terminal callbacks see one closed search snapshot, never re-
     const profiles=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof reloadFixtureConfig,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
     profiles.rerankProfiles.installSyntheticFixture(reloadFixtureConfig,profiles.rerankPort.scopeId(),'terminal-fixture');
     const lexical=await c.search(uiRequest('REQ-LIFE-1',1));assert.ok(lexical.ok&&lexical.value.hits.length>0);
-    const g=c.prepareGeneration(),r=c.prepareRerank();
+    const g=c.prepareGeneration('fixture'),r=c.prepareRerank();
     const space:EmbeddingSpace={...reloadFixtureConfig.identity,dimension:3,normalization:'unit-l2',
       serializationId:'utf8-verbatim-v1',queryInstructionId:'identity-v1',documentInstructionId:'identity-v1'};
     const submit={apiVersion:1,operation:'submit',request:{protocolVersion:2,requestId:'terminal-d8',
@@ -1432,13 +1434,13 @@ test('B-R2-LIFE-14: terminal callbacks see one closed search snapshot, never re-
     const observe=(source:string):void=>{
       observations.push(source);
       const closed=c.sharedAuthorityTransition()&&!c.isEvidencePreviewCurrent('generation',g.sequence)
-        &&!c.isEvidencePreviewCurrent('reranking',r.sequence)&&denied(()=>c.prepareGeneration())&&denied(()=>c.prepareRerank())
+        &&!c.isEvidencePreviewCurrent('reranking',r.sequence)&&denied(()=>c.prepareGeneration('fixture'))&&denied(()=>c.prepareRerank())
         &&c.snapshot().response===null&&c.evidenceOperationStatus('generation').phase==='idle'
         &&c.evidenceOperationStatus('reranking').phase==='idle'&&!denseMachine.pending()&&!denseMachine.owns(owner)
         &&denseUi.snapshot(owner).phase==='idle'&&denseUi.operationStatus().phase==='idle'&&!denseUi.occupied()
         &&!c.control('rebuild').ok;
       if(!closed)observations.push('PARTIAL_TERMINAL_STATE');
-      replies.push(c.generationConfirmed(g,'synthetic','fixture').then(()=>true,()=>false),
+      replies.push(c.generationConfirmed(g,'synthetic').then(()=>true,()=>false),
         c.rerankConfirmed(r,'synthetic','fixture').then(()=>true,()=>false),
         c.search(uiRequest('REQ-LIFE-1',1)).then(v=>v.ok),c.open(0).then(v=>v.ok),
         nav.open(lexical.value.hits[0]!).then(()=>true,()=>false),
@@ -1476,9 +1478,9 @@ test('B-R2-LIFE-14: abort callbacks of both active evidence roles see sealed sib
     const profiles=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof cfg,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
     profiles.rerankProfiles.installSyntheticFixture(cfg,profiles.rerankPort.scopeId(),'terminal-active-fixture');
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-    const g=c.prepareGeneration(),r=c.prepareRerank();
+    const g=c.prepareGeneration('fixture'),r=c.prepareRerank();
     Object.assign(p,{verifyAiEvidence:async()=>{reads++;if(reads===2)entered.release();await gate.promise;}});
-    active.push(c.generationConfirmed(g,'synthetic','fixture'),c.rerankConfirmed(r,'synthetic','fixture'));
+    active.push(c.generationConfirmed(g,'synthetic'),c.rerankConfirmed(r,'synthetic','fixture'));
     await navigationWatchdog(entered.promise);
     const authority=c as unknown as {activeEvidence:Record<'generation'|'reranking',{abort:AbortController}>};
     for(const role of ['generation','reranking'] as const){
@@ -1512,9 +1514,9 @@ for (const role of ['generation','reranking'] as const) {
         const profiles=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof reloadFixtureConfig,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
         profiles.rerankProfiles.installSyntheticFixture(reloadFixtureConfig,profiles.rerankPort.scopeId(),'abort-reset-fixture');
         assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-        const g=c.prepareGeneration(),r=c.prepareRerank();
+        const g=c.prepareGeneration('fixture'),r=c.prepareRerank();
         Object.assign(p,{verifyAiEvidence:async()=>{throw Error('synthetic stop before HTTP');}});
-        active.push(role==='generation'?c.generationConfirmed(g,'synthetic','fixture'):c.rerankConfirmed(r,'synthetic','fixture'));
+        active.push(role==='generation'?c.generationConfirmed(g,'synthetic'):c.rerankConfirmed(r,'synthetic','fixture'));
         const internals=c as unknown as {activeEvidence:Record<typeof role,{abort:AbortController}>;pending?:unknown};
         const engine=p.standalone!,search=engine.search.bind(engine),save=p.saveData.bind(p);
         Object.assign(engine,{search:(input:SearchRequest)=>{dispatches++;return search(input);}});
@@ -1548,9 +1550,9 @@ for (const role of ['generation','reranking'] as const) {
       const profiles=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof reloadFixtureConfig,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
       profiles.rerankProfiles.installSyntheticFixture(reloadFixtureConfig,profiles.rerankPort.scopeId(),'nested-abort-fixture');
       assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-      const g=c.prepareGeneration(),r=c.prepareRerank();
+      const g=c.prepareGeneration('fixture'),r=c.prepareRerank();
       Object.assign(p,{verifyAiEvidence:async()=>{throw Error('synthetic stop before HTTP');}});
-      operation=role==='generation'?c.generationConfirmed(g,'synthetic','fixture'):c.rerankConfirmed(r,'synthetic','fixture');
+      operation=role==='generation'?c.generationConfirmed(g,'synthetic'):c.rerankConfirmed(r,'synthetic','fixture');
       const engine=p.standalone!,search=engine.search.bind(engine);
       Object.assign(engine,{search:(input:SearchRequest)=>{dispatches++;return search(input);}});
       const internals=c as unknown as {activeEvidence:Record<typeof role,{abort:AbortController}>};
@@ -1604,7 +1606,7 @@ for (const role of ['generation','reranking'] as const) {
         }
         assert.equal(denseUi.snapshot(owner).phase,phase);assert.equal(rendered.at(-1),phase);
         assert.equal(denseMachine.owns(owner),true);
-        const start=()=>role==='generation'?c.generationConfirmed(c.prepareGeneration(),'synthetic','fixture'):c.rerankConfirmed(c.prepareRerank(),'synthetic','fixture');
+        const start=()=>role==='generation'?c.generationConfirmed(c.prepareGeneration('fixture'),'synthetic'):c.rerankConfirmed(c.prepareRerank(),'synthetic','fixture');
         Object.assign(p,{verifyAiEvidence:async()=>{throw Error('synthetic stop before HTTP');}});
         const internals=c as unknown as {activeEvidence:Record<typeof role,{abort:AbortController}>};
         const visible=()=>denseUi.owns(owner)&&denseMachine.owns(owner)&&denseUi.snapshot(owner).phase===phase;
@@ -1644,7 +1646,7 @@ test('B-R2-LIFE-16: source event dense abort cannot expose lexical evidence or o
     await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
     await p.patchSettings(s=>{s.ai.generation=reloadFixtureConfig;s.ai.embedding=reloadFixtureConfig;});
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-    const preview=c.prepareGeneration();
+    const preview=c.prepareGeneration('fixture');
     const space:EmbeddingSpace={...reloadFixtureConfig.identity,dimension:3,normalization:'unit-l2',serializationId:'utf8-verbatim-v1',queryInstructionId:'identity-v1',documentInstructionId:'identity-v1'};
     const staged=await p.denseApi.request({apiVersion:1,operation:'submit',request:{protocolVersion:2,requestId:'life16-source',query:'REQ-LIFE-1',requestedMode:'dense',matchMode:'terms',scope:['fixture.md'],limit:1},space});
     assert.ok(staged.ok&&staged.value&&'operationId' in staged.value);
@@ -1675,7 +1677,7 @@ for(const label of sourceRetirementLabels) for(const afterEffect of [false,true]
       await p.onload();f.layout();await f.internal.initializing;await p.standalone!.whenIdle();
       await p.patchSettings(s=>{s.ai.generation=reloadFixtureConfig;s.ai.embedding=reloadFixtureConfig;});
       assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-      const preview=c.prepareGeneration();
+      const preview=c.prepareGeneration('fixture');
       const {denseHost,denseUi}=p as unknown as {denseHost:ApiDenseHost;denseUi:DenseUiController};
       const owner=Symbol('retirement');
       const space:EmbeddingSpace={...reloadFixtureConfig.identity,dimension:3,normalization:'unit-l2',
@@ -1777,9 +1779,9 @@ test('LIFE-17 shared retirement retains failed evidence abort and attempts indep
     const profiles=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof cfg,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
     profiles.rerankProfiles.installSyntheticFixture(cfg,profiles.rerankPort.scopeId(),'shared-abort-fault');
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-    const g=c.prepareGeneration(),r=c.prepareRerank();
+    const g=c.prepareGeneration('fixture'),r=c.prepareRerank();
     Object.assign(p,{verifyAiEvidence:async()=>{if(++reads===2)entered.release();await gate.promise;}});
-    active.push(c.generationConfirmed(g,'synthetic','fixture'),c.rerankConfirmed(r,'synthetic','fixture'));
+    active.push(c.generationConfirmed(g,'synthetic'),c.rerankConfirmed(r,'synthetic','fixture'));
     await navigationWatchdog(entered.promise);
     const {activeEvidence}=c as unknown as {activeEvidence:Record<'generation'|'reranking',{abort:AbortController}>};
     for(const role of ['reranking','generation'] as const){
@@ -1854,11 +1856,11 @@ test('systemic role-local failed abort preserves independent role and Basic: '+r
     const profiles=c as unknown as {rerankProfiles:{installSyntheticFixture(config:typeof cfg,scopeId:string,fixtureId:string):unknown};rerankPort:{scopeId():string}};
     profiles.rerankProfiles.installSyntheticFixture(cfg,profiles.rerankPort.scopeId(),'local-abort-fault');
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-    const generation=c.prepareGeneration(),reranking=c.prepareRerank();
+    const generation=c.prepareGeneration('fixture'),reranking=c.prepareRerank();
     const other=role==='generation'?'reranking':'generation',otherPreview=role==='generation'?reranking:generation;
     const cancel=()=>role==='generation'?c.cancelGeneration():c.cancelRerank();
     Object.assign(p,{verifyAiEvidence:async()=>{entered.release();await gate.promise;}});
-    active=role==='generation'?c.generationConfirmed(generation,'synthetic','fixture'):c.rerankConfirmed(reranking,'synthetic','fixture');
+    active=role==='generation'?c.generationConfirmed(generation,'synthetic'):c.rerankConfirmed(reranking,'synthetic','fixture');
     await navigationWatchdog(entered.promise);
     const {activeEvidence}=c as unknown as {activeEvidence:Record<typeof role,{abort:AbortController}>};
     const owner=activeEvidence[role].abort,original=owner.abort.bind(owner);
@@ -1875,10 +1877,10 @@ test('systemic role-local failed abort preserves independent role and Basic: '+r
     gate.release();await navigationWatchdog(active);
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
     assert.equal(attempts,1);
-    assert.throws(()=>role==='generation'?c.prepareGeneration():c.prepareRerank(),/NOT_READY/);
+    assert.throws(()=>role==='generation'?c.prepareGeneration('fixture'):c.prepareRerank(),/NOT_READY/);
     cancel();assert.equal(attempts,2);
     fault=false;cancel();assert.equal(attempts,3);
-    assert.ok(role==='generation'?c.prepareGeneration():c.prepareRerank());
+    assert.ok(role==='generation'?c.prepareGeneration('fixture'):c.prepareRerank());
   }finally{
     fault=false;gate.release();await active?.catch(()=>{});await f.cleanup();
     await new Promise<void>(resolve=>server.close(()=>resolve()));
@@ -2056,4 +2058,40 @@ test('systemic source ledger overflow is terminal-only and Basic reload reconcil
     assert.equal(result.value.hits[0]!.originalExcerpt,'REQ-LIFE-NEW: changed source.');
     assert.equal(c.sharedAuthorityTransition(),true);
   }finally{replacement?.onunload();await f.cleanup();}
+});
+
+test('POLICY.2b native create identity, saved rules, rename and unload guard read-only preview',async()=>{
+  const f=await fixture();
+  const file=Object.assign(new Empty(),{path:'fixture.md'});
+  const events=new Map<string,(file:unknown,oldPath?:string)=>void>();
+  Object.assign(f.plugin.app.vault,{on:(name:string,fn:(file:unknown,oldPath?:string)=>void)=>{events.set(name,fn);return {};},getAbstractFileByPath:()=>file});
+  Object.assign(f.plugin.app.metadataCache,{on:(name:string,fn:(file:unknown)=>void)=>{events.set('metadata:'+name,fn);return {};}});
+  Object.assign(f.plugin.app.workspace,{getActiveFile:()=>file});
+  const preview=(f.plugin as unknown as {previewNewMaterial(c:NewMaterialRuleConfig):Promise<NewMaterialDecision>}).previewNewMaterial.bind(f.plugin);
+  const rules:NewMaterialRuleConfig={...defaultMarkingRules(),defaultAction:'set-private'};
+  try{
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    const original=await readFile(join(f.vault,file.path));
+    assert.equal((await preview(rules)).reason,'lifecycle-unresolved');
+    await f.plugin.patchSettings(s=>{s.markingRules=rules;});
+    await f.plugin.standalone!.whenIdle();
+    assert.deepEqual(f.plugin.settings.markingRules,rules);
+    events.get('create')!(file);await f.plugin.standalone!.whenIdle();
+    const decision=await preview(rules);
+    assert.equal(decision.action,'set-private');assert.equal(decision.externalBlocked,true);
+    const modified=Buffer.concat([original,Buffer.from('\n# Modified synthetic')]);
+    await writeFile(join(f.vault,file.path),modified);
+    events.get('modify')!(file);await f.plugin.standalone!.whenIdle();
+    assert.equal((await preview(rules)).reason,'lifecycle-unresolved');
+    events.get('create')!(file);await f.plugin.standalone!.whenIdle();
+    assert.equal((await preview(rules)).action,'set-private');
+    events.get('metadata:changed')!(file);await f.plugin.standalone!.whenIdle();
+    assert.equal((await preview(rules)).reason,'lifecycle-unresolved');
+    events.get('create')!(file);await f.plugin.standalone!.whenIdle();
+    assert.equal((await preview(rules)).action,'set-private');
+    events.get('rename')!(file,'old.md');await f.plugin.standalone!.whenIdle();
+    assert.equal((await preview(rules)).reason,'lifecycle-unresolved');
+    assert.deepEqual(await readFile(join(f.vault,file.path)),modified);
+    f.plugin.onunload();await assert.rejects(preview(rules),/SOURCE_REJECTED/);
+  }finally{await f.cleanup();}
 });

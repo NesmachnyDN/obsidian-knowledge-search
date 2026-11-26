@@ -1553,3 +1553,255 @@ test('B8: corrupt predecessor generation before C must not erase the last valid 
     assert.equal(reopened.generation?.generationId, a);
   } finally { await cleanup(); }
 });
+
+test('06H.2-A1: exact editor coordinates across Unicode and original LF/CRLF/CR delimiters', async () => {
+  const {mapEditorRange,verifyOriginalRange} = await import('../plugin/src/standalone/selection-range');
+  for (const newline of ['\n','\r\n','\r']) {
+    const original = ['α🚀e\u0301','selected line',''].join(newline);
+    const raw = Buffer.from(original);
+    const editor = original.replace(/\r\n|\r/g,'\n');
+    const selection = {sourceId:'note.md',sourceSha256:hash(raw),editorText:editor,
+      anchor:{line:2,utf16Column:0},head:{line:0,utf16Column:3}};
+    const range = mapEditorRange(selection,raw);
+    const expected = Buffer.byteLength('α🚀');
+    assert.deepEqual(range,{sourceId:'note.md',sourceSha256:hash(raw),byteStart:expected,
+      byteEnd:raw.length,charStart:2,charEnd:[...original].length});
+    assert.ok(Object.isFrozen(range));
+    assert.deepEqual(mapEditorRange({...selection,anchor:selection.head,head:selection.anchor},raw),range);
+    verifyOriginalRange(range,raw);
+    const firstLineEnd = mapEditorRange({...selection,anchor:{line:0,utf16Column:0},head:{line:0,utf16Column:5}},raw);
+    assert.equal(firstLineEnd.byteEnd,Buffer.byteLength('α🚀e\u0301'));
+    assert.equal(firstLineEnd.charEnd,4);
+    const nextLine = mapEditorRange({...selection,anchor:{line:0,utf16Column:5},head:{line:1,utf16Column:0}},raw);
+    assert.equal(nextLine.byteEnd-nextLine.byteStart,Buffer.byteLength(newline));
+    assert.equal(nextLine.charEnd-nextLine.charStart,newline.length);
+    assert.throws(()=>mapEditorRange({...selection,head:{line:0,utf16Column:2}},raw),error('INVALID_REQUEST'));
+    assert.throws(()=>mapEditorRange({...selection,head:selection.anchor},raw),error('INVALID_REQUEST'));
+    assert.throws(()=>mapEditorRange({...selection,head:{line:0,utf16Column:6}},raw),error('INVALID_REQUEST'));
+    assert.throws(()=>mapEditorRange({...selection,head:{line:3,utf16Column:0}},raw),error('INVALID_REQUEST'));
+    assert.throws(()=>mapEditorRange({...selection,editorText:editor+' unsaved'},raw),error('SOURCE_STALE'));
+    assert.throws(()=>mapEditorRange({...selection,editorText:editor.normalize('NFC')},raw),error('SOURCE_STALE'));
+    assert.throws(()=>mapEditorRange({...selection,sourceSha256:hash('other')},raw),error('SOURCE_STALE'));
+    assert.throws(()=>verifyOriginalRange({...range,charStart:1},raw),error('INVALID_REQUEST'));
+    assert.throws(()=>verifyOriginalRange({...range,byteStart:3,charStart:1},raw),error('INVALID_REQUEST'));
+    if(newline==='\r\n') assert.throws(()=>verifyOriginalRange({...nextLine,byteEnd:nextLine.byteEnd-1,charEnd:nextLine.charEnd-1},raw),error('INVALID_REQUEST'));
+  }
+  for(const raw of [Buffer.from([0xff]),Buffer.from('\ufeffx'),Buffer.from('x\0')]){
+    assert.throws(()=>mapEditorRange({sourceId:'note.md',sourceSha256:hash(raw),editorText:'x',
+      anchor:{line:0,utf16Column:0},head:{line:0,utf16Column:1}},raw),error('INVALID_UTF8'));
+  }
+});
+test('06H.2-A1: selected range filters before Top-K and excludes inherited heading and Properties context', async () => {
+  const {mapEditorRange} = await import('../plugin/src/standalone/selection-range');
+  const text = ['---','secret: private','---','# forbidden','needle needle needle','needle allowed','needle partial',''].join('\r\n');
+  const raw=Buffer.from(text);
+  const {engine,cleanup}=await setup({'selected.md':text,'other.md':'needle needle needle needle'});
+  try {
+    const range=mapEditorRange({sourceId:'selected.md',sourceSha256:hash(raw),editorText:text.replace(/\r\n/g,'\n'),
+      anchor:{line:5,utf16Column:0},head:{line:6,utf16Column:6}},raw);
+    const options={range,scope:['selected.md'],limit:1};
+    for(const matchMode of ['terms','literal'] as const){
+      const result=await engine.search(search('needle',{...options,matchMode}));
+      assert.equal(result.status,'ok');
+      assert.deepEqual(result.hits.map(h=>h.originalExcerpt),['needle allowed']);
+      assert.deepEqual(result.hits[0]!.headings,[]);
+      assert.deepEqual(result.hits[0]!.properties,[]);
+      assert.equal(result.hits[0]!.rank,1);
+      assert.equal(result.hits[0]!.sourceId,'selected.md');
+    }
+    assert.ok((await engine.search(search('forbidden'))).hits.length>0);
+    assert.deepEqual((await engine.search(search('forbidden',options))).hits,[]);
+    assert.deepEqual((await engine.search(search('partial',options))).hits,[]);
+    assert.equal((await engine.search(search('needle',{...options,predicates:[{key:'secret',valueType:'string',value:'private',operator:'eq'}]}))).hits.length,1);
+    assert.deepEqual((await engine.search(search('needle',{...options,predicates:[{key:'secret',valueType:'string',value:'wrong',operator:'eq'}]}))).hits,[]);
+    for(const overrides of [{scope:[]},{scope:['other.md']},{scope:['selected.md','other.md']},{scope:undefined},
+      {requestedMode:'dense' as const},{requestedMode:'hybrid' as const},{range:{...range,byteEnd:range.byteStart}},
+      {range:{...range,charStart:-1}},{range:{...range,extra:true}}]){
+      await assert.rejects(engine.search(search('needle',{...options,...overrides})),error('INVALID_REQUEST'));
+    }
+    await assert.rejects(engine.search(search('',{...options,predicates:[{key:'secret',valueType:'string',value:'private',operator:'eq'}]})),error('INVALID_REQUEST'));
+    const stale=await engine.search(search('absent',{...options,range:{...range,sourceSha256:hash('different')}}));
+    assert.equal(stale.status,'failed');assert.equal(stale.error,'SOURCE_STALE');assert.deepEqual(stale.hits,[]);
+  }finally{await cleanup();}
+});
+test('06H.2-A1: selected source reauthenticated on zero hits, and caller cannot mutate scope in flight', async () => {
+  const {mapEditorRange} = await import('../plugin/src/standalone/selection-range');
+  const text='outside\nneedle allowed\n';
+  const raw=Buffer.from(text);
+  const {engine,reader,cleanup}=await setup({'selected.md':text,'other.md':'needle outside'});
+  const read=reader.read.bind(reader);
+  try{
+    const range=mapEditorRange({sourceId:'selected.md',sourceSha256:hash(raw),editorText:text,
+      anchor:{line:1,utf16Column:0},head:{line:2,utf16Column:0}},raw);
+    const req=search('needle',{range:{...range},scope:['selected.md']});
+    const result=engine.search(req);
+    req.scope![0]='other.md';req.range!.sourceId='other.md';
+    assert.deepEqual((await result).hits.map(h=>h.originalExcerpt),['needle allowed']);
+    let reads=0;
+    reader.read=async path=>path==='selected.md'&&++reads===2?Buffer.from('changed'):read(path);
+    const changed=await engine.search(search('not-present',{range,scope:['selected.md']}));
+    assert.equal(changed.status,'failed');assert.equal(changed.error,'SOURCE_STALE');assert.deepEqual(changed.hits,[]);
+  }finally{reader.read=read;await cleanup();}
+});
+
+test('06H.2-A2a: all explicit selectors share canonical versioned membership', async()=>{
+  const {mapEditorRange}=await import('../plugin/src/standalone/selection-range');
+  const files={'folder/a.md':'---\nteam: red\n---\nneedle alpha\n',
+    'folder/sub/b.md':'---\nteam: blue\n---\nneedle beta\n',
+    'folder2/c.md':'---\nteam: red\n---\nneedle outside #chosen\n','folder/empty.md':'',
+    'partial.md':'    needle partial\n'};
+  const {engine,cleanup}=await setup(files);
+  const signal=new AbortController().signal;
+  const scope=async(selector:unknown)=>engine.captureChatScope(selector,signal);
+  const query={requestId:'chat-scope',query:'needle',limit:10};
+  const ids=(lease:Awaited<ReturnType<typeof scope>>)=>lease.snapshot.sources.map(s=>s.sourceId);
+  try{
+    const all=await scope({mode:'vault-wide'});
+    assert.deepEqual(ids(all),['folder/a.md','folder/sub/b.md','folder2/c.md','partial.md']);
+    assert.deepEqual(all.snapshot.coverage,{eligible:4,excluded:1,partial:1,unsupported:'unknown'});
+    assert.ok(Object.isFrozen(all.snapshot)&&Object.isFrozen(all.snapshot.sources)&&Object.isFrozen(all.snapshot.sources[0]));
+    assert.deepEqual((await all.search(query)).hits.map(h=>h.sourceId).sort(),ids(all));
+    const active=await scope({mode:'selected',kind:'active-note',sourceId:'folder/a.md'});
+    assert.deepEqual(ids(active),['folder/a.md']);
+    const folder=await scope({mode:'selected',kind:'folder',path:'folder'});
+    assert.deepEqual(ids(folder),['folder/a.md','folder/sub/b.md']);
+    assert.equal(folder.snapshot.coverage.excluded,1);
+    assert.deepEqual((await folder.search(query)).hits.map(h=>h.sourceId).sort(),ids(folder));
+    const explicitInput={mode:'selected',kind:'files',sourceIds:['folder2/c.md','folder/a.md']};
+    const selectedPromise=scope(explicitInput);
+    explicitInput.sourceIds[0]='folder/sub/b.md';
+    const selected=await selectedPromise;
+    assert.deepEqual(ids(selected),['folder/a.md','folder2/c.md']);
+    const results=await scope({mode:'selected',kind:'applied-results',sources:[{sourceId:'folder/sub/b.md',sourceSha256:hash(files['folder/sub/b.md'])}]});
+    assert.deepEqual(ids(results),['folder/sub/b.md']);
+    const properties=await scope({mode:'selected',kind:'properties',predicates:[{key:'team',valueType:'string',value:'red',operator:'eq'}]});
+    assert.deepEqual(ids(properties),['folder/a.md','folder2/c.md']);
+    assert.deepEqual((await properties.search(query)).hits.map(h=>h.sourceId).sort(),ids(properties));
+    const metadata=await scope({mode:'selected',kind:'properties',predicates:[],metadata:{tag:'chosen'}});
+    assert.deepEqual(ids(metadata),['folder2/c.md']);
+    const raw=Buffer.from(files['folder/a.md']);
+    const range=mapEditorRange({sourceId:'folder/a.md',sourceSha256:hash(raw),editorText:raw.toString(),
+      anchor:{line:3,utf16Column:0},head:{line:4,utf16Column:0}},raw);
+    const editor=await scope({mode:'selected',kind:'editor-selection',range});
+    const result=await editor.search(query);
+    assert.deepEqual(result.hits.map(h=>h.originalExcerpt),['needle alpha']);
+    assert.deepEqual(result.hits[0]!.properties,[]);
+    await assert.rejects(editor.search({...query,scope:['folder2/c.md']} as typeof query),error('SCOPE_INVALID'));
+    await assert.rejects(properties.search({...query,query:''}),error('SCOPE_INVALID'));
+  }finally{await cleanup();}
+});
+
+test('06H.2-A2a: strict selectors reject missing, empty, unknown and stale membership',async()=>{
+  const {engine,cleanup}=await setup({'a.md':'needle','empty.md':''});
+  const scope=(selector:unknown)=>engine.captureChatScope(selector,new AbortController().signal);
+  try{
+    for(const selector of [undefined,{mode:'vault-wide',sourceIds:[]},{mode:'selected',kind:'unknown'},
+      {mode:'selected',kind:'folder',path:''},
+      {mode:'selected',kind:'files',sourceIds:['a.md','a.md']},
+      {mode:'selected',kind:'files',sourceIds:['file.pdf']},
+      {mode:'selected',kind:'files',sourceIds:new Array(1)},
+      {mode:'selected',kind:'applied-results',sources:new Array(1)},
+      {mode:'selected',kind:'properties',predicates:new Array(1)},
+      {mode:'selected',kind:'properties',predicates:[]}])
+      await assert.rejects(scope(selector),error('SCOPE_INVALID'));
+    for(const selector of [{mode:'selected',kind:'files',sourceIds:[]},{mode:'selected',kind:'folder',path:'missing'},
+      {mode:'selected',kind:'applied-results',sources:[]}])
+      await assert.rejects(scope(selector),error('SCOPE_EMPTY'));
+    await assert.rejects(scope({mode:'selected',kind:'active-note',sourceId:'empty.md'}),error('SCOPE_UNSUPPORTED'));
+    await assert.rejects(scope({mode:'selected',kind:'files',sourceIds:['a.md','missing.md']}),error('SCOPE_CHANGED'));
+    await assert.rejects(scope({mode:'selected',kind:'applied-results',sources:[{sourceId:'a.md',sourceSha256:hash('stale')}]}),error('SCOPE_CHANGED'));
+  }finally{await cleanup();}
+});
+test('06H.2-A2a: missed membership and excluded-source edits retire leases, even after restoration', async()=>{
+  const {engine,root,paths,cleanup}=await setup({'folder/a.md':'---\nteam: red\n---\nneedle\n','folder/b.md':'---\nteam: blue\n---\nother\n','outside.md':'needle'});
+  try{
+    const signal=new AbortController().signal;
+    const props=await engine.captureChatScope({mode:'selected',kind:'properties',predicates:[{key:'team',valueType:'string',value:'red',operator:'eq'}]},signal);
+    await writeFile(join(root,'folder/b.md'),'---\nteam: red\n---\nother\n');
+    await assert.rejects(props.verify(),error('SCOPE_CHANGED'));
+    assert.equal(props.current(),false);
+    await writeFile(join(root,'folder/b.md'),'---\nteam: blue\n---\nother\n');
+    await assert.rejects(props.verify(),error('SCOPE_CHANGED'));
+    const folder=await engine.captureChatScope({mode:'selected',kind:'folder',path:'folder'},signal);
+    paths.delete('folder/b.md');
+    await assert.rejects(folder.verify(),error('SCOPE_CHANGED'));
+    paths.add('folder/b.md');
+    await assert.rejects(folder.verify(),error('SCOPE_CHANGED'));
+    const cancelled=new AbortController();
+    const lease=await engine.captureChatScope({mode:'selected',kind:'active-note',sourceId:'folder/a.md'},cancelled.signal);
+    cancelled.abort();
+    assert.equal(lease.current(),false);
+    await assert.rejects(lease.search({requestId:'cancelled',query:'needle',limit:1}),error('CANCELLED'));
+  }finally{await cleanup();}
+});
+
+test('06H.2-A2a: in-flight verification fails closed after source revision change or concurrent admission', async()=>{
+  const {engine,reader,cleanup}=await setup({'a.md':'needle','b.md':'other'});
+  const original=reader.read.bind(reader);
+  let release!:()=>void, entered!:()=>void;
+  const gate=new Promise<void>(resolve=>release=resolve), started=new Promise<void>(resolve=>entered=resolve);
+  try{
+    const lease=await engine.captureChatScope({mode:'selected',kind:'active-note',sourceId:'a.md'},new AbortController().signal);
+    reader.read=async path=>{if(path==='a.md'){entered();await gate;}return original(path);};
+    const pending=lease.verify();
+    await started;
+    await assert.rejects(lease.search({requestId:'busy',query:'needle',limit:1}),error('BUSY'));
+    await assert.rejects(lease.verify(),error('BUSY'));
+    engine.changed('a.md');release();
+    await assert.rejects(pending,error('SCOPE_CHANGED'));
+    assert.equal(lease.current(),false);
+    reader.read=original;
+    await engine.whenIdle();
+    await assert.rejects(lease.verify(),error('SCOPE_CHANGED'));
+  }finally{release();reader.read=original;await cleanup();}
+});
+
+test('06H.2-A2a: direct ranged search rejects a readable source removed from current membership',async()=>{
+  const {mapEditorRange}=await import('../plugin/src/standalone/selection-range');
+  const raw=Buffer.from('needle');
+  const {engine,reader,paths,cleanup}=await setup({'a.md':raw.toString()});
+  const read=reader.read.bind(reader);
+  try{
+    const range=mapEditorRange({sourceId:'a.md',sourceSha256:hash(raw),editorText:raw.toString(),
+      anchor:{line:0,utf16Column:0},head:{line:0,utf16Column:6}},raw);
+    let first=true;
+    reader.read=async path=>{const bytes=await read(path);if(first){first=false;paths.delete('a.md');}return bytes;};
+    const response=await engine.search(search('needle',{range,scope:['a.md']}));
+    assert.equal(response.status,'failed');assert.equal(response.error,'SOURCE_STALE');assert.deepEqual(response.hits,[]);
+  }finally{reader.read=read;await cleanup();}
+});
+
+test('POLICY.2b local preview shares the existing worker, original-byte proof and source revision fence',async()=>{
+  const f=await setup({'note.md':'---\nllm_processing: private\n---\n# synthetic'});
+  try{
+    const path='note.md',before=await readFile(join(f.root,path));
+    const proof=await f.engine.previewPolicyMetadata(path,()=>true);
+    assert.equal(proof.sha256,hash(before));assert.equal(proof.state,'private');
+    await assert.rejects(f.engine.previewPolicyMetadata(path,()=>false),/SOURCE_CHANGED/);
+    let calls=0;
+    await assert.rejects(f.engine.previewPolicyMetadata(path,()=>{if(++calls===2)f.engine.changed(path);return true;}),/SOURCE_CHANGED/);
+    await f.engine.whenIdle();
+    assert.deepEqual(await readFile(join(f.root,path)),before);
+    const response=await f.engine.search(search('synthetic'));
+    assert.equal(response.hits.length>0,true);
+  }finally{await f.cleanup();}
+});
+
+test('POLICY.2b expired preview retains physical slot and cannot publish late proof',async t=>{
+  const f=await setup({'note.md':'# synthetic'});
+  const original=f.reader.read.bind(f.reader);
+  let release!:()=>void,entered!:()=>void;
+  const started=new Promise<void>(r=>entered=r),gate=new Promise<void>(r=>release=r);
+  try{
+    f.reader.read=async path=>{entered();await gate;return original(path);};
+    t.mock.timers.enable({apis:['setTimeout']});
+    const pending=f.engine.previewPolicyMetadata('note.md',()=>true);
+    const expired=assert.rejects(pending,/PARSER_TIMEOUT/);
+    await started;t.mock.timers.tick(5000);await expired;
+    await assert.rejects(f.engine.previewPolicyMetadata('note.md',()=>true),/PARSER_BUSY/);
+    t.mock.timers.reset();release();f.reader.read=original;
+    await f.engine.whenIdle();
+    const proof=await f.engine.previewPolicyMetadata('note.md',()=>true);
+    assert.equal(proof.sha256,hash(Buffer.from('# synthetic')));
+  }finally{t.mock.timers.reset();release();f.reader.read=original;await f.cleanup();}
+});

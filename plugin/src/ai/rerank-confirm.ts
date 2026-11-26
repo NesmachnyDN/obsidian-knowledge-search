@@ -26,18 +26,18 @@ export function renderRerankConfirmation(panel: HTMLElement, preview: RerankPrev
     if(!generation && value==='public') continue;
     const option = textElement(doc,'option',label); option.value=value!; classification.appendChild(option);
   }
-  const token = add('input','',prefix+'-token'); token.type='password'; token.autocomplete='off';
-  token.setAttribute('aria-label','One-request local bearer token'); token.placeholder='Local bearer token (not saved)';
+  const token = generation?undefined:add('input','',prefix+'-token');
+  if(token){token.type='password';token.autocomplete='off';token.setAttribute('aria-label','One-request local bearer token');token.placeholder='Local bearer token (not saved)';}
   const label=add('label',''); const check=doc.createElement('input');check.type='checkbox';check.className=prefix+'-confirm-check';
   label.append(check,doc.createTextNode(' I authorize this exact query and excerpts to this local endpoint once, and confirm the selected classification.'));
   const button=add('button','Send once',prefix+'-confirm');button.disabled=true;
-  const update=()=>{button.disabled=!check.checked||!classification.value||!token.value;};
-  check.onchange=update;classification.onchange=update;token.oninput=update;
+  const update=()=>{button.disabled=!check.checked||!classification.value||(!generation&&!token?.value);};
+  check.onchange=update;classification.onchange=update;if(token)token.oninput=update;
   button.onclick=()=>{
-    if(!panel.contains(button)||button.disabled||!check.checked||!token.value||!['synthetic','public'].includes(classification.value)) return;
-    const secret=token.value;token.value='';button.disabled=true;
+    if(!panel.contains(button)||button.disabled||!check.checked||(!generation&&!token?.value)||!['synthetic','public'].includes(classification.value)) return;
+    const secret=token?.value??'';if(token)token.value='';button.disabled=true;
     panel.replaceChildren();submit(classification.value as 'synthetic'|'public',secret);
   };
   const close=add('button','Cancel confirmation',prefix+'-close');
-  close.onclick=()=>{token.value='';panel.replaceChildren();cancel();};
+  close.onclick=()=>{if(token)token.value='';panel.replaceChildren();cancel();};
 }

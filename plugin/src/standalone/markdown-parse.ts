@@ -1,4 +1,4 @@
-import { BOUNDS, SCHEMA, StandaloneError } from './shared';
+import { BOUNDS, SCHEMA, StandaloneError, type PolicyMetadataProof } from './shared';
 import type { ParsedBlock, Scalar, SourceVersion, TypedProperty } from './contracts';
 
 // Preserve technical identifiers as a whole and also their useful components.
@@ -90,7 +90,7 @@ function frontmatter(lines: string[]): { properties: TypedProperty[]; valid: boo
   }
 }
 type Line = { text: string; start: number; end: number; charStart: number; charEnd: number; number: number };
-function physicalLines(raw: Uint8Array): Line[] {
+export function physicalLines(raw: Uint8Array): Line[] {
   let contents: string;
   try { contents = new TextDecoder('utf-8', { fatal: true }).decode(raw); }
   catch { throw new StandaloneError('INVALID_UTF8'); }
@@ -114,6 +114,45 @@ function physicalLines(raw: Uint8Array): Line[] {
   }
   if (offset !== raw.byteLength) throw new StandaloneError('INVALID_UTF8');
   return lines;
+}
+/** Policy-only completeness check in the existing parser worker. The canonical
+ * frontmatter parser interprets values; this proof merely excludes syntax where
+ * its limited grammar cannot establish an unambiguous original mapping. */
+export function parsePolicyMetadata(path:string,data:Uint8Array,rootId:string,sha:string):PolicyMetadataProof {
+  const proof=(state:PolicyMetadataProof['state'],properties:readonly TypedProperty[]=[]):PolicyMetadataProof=>({
+    sourceId:path,sha256:sha,scopeId:rootId,state,
+    properties:properties.map(p=>({key:p.key,valueType:p.valueType,value:Array.isArray(p.value)?[...p.value]:p.value})),
+  });
+  if(data.byteLength>BOUNDS.fileBytes)throw new StandaloneError('SOURCE_LIMIT');
+  const lines=physicalLines(data);
+  const first=lines[0]?.text??'';
+  const firstNonempty=lines.find(x=>x.text.trim()!=='')?.text.trim()??'';
+  if(first!=='---')return proof(/^(?:---|\.\.\.|%)/.test(firstNonempty)?'unresolved':'absent');
+  const end=lines.findIndex((x,i)=>i>0&&x.text==='---');
+  if(end<1)return proof('unresolved');
+  const rawLines=lines.slice(1,end).map(x=>x.text);
+  const metadata=frontmatter(rawLines);
+  if(!metadata.valid)return proof('unresolved');
+  for(const line of rawLines){
+    if(/[\u0085\u2028\u2029\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(line))return proof('unresolved');
+    const match=/^(?:[A-Za-z_][\w-]*:[ \t]*| {2,}- )(.*)$/.exec(line);
+    if(!match)return proof('unresolved');
+    const raw=match[1]!.trim();
+    if(!raw)continue;
+    // JSON-style inline sequences have already passed valueOf; disallow escapes
+    // and control characters rather than introducing another YAML interpreter.
+    if(raw.startsWith('[')&&raw.endsWith(']')&&!/[\\\u0000-\u001f]/.test(raw))continue;
+    if(/^"[^"\\\u0000-\u001f]*"$/.test(raw)||/^'(?:[^'\u0000-\u001f]|'')*'$/.test(raw))continue;
+    if(raw==='~'||raw==='null'||raw==='true'||raw==='false'||/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(raw)||/^\d{4}-\d{2}-\d{2}$/.test(raw)&&typeOf(raw)==='date')continue;
+    // Restrict unquoted words to simple, non-ambiguous scalar spellings.
+    if(/^[\p{L}][\p{L}\p{M}\p{N} _./-]*$/u.test(raw)&&!/^(?:null|true|false|yes|no|on|off)$/i.test(raw))continue;
+    return proof('unresolved');
+  }
+  const property=metadata.properties.find(p=>p.key==='llm_processing');
+  if(!property)return proof('absent',metadata.properties);
+  if(property.valueType==='string'&&property.value==='external')return proof('external',metadata.properties);
+  if(property.valueType==='string'&&property.value==='private')return proof('private',metadata.properties);
+  return proof('invalid',metadata.properties);
 }
 const HEADING = /^(#{1,6})[ \t]+(.+)$/;
 const CLAUSE = /^(REQ-[A-Za-z0-9-]+|[0-9]+(?:\.[0-9]+)+):/;

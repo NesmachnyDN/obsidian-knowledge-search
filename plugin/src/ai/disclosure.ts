@@ -1,4 +1,5 @@
 import { hash, isDigest } from '../standalone/contracts';
+import { generationPolicyPayload, generationPolicySourceDigest, sameGenerationPolicy, type GenerationPolicyBinding } from './generation-policy';
 import { parsePreference } from './config';
 import { ProviderFailure, type AiRole, type AuthorizedCandidates, type ProviderConfig } from './contracts';
 
@@ -12,6 +13,7 @@ export type DisclosureGrant = {
   version: 1; role: AiRole; configDigest: string; scopeId: string; expiresUnixMs: number;
   queryDigest: string; queryClassification: Classification;
   runtimeProfileBinding?: string;
+  notePolicyBinding?:GenerationPolicyBinding;
   sources: readonly { sourceId: string; sourceSha256: string; excerptDigest: string; classification: Classification }[];
 };
 export function configDigest(role: AiRole, config: ProviderConfig): string {
@@ -31,7 +33,7 @@ function checkedBytes(text: unknown, max: number): number {
 }
 export function projectDisclosure(role: AiRole, config: ProviderConfig, scopeId: string,
   query: ClassifiedText, candidates: readonly Candidate[], grant: DisclosureGrant | null,
-  signal: AbortSignal, now = Date.now()): AuthorizedCandidates {
+  signal: AbortSignal, now = Date.now(), notePolicy?:GenerationPolicyBinding): AuthorizedCandidates {
   if (signal.aborted) throw new ProviderFailure('CANCELLED');
   const digest = configDigest(role, config);
   // Bound inputs before hashing; invalid Unicode cannot alias a different digest.
@@ -44,13 +46,23 @@ export function projectDisclosure(role: AiRole, config: ProviderConfig, scopeId:
   if (!Array.isArray(candidates) || candidates.length > config.limits.maxCandidates
     || !Array.isArray(grant.sources) || grant.sources.length > config.limits.maxCandidates)
     throw new ProviderFailure('LIMIT_EXCEEDED');
+  const policy=grant.notePolicyBinding;
+  if(policy||notePolicy){
+    if((role!=='generation'&&role!=='reranking')||!sameGenerationPolicy(policy,notePolicy)||!policy
+      ||policy.deadlineUnixMs<grant.expiresUnixMs||now>=policy.deadlineUnixMs
+      ||grant.sources.length!==candidates.length)return deny();
+  }
   const passages = candidates.map((c, id) => {
     bytes += checkedBytes(c.text, config.limits.maxInputBytes - bytes);
-    if (!allowed(c.classification) || !isDigest(c.sourceSha256) || typeof c.sourceId !== 'string'
+    if ((policy?c.classification!=='unknown':!allowed(c.classification)) || !isDigest(c.sourceSha256) || typeof c.sourceId !== 'string'
       || !c.sourceId || !grant.sources.some(s => s.sourceId === c.sourceId && s.sourceSha256 === c.sourceSha256
-        && s.classification === c.classification && s.excerptDigest === hash(c.text))) return deny();
+        && s.classification === c.classification && s.excerptDigest === hash(c.text))
+      ||policy&&(grant.sources[id]?.sourceId!==c.sourceId||grant.sources[id]?.sourceSha256!==c.sourceSha256
+        ||grant.sources[id]?.excerptDigest!==hash(c.text)||grant.sources[id]?.classification!=='unknown')) return deny();
     // Source IDs, hashes, paths, classification and authorization stay local.
     return { id, text: c.text };
   });
+  if(policy&&(policy.payloadDigest!==generationPolicyPayload(query.text,candidates,role as 'generation'|'reranking')
+    ||policy.sourceDigest!==generationPolicySourceDigest({role:role as 'generation'|'reranking',sources:candidates.map(c=>({sourceId:c.sourceId,sourceSha256:c.sourceSha256,excerptDigest:hash(c.text)}))})))return deny();
   return { query: query.text, passages };
 }

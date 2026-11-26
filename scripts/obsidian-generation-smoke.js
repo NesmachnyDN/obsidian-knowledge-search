@@ -14,12 +14,13 @@
     await wait(()=>p.searchController.snapshot().phase==='results','SEARCH');};
   const confirm=token=>{
     click('.oks-generation-prepare');
+    set('.oks-generation-token',token);const inputToken=el('.oks-generation-token');click('.oks-generation-bind');
+    assert(inputToken.value===''&&!root().querySelector('.oks-generation-token'),'TOKEN_BOUND_AND_CLEARED');
     assert(operation().phase==='permission-required','SETTINGS_PERMISSION');
     assert(el('.oks-generation-confirm').disabled,'DEFAULT_DENY');
     assert(el('.oks-generation-query-preview').textContent==='REQ-OKS-GENERATION','QUERY_PREVIEW');
     assert(root().querySelectorAll('.oks-generation-excerpt-preview').length===2,'EXCERPT_PREVIEW');
     set('.oks-generation-classification','synthetic','change');
-    set('.oks-generation-token',token);
     assert(el('.oks-generation-confirm').disabled,'REQUIRE_EXPLICIT_CHECK');
     const check=el('.oks-generation-confirm-check');check.checked=true;check.dispatchEvent(new Event('change',{bubbles:true}));
     assert(!el('.oks-generation-confirm').disabled,'CONSENT');
@@ -31,7 +32,7 @@
   const b=await app.vault.create('generation-b.md','REQ-OKS-GENERATION: beta\n');
   try {
     await new Promise(r=>setTimeout(r,250));await p.standalone.whenIdle();await p.openSearch();await query();
-    click('.oks-generation-prepare');assert(el('.oks-generation-message').textContent.includes('DISABLED'),'DISABLED');
+    click('.oks-generation-prepare');set('.oks-generation-token','fixture-success');click('.oks-generation-bind');assert(el('.oks-generation-message').textContent.includes('DISABLED'),'DISABLED');
     await p.updateSettings({...p.settings,ai:{...p.settings.ai,generation:{state:'configured',transport:'local',
       origin:'http://127.0.0.1:18765',identity:{model:'synthetic-generator',revision:'fixture-v1'},
       limits:{timeoutMs:3000,maxInputBytes:4096,maxCandidates:2,maxOutputTokens:128,maxConcurrent:1}}}});
@@ -40,10 +41,10 @@
     assert(lexical.length===2,'LEXICAL_CANDIDATES');
     // Observe expiration before the scheduled callback, then roll wall time back.
     click('.oks-generation-prepare');
-    set('.oks-generation-token','fixture-success');
+    set('.oks-generation-token','fixture-success');const staleToken=el('.oks-generation-token');click('.oks-generation-bind');
     set('.oks-generation-classification','synthetic','change');
     const staleCheck=el('.oks-generation-confirm-check');staleCheck.checked=true;staleCheck.dispatchEvent(new Event('change',{bubbles:true}));
-    const staleButton=el('.oks-generation-confirm'),staleToken=el('.oks-generation-token');
+    const staleButton=el('.oks-generation-confirm');
     assert(!staleButton.disabled,'LATE_PREVIEW_ARMED');
     const originalNow=Date.now,wall=originalNow();
     try {
