@@ -107,13 +107,15 @@ export class BoundedVaultReader implements SourceProvider {
     const parts = relative.split('/');
     // Linux descriptor-anchored walk forbids redirecting an ancestor via symlink.
     const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
+    let rootDirectory: Awaited<ReturnType<typeof open>> | undefined;
     let directory: Awaited<ReturnType<typeof open>> | undefined;
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     let finalDirectory: Awaited<ReturnType<typeof open>> | undefined;
     try {
       try {
-        directory = await open(this.root, directoryFlags);
-        const rootInfo = await directory.stat();
+        rootDirectory = await open(this.root, directoryFlags);
+        directory = rootDirectory;
+        const rootInfo = await rootDirectory.stat();
         if (!rootInfo.isDirectory() || rootInfo.dev !== this.device || rootInfo.ino !== this.inode)
           throw new StandaloneError('VAULT_IDENTITY_CHANGED');
         await this.rootCheck();
@@ -122,7 +124,7 @@ export class BoundedVaultReader implements SourceProvider {
         const child = await open('/proc/self/fd/' + directory.fd + '/' + part, directoryFlags);
         const previous = directory;
         directory = child;
-        await previous.close();
+        if (previous !== rootDirectory) await previous.close();
       }
       handle = await open('/proc/self/fd/' + directory.fd + '/' + parts[parts.length - 1]!,
         constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -141,17 +143,12 @@ export class BoundedVaultReader implements SourceProvider {
       // The opened parent can be moved outside the root during the read.
       // Rewalk nested ancestry without following any substituted symlink.
       // For a root-level note the initial root descriptor is still anchored.
-      if (parts.length > 1) {
-        finalDirectory = await open(this.root, directoryFlags);
-        const rootInfo = await finalDirectory.stat();
-        if (!rootInfo.isDirectory() || rootInfo.dev !== this.device || rootInfo.ino !== this.inode)
-          throw new StandaloneError('VAULT_IDENTITY_CHANGED');
-        for (const part of parts.slice(0, -1)) {
-          const child = await open('/proc/self/fd/' + finalDirectory.fd + '/' + part, directoryFlags);
-          const previous = finalDirectory;
-          finalDirectory = child;
-          await previous.close();
-        }
+      for (const part of parts.slice(0, -1)) {
+        const parent = finalDirectory ?? rootDirectory;
+        const child = await open('/proc/self/fd/' + parent.fd + '/' + part, directoryFlags);
+        const previous = finalDirectory;
+        finalDirectory = child;
+        await previous?.close();
       }
       const finalParent = finalDirectory ?? directory;
       const pathAfter = await lstat('/proc/self/fd/' + finalParent.fd + '/' + parts[parts.length - 1]!,
@@ -173,7 +170,9 @@ export class BoundedVaultReader implements SourceProvider {
       throw new StandaloneError('SOURCE_REJECTED');
     } finally {
       try { await handle?.close(); } finally {
-        try { await finalDirectory?.close(); } finally { await directory?.close(); }
+        try { await finalDirectory?.close(); } finally {
+          try { if (directory !== rootDirectory) await directory?.close(); } finally { await rootDirectory?.close(); }
+        }
       }
     }
   }
