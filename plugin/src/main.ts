@@ -4,6 +4,7 @@ import { GenerationPolicyGate,policyOriginals, type ProcessingPolicyInput } from
 import { configDigest } from './ai/disclosure';
 import { NewMaterialTracker } from './ai/new-material-tracker';
 import { NativeLifecycleOwner } from './ai/native-lifecycle-owner';
+import { InitialBaselineModal, baselineNotice } from './ai/native-baseline-modal';
 import { decideNewMaterialMarking, type NewMaterialRuleConfig, type NewMaterialDecision } from './ai/new-material-policy';
 import { DenseMachine } from './ai/dense-machine';
 import { DenseUiController } from './ai/dense-ui-controller';
@@ -90,6 +91,8 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private sourceReader?: BoundedVaultReader;
   private readonly markingTracker=new NewMaterialTracker<TFile>();
   private lifecycleOwner?: {owner:NativeLifecycleOwner<TFile>;key:string};
+  private baselineModal?:InitialBaselineModal;
+  private baselineOpening=false;
   private denseHost?: ApiDenseHost;
   private denseSettingsChanging = false;
   // Retain the last completely applied runtime configuration until a
@@ -231,6 +234,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     this.addCommand({id:'open-chat-active-note',name:chatLabel('Chat with active note','Чат по активной заметке'),callback:()=>chat('active-note')});
     this.addCommand({id:'open-chat-editor-selection',name:chatLabel('Chat with editor selection','Чат по выделенному фрагменту'),callback:()=>chat('editor-selection')});
     this.addCommand({ id: 'open-first-search-source', name: 'Verify and open first search source', callback: () => { void this.searchController.open(0); } });
+    this.addCommand({id:'confirm-initial-lifecycle-baseline',name:chatLabel('Preview initial existing-material baseline','Просмотреть исходный набор существующих материалов'),callback:()=>{void this.openInitialBaselinePreview();}});
     for (const action of ['pause','resume','cancel','rebuild'] as const)
       this.addCommand({ id: `${action}-standalone`, name: `${action[0]!.toUpperCase() + action.slice(1)} Standalone indexing`,
         callback: () => { void this.controlSearch(action); } });
@@ -901,9 +905,33 @@ export default class SyntheticEvidencePlugin extends Plugin {
       },
     }).catch(()=>{/* any failed release remains in the owner's drain */});
   }
+  /** Host command only: preview and confirmation stay bound to one native owner. */
+  private async openInitialBaselinePreview():Promise<void> {
+    if(this.unloaded||this.baselineModal||this.baselineOpening)return;
+    const owner=this.lifecycleOwner?.owner,ru=settingsLocale(getLanguage())==='ru';
+    const notify=(code:string)=>{if(!this.unloaded)try{new Notice(baselineNotice(ru,code));}catch{/* optional UI */}};
+    if(!owner){notify('unavailable');return;}
+    this.baselineOpening=true;
+    try {
+      const readiness=owner.readiness();
+      if(readiness!=='fresh'&&readiness!=='uninitialized'){notify(readiness==='admitted'?'already-admitted':readiness);return;}
+      const result=await owner.prepareBaselinePreview();
+      if(!result.ok){notify(result.reason);return;}
+      if(this.unloaded||this.lifecycleOwner?.owner!==owner||owner.baselinePreviewRemainingMs(result.preview)<=0){
+        owner.cancelBaselinePreviewOutcome(result.preview);notify('retired');return;
+      }
+      const modal=new InitialBaselineModal(this.app,owner,result.preview,ru,notify,()=>{
+        if(this.baselineModal===modal)this.baselineModal=undefined;
+      });
+      this.baselineModal=modal;
+      try{modal.open();}catch{owner.cancelBaselinePreviewOutcome(result.preview);this.baselineModal=undefined;notify('verification-failed');}
+    }catch{owner.retire();void owner.close().catch(()=>{});notify('verification-failed');}
+    finally{this.baselineOpening=false;}
+  }
   private retireLifecycleOwner():void {
     const owner=this.lifecycleOwner?.owner;
     owner?.retire();
+    try{this.baselineModal?.close();}catch{/* optional UI cannot block retirement */}
     void owner?.close().catch(()=>{});
   }
   private reserveLifecycleClose():{start:()=>void;drain:Promise<void>} {
@@ -920,6 +948,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     lifecycleBarriers.set(key,barrier);
     void barrier.then(()=>{if(lifecycleBarriers.get(key)===barrier)lifecycleBarriers.delete(key);},()=>{});
     owner.retire();
+    try{this.baselineModal?.close();}catch{/* optional UI cannot block drain */}
     let started=false;
     return {drain,start:()=>{
       if(started)return;
@@ -947,6 +976,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     // before any host, abort, view or observer callback is allowed to run.
     this.unloaded = true;
     this.retireLifecycleOwner();
+    this.baselineModal=undefined;
     this.markingTracker.clear();
     this.lifecycleRevision++;
     this.denseUi.authority.sealTerminal();

@@ -18,6 +18,8 @@ export type NativeLifecycleReadiness='opening'|'fresh'|'uninitialized'|'restored
 export type NativeBaselinePreview=Readonly<{paths:readonly string[];count:number;expiresAt:number}>;
 export type NativeBaselinePreviewResult=Readonly<{ok:true;preview:NativeBaselinePreview}|{ok:false;reason:'busy'|'unavailable'|'inventory-rejected'|'owner-mismatch'|'retired'}>;
 export type NativeBaselineConfirmation=Readonly<{outcome:InitialBaselineAdmissionOutcome;reason?:'stale'|'expired'|'retired'|'verification-failed'}>;
+/** Local presentation can distinguish an explicit dismissal from a stale view. */
+export type NativeBaselineCancellation=Readonly<{outcome:'cancelled'|'cancel-requested'}|{outcome:'denied';reason:'stale'|'retired'}>;
 const monotonicNow=()=>Math.floor(performance.now());
 
 /** A cancelled wait never starts a replacement ledger transaction. */
@@ -181,9 +183,15 @@ export class NativeLifecycleOwner<T extends object> {
       finally{this.confirming=undefined;}
     });
   }
+  cancelBaselinePreviewOutcome(view:NativeBaselinePreview):NativeBaselineCancellation {
+    if(this.preview?.view!==view&&this.confirming!==view)
+      return {outcome:'denied',reason:this.retired?'retired':'stale'};
+    const committing=this.confirming===view;
+    this.retireAndDrain();return {outcome:committing?'cancel-requested':'cancelled'};
+  }
+  /** Compatibility predicate for host callers that only need cancellation ownership. */
   cancelBaselinePreview(view:NativeBaselinePreview):boolean {
-    if(this.preview?.view!==view&&this.confirming!==view)return false;
-    this.retireAndDrain();return true;
+    return this.cancelBaselinePreviewOutcome(view).outcome!=='denied';
   }
 
   /** Concurrent callers share the same physical drain, including its failure. */

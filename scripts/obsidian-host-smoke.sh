@@ -50,6 +50,16 @@ if [[ "${OKS_POLICY_2E3C_TEST:-0}" == 1 ]]; then
     { echo "HOST_SMOKE_FAILURE: production lifecycle test requires isolated real-UID lifecycle mode" >&2; exit 2; }
   export OKS_POLICY_2E3C_TEST
 fi
+# POLICY.2e3d.3b is a separate real-UID direct-network-denial scenario. It
+# never invokes the older fixture seeding probe; it starts with the plugin's
+# unseeded owner and drives the actual native command/modal.
+if [[ "${OKS_POLICY_2E3D3B_TEST:-0}" == 1 ]]; then
+  [[ "${OKS_POLICY_2E3A_TEST:-0}" == 1 && "${OKS_POLICY_2E3A_NO_IP:-0}" == 1 && "${OKS_HOST_NO_ROUTE:-0}" == 0 &&
+     -n "${OKS_STANDALONE_PACKAGE_DIR:-}" && -z "${OKS_STANDALONE_PREVIOUS_PACKAGE_DIR:-}" &&
+     "${OKS_POLICY_2E3C_TEST:-0}" == 0 && "${OKS_NATIVE_CHAT_TEST:-0}" == 0 && "${OKS_06UX_TEST:-0}" == 0 ]] ||
+    { echo "HOST_SMOKE_FAILURE: POLICY.2e3d.3b requires separate verified-package real-UID direct-network-denial mode" >&2; exit 2; }
+  export OKS_POLICY_2E3D3B_TEST
+fi
 # POLICY.2e3a evidence-only test; never combine with another host scenario.
 # Direct-IP denial is a separate, test-only fallback preserving real system UIDs.
 if [[ "${OKS_POLICY_2E3A_NO_IP:-0}" == 1 ]]; then
@@ -235,6 +245,21 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
       test -z "$(ip route show default)"
     else
       python3 -I -B "$repo/scripts/obsidian-lifecycle-no-ip.py" --verify-inherited
+    fi
+    if [[ "${OKS_POLICY_2E3D3B_TEST:-0}" == 1 ]]; then
+      for phase in startup cancel cancel-inflight confirm; do
+        lifecycle="$(timeout 40s "$cli" eval "code=$(cat "$repo/scripts/obsidian-policy-2e3d3b-host-smoke.js")(\"$phase\")")"
+        [[ "$lifecycle" == *"OBSIDIAN_POLICY_2E3D3B_PASS: $phase"* ]] ||
+          { echo "HOST_SMOKE_FAILURE: POLICY.2e3d.3b ($lifecycle)" >&2; exit 1; }
+        printf "%s\n" "$lifecycle"
+        timeout 8s "$cli" plugin:reload id=oks-synthetic-evidence >/dev/null
+        sleep 3
+      done
+      lifecycle="$(timeout 40s "$cli" eval "code=$(cat "$repo/scripts/obsidian-policy-2e3d3b-host-smoke.js")(\"reopen-and-invalidate\")")"
+      [[ "$lifecycle" == *"OBSIDIAN_POLICY_2E3D3B_PASS: durableReopen=PASS"* ]] ||
+        { echo "HOST_SMOKE_FAILURE: POLICY.2e3d.3b ($lifecycle)" >&2; exit 1; }
+      printf "%s\n" "$lifecycle"
+      exit 0
     fi
     lifecycle="$(timeout 40s "$cli" eval "code=$(cat "$repo/scripts/obsidian-lifecycle-host-smoke.js")")"
     [[ "$lifecycle" == *"OBSIDIAN_POLICY_2E3A_PASS:"* ]] ||

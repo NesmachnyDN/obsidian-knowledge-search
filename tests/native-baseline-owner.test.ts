@@ -70,9 +70,24 @@ for(const setup of ['fresh','uninitialized'] as const)test('native baseline '+se
 test('native baseline fresh open and preview alone never initialize; explicit cancellation consumes token',async()=>{
   await fixture('fresh',async f=>{
     const result=await f.owner.prepareBaselinePreview();assert.ok(result.ok);
-    assert.equal(f.owner.cancelBaselinePreview(result.preview),true);assert.equal(f.owner.cancelBaselinePreview(result.preview),false);
+    assert.deepEqual(f.owner.cancelBaselinePreviewOutcome(result.preview),{outcome:'cancelled'});
+    assert.deepEqual(f.owner.cancelBaselinePreviewOutcome(result.preview),{outcome:'denied',reason:'retired'});
+    assert.equal(f.owner.cancelBaselinePreview(result.preview),false);
     assert.equal((await f.owner.confirmBaselinePreview(result.preview)).outcome,'denied');
     await f.owner.close();const ledger=await f.open();try{assert.equal(await ledger.read(),null);}finally{await ledger.close();}
+  });
+});
+
+test('native baseline exposes typed expiry, retirement and stale denial without a replacement baseline',async()=>{
+  await fixture('fresh',async f=>{
+    const expired=await f.owner.prepareBaselinePreview(1);assert.ok(expired.ok);await delay(15);
+    assert.deepEqual(await f.owner.confirmBaselinePreview(expired.preview),{outcome:'denied',reason:'expired'});
+    assert.equal((await f.owner.prepareBaselinePreview()).ok,false);
+  });
+  await fixture('fresh',async f=>{
+    const view=await f.owner.prepareBaselinePreview();assert.ok(view.ok);f.invalidate();
+    assert.deepEqual(await f.owner.confirmBaselinePreview(view.preview),{outcome:'denied',reason:'retired'});
+    assert.deepEqual(f.owner.cancelBaselinePreviewOutcome(view.preview),{outcome:'denied',reason:'retired'});
   });
 });
 
@@ -122,7 +137,7 @@ test('native baseline cancellation during confirmation drains owner operation an
     f.reader.completeMarkdownInventory=async signal=>{if(++calls===2){entered();await gate;}return original(signal);};
     const pending=f.owner.confirmBaselinePreview(result.preview);
     try{
-      await ready;assert.equal(f.owner.cancelBaselinePreview(result.preview),true);assert.equal(f.owner.exactAuthorityActive(),false);
+      await ready;assert.deepEqual(f.owner.cancelBaselinePreviewOutcome(result.preview),{outcome:'cancel-requested'});assert.equal(f.owner.exactAuthorityActive(),false);
       const closing=f.owner.close();assert.equal(f.owner.close(),closing);await assert.rejects(f.open(),{code:'LIFECYCLE_LEDGER_UNAVAILABLE'});
       release();assert.equal((await pending).outcome,'denied');await closing;
       const ledger=await f.open();try{assert.equal((await ledger.read())?.snapshot.baselineAdmitted,false);}finally{await ledger.close();}
