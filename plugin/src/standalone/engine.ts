@@ -98,14 +98,18 @@ export class StandaloneEngine {
   changed(path?: string): void {
     if (this.stopped) return;
     this.revision++;
-    if (path && validPath(path) && !this.all) {
-      this.pending.add(path);
-      if (this.pending.size > BOUNDS.sources) {
-        this.pending.clear();
-        this.all = true;
-      }
-    } else this.all = true; // folder rename, unknown event, cache resolution or missed event
+    this.enqueueChange(path);
     this.schedule();
+  }
+  // Full reconciliation dominates the bounded exact-path set.
+  private enqueueChange(path?: string): void {
+    if (this.all) return;
+    if (path && validPath(path)) {
+      this.pending.add(path);
+      if (this.pending.size <= BOUNDS.sources) return;
+    }
+    this.pending.clear();
+    this.all = true; // overflow, folder rename, unknown or missed event
   }
   reconcile(): void {
     this.changed(); // authoritative full scan (startup and explicit reconciliation)
@@ -291,6 +295,18 @@ export class StandaloneEngine {
         this.paused = true;
       }
       this.recordState(this.generation ? 'degraded' : 'failed', code(error));
+    } finally {
+      // A newer event retires this candidate, not its consumed dirty obligations.
+      // Merge them into the same bounded queue before the physical slot drains.
+      // Do not reschedule an unchanged failed revision, paused/cancelled work,
+      // or uncertain publication; explicit resume already requests a full scan.
+      if (!this.stopped && !this.paused && revision !== this.revision) {
+        if (full) this.enqueueChange();
+        else for (const path of changes) {
+          this.enqueueChange(path);
+          if (this.all) break;
+        }
+      }
     }
   }
   /** Complete explicit selection, independent of search query and Top-K. */
