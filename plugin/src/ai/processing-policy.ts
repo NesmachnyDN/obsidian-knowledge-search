@@ -1,7 +1,7 @@
 import { BOUNDS, hash, isDigest, validPath } from '../standalone/contracts';
 import type { SourceProvider } from '../standalone/source';
 import type { PolicyMetadataParser } from '../standalone/worker';
-import type { PolicyMetadataState } from '../standalone/shared';
+import type { PolicyMetadataState, PolicyMetadataProof } from '../standalone/shared';
 import { AI_ROLES, ProviderFailure, type AiRole, type CallContext, type ProviderConfig } from './contracts';
 import { bindActiveDeadline, remainingOperationMs, expireActiveDeadline, deadlineFailure } from './active-deadline';
 import { configDigest } from './disclosure';
@@ -12,7 +12,7 @@ export type ProfileClass = 'external' | 'trusted-internal';
 export type PolicyReason = 'eligible' | 'private' | 'invalid-property' | 'metadata-unresolved'
   | 'source-stale' | 'source-unresolved' | 'cancelled' | 'profile-unadmitted'
   | 'profile-mismatch' | 'restricted' | 'ownership-unresolved' | 'lineage-unresolved' | 'authority-changed'
-  | 'busy' | 'timeout';
+  | 'busy' | 'timeout' | 'marking-denied';
 export type TrustedProfile = Readonly<{
   profileId: string; admissionId: string; role: AiRole; configDigest: string;
   adapter: string; classification: ProfileClass;
@@ -30,7 +30,7 @@ export type PolicySnapshot = Readonly<{
   policyRevision: string; configRevision: string; credentialEpoch: number; deadlineUnixMs: number;
   payloadDigest: string; restrictions: readonly Restriction[]; evaluationComplete: boolean;
 }>;
-export type PolicyHost = Readonly<{ snapshot(): PolicySnapshot | null; current(): boolean }>;
+export type PolicyHost = Readonly<{ snapshot(): PolicySnapshot | null; current(): boolean; marking?(proof:PolicyMetadataProof):boolean }>;
 export type PolicyEnvelope = Readonly<{
   policyVersion: typeof POLICY_VERSION; allowed: boolean; reason: PolicyReason;
   bindingDigest: string | null; rootId: string;
@@ -57,7 +57,7 @@ function validSnapshot(s: PolicySnapshot): boolean {
     && Number.isSafeInteger(s.credentialEpoch) && s.credentialEpoch > 0
     && Number.isSafeInteger(s.deadlineUnixMs) && s.deadlineUnixMs > 0
     && s.evaluationComplete === true && Array.isArray(s.subjects) && s.subjects.length > 0
-    && s.subjects.length <= BOUNDS.limit && unique(s.subjects.map(x=>x.sourceId))
+    && s.subjects.length <= BOUNDS.sources && unique(s.subjects.map(x=>x.sourceId))
     && s.subjects.every(x=>exact(x,['sourceId','expectedSha256','kind','ownerIds'],['parentSourceIds'])&&identifier(x.sourceId) && isDigest(x.expectedSha256)
       && ['original','attachment','derivative'].includes(x.kind) && Array.isArray(x.ownerIds)
       && x.ownerIds.length > 0 && x.ownerIds.length <= BOUNDS.limit && x.ownerIds.every(validPath)
@@ -88,6 +88,9 @@ export class EligibilityEvaluator {
   // caller receives a terminal deadline/cancellation result. No queue.
   private active=false;
   private pending=false;
+  private dependency?:Promise<void>;
+  get physicallyPending():boolean{return this.pending;}
+  async drain():Promise<void>{await this.dependency;}
   constructor(private readonly reader: SourceProvider, private readonly parser: PolicyMetadataParser,
     private readonly host: PolicyHost) {}
   private awaitDependency<T>(context:CallContext,current:()=>boolean,work:()=>Promise<T>):Promise<T> {
@@ -105,12 +108,14 @@ export class EligibilityEvaluator {
       const cancel=()=>finish(undefined,new ProviderFailure('CANCELLED'));
       const timer=setTimeout(()=>{expireActiveDeadline(context);finish(undefined,new ProviderFailure('TIMEOUT'));},remaining);
       context.signal.addEventListener('abort',cancel,{once:true});
-      Promise.resolve().then(()=>{
+      const physical=Promise.resolve().then(()=>{
         remainingOperationMs(context);
         if(!current())throw new ProviderFailure('CANCELLED');
         remainingOperationMs(context);
         return work();
       }).then(value=>{this.pending=false;finish(value);},error=>{this.pending=false;finish(undefined,error??new ProviderFailure('SOURCE_STALE'));});
+      this.dependency=physical;
+      void physical.then(()=>{if(this.dependency===physical)this.dependency=undefined;});
       if(context.signal.aborted)cancel();
     });
   }
@@ -180,6 +185,10 @@ export class EligibilityEvaluator {
         const reason:PolicyReason=doc.state==='absent'||doc.state==='external'?'eligible':doc.state==='private'?'private':doc.state==='invalid'?'invalid-property':'metadata-unresolved';
         versions.push({sourceId:x.sourceId,sha256:x.expectedSha256,metadataState:doc.state,reason});
         if(reason==='metadata-unresolved'||(s.profile!.classification==='external'&&reason!=='eligible'))return done(reason);
+        if(s.profile!.classification==='external'&&this.host.marking){
+          if(!this.host.marking(doc))return done('marking-denied');
+          if(!current())return done(failure());
+        }
       }catch{return done(current()?'source-unresolved':failure());}
     }
     // Repeat every original read after all parsing; an earlier note may have

@@ -9,6 +9,9 @@ import {EvidenceGenerator} from '../plugin/src/ai/generation-evidence';
 import {type ProviderConfig} from '../plugin/src/ai/contracts';
 import {type EvidenceApproval} from '../plugin/src/ai/verified-evidence';
 import {configDigest} from '../plugin/src/ai/disclosure';
+import type {GenerationPolicyInput,GenerationPolicyPort} from '../plugin/src/ai/generation-policy';
+import {EligibilityEvaluator,type PolicySnapshot} from '../plugin/src/ai/processing-policy';
+import {parsePolicyMetadata} from '../plugin/src/standalone/markdown-parse';
 import {hash,type EvidenceHit} from '../plugin/src/standalone/contracts';
 import {parseMarkdown} from '../plugin/src/standalone/markdown';
 import {verifySpan} from '../plugin/src/search/navigation';
@@ -161,6 +164,70 @@ test('generation controller uses independent roles, one-shot preview, no lexical
     assert.equal(calls,1);
     controller.dispose();
   },(req,res)=>{calls++;req.resume();reply(res,good());});
+});
+
+test('POLICY.3a generation uses only an admitted host port, binds full payload, and denies before dispatch',async()=>{
+  let requests=0, evaluations:GenerationPolicyInput[]=[];
+  await fixture(async cfg=>{
+    const response:SearchResponse={protocolVersion:2,requestId:'policy',requestedMode:'lexical',executedMode:'lexical',status:'ok',
+      indexGenerationId:hash('generation'),hits,capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0};
+    let denyDispatch=true;
+    const policy:GenerationPolicyPort={current:(i,b)=>b.bindingDigest===hash(JSON.stringify([i.payloadDigest,i.credentialEpoch])),evaluate:async(input,context)=>{
+      evaluations.push(structuredClone(input));
+      assert.equal(input.role,'generation');assert.match(input.payloadDigest,/^[a-f0-9]{64}$/);
+      // The exact payload digest and source/excerpt digests are local policy
+      // inputs; neither classification nor policy material may reach transport.
+      assert.equal(input.sources.length,2);assert.ok(input.sources.every(x=>x.excerptDigest===hash(hits.find(h=>h.sourceId===x.sourceId)!.originalExcerpt)));
+      if (denyDispatch && evaluations.length===2) return {policyVersion:'oks-policy-1b',allowed:false,reason:'private',bindingDigest:null,rootId:scopeId,sourceVersions:[]};
+      return {policyVersion:'oks-policy-1b',allowed:true,reason:'eligible',bindingDigest:hash(JSON.stringify([input.payloadDigest,input.credentialEpoch])),
+        rootId:scopeId,sourceVersions:input.sources.map(x=>({sourceId:x.sourceId,sha256:x.sourceSha256,metadataState:'external' as const,reason:'eligible' as const}))};
+    }};
+    const port={config:()=>cfg,scopeId:()=>scopeId,verify:async(hit:EvidenceHit)=>{verifySpan(hit,bytes[hits.findIndex(h=>h.sourceId===hit.sourceId)]!);}};
+    const controller=new SearchController(async()=>{},undefined,undefined,undefined,port,undefined,undefined,policy);
+    controller.attach({search:async()=>response,status:()=>({status:'ready' as const,generationId:hash('generation'),sources:2,records:2,busy:false,error:null,maintenanceWarning:null}),cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+    await controller.search(uiRequest(input.query,2));
+    assert.throws(()=>controller.prepareGeneration(token),{message:'NOT_READY'});
+    const denied=await controller.prepareGenerationWithPolicy(token);
+    await controller.generationConfirmed(denied,'synthetic');
+    assert.equal(requests,0);assert.equal(controller.snapshot().generation?.error,'DISCLOSURE_DENIED');
+    denyDispatch=false;evaluations=[];
+    const admitted=await controller.prepareGenerationWithPolicy(token);
+    await controller.generationConfirmed(admitted,'synthetic');
+    assert.equal(requests,1);assert.equal(evaluations.length,3);
+    assert.ok(evaluations.every(x=>x.payloadDigest===evaluations[0]!.payloadDigest));
+    controller.dispose();
+  },(req,res)=>{requests++;let body='';req.on('data',chunk=>{body+=String(chunk);});req.on('end',()=>{
+    assert.equal(body.includes('llm_processing'),false);assert.equal(body.includes('external'),false);reply(res,good());});});
+});
+
+test('POLICY.3a canonical original-byte evaluator allows the same admitted payload at preview and dispatch',async()=>{
+  let requests=0;
+  await fixture(async cfg=>{
+    const response:SearchResponse={protocolVersion:2,requestId:'canonical-policy',requestedMode:'lexical',executedMode:'lexical',status:'ok',
+      indexGenerationId:hash('generation'),hits,capabilityReadiness:{lexical:'ready',dense:'unavailable'},error:null,staleSourceCount:0};
+    const snapshotFor=(input:GenerationPolicyInput):PolicySnapshot=>({subjects:input.sources.map(x=>({sourceId:x.sourceId,expectedSha256:x.sourceSha256,kind:'original',ownerIds:[x.sourceId]})),
+        profile:{profileId:'synthetic-admitted',admissionId:'test-fixture',role:'generation',configDigest:configDigest('generation',cfg),adapter:'fixture',classification:'external'},
+        role:'generation',config:input.config,adapter:'fixture',ownerId:input.ownerId,hostId:input.hostId,scopeId:input.scopeId,
+        policyRevision:'p1',configRevision:'c1',credentialEpoch:input.credentialEpoch,deadlineUnixMs:input.deadlineUnixMs,
+        payloadDigest:input.payloadDigest,restrictions:[],evaluationComplete:true});
+    const policy:GenerationPolicyPort={current:(i,b)=>hash(JSON.stringify(['oks-policy-1b',scopeId,snapshotFor(i)]))===b.bindingDigest,evaluate:async(input,context)=>{
+      const snapshot=snapshotFor(input);
+      const reader={rootId:scopeId,list:async()=>hits.map(h=>h.sourceId),versionHints:async()=>[],
+        read:async(path:string)=>{const i=hits.findIndex(h=>h.sourceId===path);if(i<0)throw Error('missing');return bytes[i]!;}};
+      return new EligibilityEvaluator(reader,{policyMetadata:async(path,raw,root)=>parsePolicyMetadata(path,raw,root,hash(raw))},
+        {snapshot:()=>snapshot,current:()=>true}).evaluate(context);
+    }};
+    const port={config:()=>cfg,scopeId:()=>scopeId,verify:async(hit:EvidenceHit)=>{verifySpan(hit,bytes[hits.findIndex(h=>h.sourceId===hit.sourceId)]!);}};
+    const controller=new SearchController(async()=>{},undefined,undefined,undefined,port,undefined,undefined,policy);
+    controller.attach({search:async()=>response,status:()=>({status:'ready' as const,generationId:hash('generation'),sources:2,records:2,busy:false,error:null,maintenanceWarning:null}),cancel:()=>true,resume:()=>{},rebuild:()=>{}});
+    try {
+      await controller.search(uiRequest(input.query,2));
+      const preview=await controller.prepareGenerationWithPolicy(token);
+      await new Promise(r=>setTimeout(r,10));
+      await controller.generationConfirmed(preview,'synthetic');
+      assert.equal(requests,1,'canonical eligibility must survive phase-specific deadlines without weakening exact consent');
+    } finally {controller.dispose();}
+  },(req,res)=>{requests++;req.resume();reply(res,good());});
 });
 
 test('06H.2-A2b2b2: search preview binds one exact host credential and denies stale, foreign, cancelled, changed and reentrant dispatch',async t=>{

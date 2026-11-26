@@ -9,6 +9,8 @@ import { freezeScope, parseScopeSelector, resolveScope, type ScopedSearch, type 
 import { metadataAnchor } from './metadata';
 import { verifySpan } from '../search/navigation';
 import type { MarkdownParser, PolicyMetadataParser } from './worker';
+import { EligibilityEvaluator, type PolicyHost, type PolicyEnvelope } from '../ai/processing-policy';
+import { ProviderFailure, type CallContext } from '../ai/contracts';
 import type { PolicyMetadataProof } from './shared';
 import type { SourceProvider } from './source';
 import type { GenerationStore } from './storage';
@@ -43,7 +45,7 @@ export class StandaloneEngine {
   private state: EngineState = { status: 'unavailable', generationId: null, sources: 0, records: 0,
     error: null, maintenanceWarning: null, busy: false };
   private work: Promise<void> | null = null;
-  private policyRead: Promise<PolicyMetadataProof> | null = null;
+  private policyRead: Promise<unknown> | null = null;
   private pending = new Set<string>();
   private all = false;
   private revision = 0;
@@ -172,6 +174,28 @@ export class StandaloneEngine {
     return new Promise((resolve,reject)=>{
       const timer=setTimeout(()=>{expired=true;reject(new StandaloneError('PARSER_TIMEOUT'));},5000);
       physical.then(value=>{clearTimeout(timer);if(!expired){try{check();resolve(value);}catch(error){reject(error);}}},error=>{clearTimeout(timer);reject(error);});
+    });
+  }
+  /** One existing worker/source owner, shared with lexical indexing and dry-run. */
+  evaluateProcessingPolicy(host:PolicyHost,context:CallContext):Promise<PolicyEnvelope>{
+    const parser=this.parser as MarkdownParser & Partial<PolicyMetadataParser>;
+    if(this.stopped||!this.initialized||this.paused||this.work||this.policyRead||!parser.policyMetadata)
+      return Promise.reject(new ProviderFailure('BUSY'));
+    const revision=this.revision;
+    const live=()=>!this.stopped&&!this.paused&&this.revision===revision;
+    const current=()=>live()&&host.current()&&live();
+    const evaluator=new EligibilityEvaluator(this.provider,{policyMetadata:(path,bytes,root)=>parser.policyMetadata!(path,bytes,root)},
+      {snapshot:()=>host.snapshot(),current,...(host.marking?{marking:(proof:PolicyMetadataProof)=>host.marking!(proof)}:{})});
+    const result=Promise.resolve().then(()=>evaluator.evaluate(context));
+    const physical=result.then(()=>evaluator.drain(),()=>evaluator.drain());
+    this.policyRead=physical;
+    const release=()=>{if(this.policyRead===physical){this.policyRead=null;
+      if(!this.stopped&&!this.paused&&(this.all||this.pending.size))this.schedule();}};
+    void physical.then(release,release);
+    return result.then(async envelope=>{
+      if(!evaluator.physicallyPending)await physical;
+      if(envelope.allowed&&!current())throw new ProviderFailure('CANCELLED');
+      return envelope;
     });
   }
   private async run(): Promise<void> {

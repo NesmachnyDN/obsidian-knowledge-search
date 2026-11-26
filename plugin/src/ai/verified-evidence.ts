@@ -1,6 +1,7 @@
 import { type EvidenceHit } from '../standalone/contracts';
 import { ProviderFailure, type ProviderConfig, type CallContext } from './contracts';
 import { projectDisclosure, type Classification, type DisclosureGrant } from './disclosure';
+import { sameGenerationPolicy, type GenerationPolicyBinding } from './generation-policy';
 import { pilotConfig } from './loopback-json';
 import { bindActiveDeadline, remainingOperationMs, expireActiveDeadline, deadlineFailure } from './active-deadline';
 
@@ -47,7 +48,7 @@ export class VerifiedEvidenceOperation {
   }
   async run<T>(role: 'reranking' | 'generation' | 'embedding', approval: EvidenceApproval, context: CallContext,
     verify: (hit: EvidenceHit) => Promise<void>, current: () => boolean,
-    invoke: (config: ProviderConfig, input: import('./contracts').AuthorizedCandidates, context: CallContext) => Promise<T>, queryOnly = false): Promise<{result:T; evidence:readonly EvidenceHit[]}> {
+    invoke: (config: ProviderConfig, input: import('./contracts').AuthorizedCandidates, context: CallContext) => Promise<T>, queryOnly = false, policyCheck?:()=>Promise<GenerationPolicyBinding>): Promise<{result:T; evidence:readonly EvidenceHit[]}> {
     if (this.busy) throw new ProviderFailure('QUOTA_EXCEEDED');
     const config = pilotConfig(approval.config);
     if (!Array.isArray(approval.candidates) || (queryOnly
@@ -71,15 +72,23 @@ export class VerifiedEvidenceOperation {
         check();
       }
     };
+    if(!!snapshot.grant.notePolicyBinding!==!!policyCheck)throw new ProviderFailure('DISCLOSURE_DENIED');
+    let policy:GenerationPolicyBinding|undefined;
+    const recheckPolicy=async()=>{
+      if(!policyCheck)return;
+      check();const renewed=await policyCheck();check();
+      if(!sameGenerationPolicy(snapshot.grant.notePolicyBinding,renewed))throw new ProviderFailure('DISCLOSURE_DENIED');
+      policy=renewed;
+    };
     const projection = () => projectDisclosure(role, config, snapshot.scopeId, snapshot.query,
       snapshot.candidates.map(({hit, classification}) => ({
         text: hit.originalExcerpt, sourceId: hit.sourceId, sourceSha256: hit.sourceSha256, classification,
-      })), snapshot.grant, context.signal);
+      })), snapshot.grant, context.signal,Date.now(),policy);
     this.busy = true;
     try {
-      check(); projection(); await verifyAll(); check();
+      check(); if(!policyCheck)projection(); await verifyAll(); check(); if(policyCheck){await recheckPolicy();check();}
       const result = await invoke(config, projection(), context);
-      check(); projection(); await verifyAll(); check(); projection(); remainingOperationMs(context);
+      check(); if(!policyCheck)projection(); await verifyAll(); check(); if(policyCheck){await recheckPolicy();check();} projection(); remainingOperationMs(context);
       return {result, evidence:snapshot.candidates.map(c=>c.hit)};
     } catch (error) {
       throw deadlineFailure(context) ?? error;
