@@ -55,9 +55,11 @@ test('06B.3a deterministic directed shortest paths, duplicate edges, cycles and 
   const q=request({}, {relationIds:['depends']});
   const {graph,seed}=await fixture(base,q);
   const plan=planGraphExpansion(graph,[seed('a.md')],q,mapping);
-  assert.deepEqual(plan.expanded.map(c=>[c.sourceId,c.path.length]),[['b.md',1],['c.md',1],['d.md',2]]);
+  const first=graph.edges.filter(e=>e.from==='a.md'&&e.relationId==='depends').sort((a,b)=>a.edgeId.localeCompare(b.edgeId))[0]!;
+  const other=first.to==='b.md'?'c.md':'b.md';
+  assert.deepEqual(plan.expanded.map(c=>[c.sourceId,c.path.length]),[[first.to,1],[other,1],['d.md',2]]);
   const d=plan.expanded[2]!;
-  assert.deepEqual(d.path.map(p=>[p.edge.from,p.edge.to,p.traversal]),[['a.md','b.md','forward'],['b.md','d.md','forward']]);
+  assert.deepEqual(d.path.map(p=>[p.edge.from,p.edge.to,p.traversal]),[['a.md',first.to,'forward'],[first.to,'d.md','forward']]);
   assert.equal(d.seedLexicalRank,1);assert.equal(d.seedSourceId,'a.md');
   assert.ok(d.path.every(p=>p.edge.kind==='relation'&&p.edge.anchors.length>0));
   const reversed=structuredClone(graph);Object.assign(reversed,{edges:[...graph.edges].reverse()});
@@ -69,7 +71,7 @@ test('06B.3a incoming/reverse and author direction, multiple lexical seeds retai
   const q=request({}, {direction:'incoming',relationIds:['depends']});
   const {graph,seed}=await fixture(base,q);
   const plan=planGraphExpansion(graph,[seed('d.md'),seed('a.md',2)],q,mapping);
-  assert.deepEqual(plan.expanded.map(c=>[c.sourceId,c.seedLexicalRank]),[['b.md',1],['c.md',1]]);
+  assert.deepEqual(plan.expanded.map(c=>[c.sourceId,c.seedLexicalRank]).sort(),[['b.md',1],['c.md',1]]);
   assert.ok(plan.expanded.every(c=>c.path[0]!.traversal==='reverse'));
   const forward=request({}, {depth:1,relationIds:['supplies']});
   const f=planGraphExpansion(graph,[seed('a.md')],forward,mapping);
@@ -106,4 +108,37 @@ test('06B.3a graph plan rejects foreign scopes, seeds, versions and author ancho
     assert.throws(()=>planGraphExpansion({...graph,edges:[bad]},[seed('a.md')],q,mapping),/GRAPH_EVIDENCE_INVALID/);
   }
   assert.throws(()=>planGraphExpansion(graph,[{...seed('a.md'),rank:2}],q,mapping),/GRAPH_EVIDENCE_INVALID/);
+});
+
+test('06B.3a rejects malformed locator shapes, offsets, source/block lineage and missing status as typed errors',async()=>{
+  const q=request(),{graph,seed}=await fixture(base,q);
+  const edge=graph.edges[0]!,anchor=edge.anchors[0]!,hit=seed('a.md'),loc=hit.sourceLocators[0]!;
+  for(const bad of [null,undefined,{}, {...loc,byteStart:-1},{...loc,byteEnd:loc.byteStart},
+    {...loc,lineStart:0},{...loc,lineEnd:loc.lineStart+1},{...loc,blockOrder:999999},{...loc,charEnd:65537},{...loc,extra:true}]){
+    assert.throws(()=>planGraphExpansion(graph,[{...hit,sourceLocators:[bad]} as unknown as EvidenceHit],q,mapping),/GRAPH_EVIDENCE_INVALID/);
+    const malformed={...edge,anchors:[{...anchor,locator:bad}]};
+    assert.throws(()=>planGraphExpansion({...graph,edges:[malformed]} as typeof graph,[hit],q,mapping),/GRAPH_EVIDENCE_INVALID/);
+  }
+  for(const bad of [{...edge,anchors:undefined},{...edge,anchors:[null]},{...edge,status:undefined},
+    {...edge,anchors:[{...anchor,blockId:hash('forged')}]}]){
+    assert.throws(()=>planGraphExpansion({...graph,edges:[bad]} as typeof graph,[hit],q,mapping),/GRAPH_EVIDENCE_INVALID/);
+  }
+  assert.throws(()=>planGraphExpansion(graph,[{...hit,originalExcerpt:hit.originalExcerpt+'x'}],q,mapping),/GRAPH_EVIDENCE_INVALID/);
+});
+test('06B.3a edge ID, not destination ID, resolves equal-depth paths; seed rank takes precedence',async()=>{
+  const q=request({}, {relationIds:['depends']}),{graph,seed}=await fixture(base,q);
+  const ids=graph.edges.map((e,i)=>({...e,edgeId:(e.from==='a.md'&&e.to==='c.md'?'1':e.from==='a.md'&&e.to==='b.md'?'e':'f')+i.toString(16).padStart(63,'0')}));
+  const altered={...graph,edges:ids};
+  const p=planGraphExpansion(altered,[seed('a.md')],q,mapping);
+  assert.deepEqual(p.expanded.map(c=>c.sourceId),['c.md','b.md','d.md']);
+  assert.equal(p.expanded[2]!.path[0]!.edge.to,'c.md');
+  const ranked=planGraphExpansion(altered,[seed('b.md'),seed('c.md',2)],q,mapping);
+  assert.equal(ranked.expanded.find(c=>c.sourceId==='d.md')!.seedSourceId,'b.md');
+});
+test('06B.3a duplicate lexical-source hits do not inflate unique Top-K omission count',async()=>{
+  const q=request({limit:4},{relationIds:['depends']}),{graph,seed}=await fixture(base,q);
+  const p=planGraphExpansion(graph,[seed('a.md'),seed('a.md',2)],q,mapping);
+  assert.equal(p.lexicalHitCount,2);assert.equal(p.lexicalCount,1);
+  assert.equal(p.uniqueCandidateCount,4);assert.equal(p.omittedByTopK,0);
+  assert.ok(p.expanded.every(c=>c.seedLexicalRank===1));
 });

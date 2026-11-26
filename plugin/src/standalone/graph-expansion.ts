@@ -1,4 +1,4 @@
-import { BOUNDS, StandaloneError, isDigest, isRecord, validPath, validateRequest, type EvidenceHit } from './contracts';
+import { BOUNDS, StandaloneError, hash, isDigest, isRecord, validPath, validateRequest, type EvidenceHit, type SourceLocator } from './contracts';
 import { freezeScope, parseScopeSelector, type ScopeSelector, type ScopedSearch } from './chat-scope';
 import { compare, graphMappingId, graphText, type GraphMapping } from './graph-mapping';
 import type { ScopedGraphSnapshot } from './graph-lifecycle';
@@ -15,7 +15,7 @@ export type ExpandedCandidate = Readonly<{
   path:readonly GraphPathStep[];
 }>;
 export type GraphExpansionPlan = Readonly<{
-  lexicalCount:number;expanded:readonly ExpandedCandidate[];omittedByTopK:number;
+  lexicalHitCount:number;lexicalCount:number;uniqueCandidateCount:number;expanded:readonly ExpandedCandidate[];omittedByTopK:number;
 }>;
 const exact=(v:unknown,keys:readonly string[]):v is Record<string,unknown>=>
   isRecord(v)&&Object.keys(v).every(k=>keys.includes(k));
@@ -49,6 +49,31 @@ export function parseGraphQuery(input:unknown):GraphQuery {
 type QueueEntry=ExpandedCandidate;
 type Neighbor={sourceId:string; step:GraphPathStep};
 const stale=():never=>{throw new StandaloneError('GRAPH_EVIDENCE_INVALID');};
+const locatorKeys=['locatorKind','sourceVersion','blockOrder','byteStart','byteEnd','charStart','charEnd','lineStart','lineEnd'];
+function locator(v:unknown,version:string):v is SourceLocator {
+  if(!exact(v,locatorKeys)||Object.keys(v).length!==locatorKeys.length
+    ||v.locatorKind!=='markdown'||v.sourceVersion!==version
+    ||!integer(v.blockOrder,0,BOUNDS.blocksPerSource-1)
+    ||!integer(v.byteStart,0,BOUNDS.fileBytes)||!integer(v.byteEnd,0,BOUNDS.fileBytes)
+    ||!integer(v.charStart,0,BOUNDS.fileBytes)||!integer(v.charEnd,0,BOUNDS.fileBytes)
+    ||v.byteStart>=v.byteEnd||v.charStart>=v.charEnd
+    ||v.charStart>v.byteStart||v.charEnd-v.charStart>v.byteEnd-v.byteStart
+    ||v.lineStart!==v.blockOrder+1||v.lineEnd!==v.lineStart)return false;
+  return true;
+}
+function validAnchor(v:unknown,author:string,version:string):boolean {
+  return exact(v,['sourceId','sourceSha256','blockId','locator'])
+    &&v.sourceId===author&&v.sourceSha256===version&&locator(v.locator,version)
+    &&v.blockId===hash(JSON.stringify([author,version,v.locator.blockOrder,v.locator.byteStart,v.locator.byteEnd]));
+}
+function validSeed(seed:EvidenceHit,version:string):boolean {
+  if(!Array.isArray(seed.sourceLocators)||seed.sourceLocators.length!==1
+    ||!locator(seed.sourceLocators[0],version)||typeof seed.originalExcerpt!=='string'
+    ||/[\r\n]/.test(seed.originalExcerpt))return false;
+  const l=seed.sourceLocators[0];
+  return Buffer.byteLength(seed.originalExcerpt,'utf8')===l.byteEnd-l.byteStart
+    &&[...seed.originalExcerpt].length===l.charEnd-l.charStart;
+}
 
 /** Pure traversal, not a proof or disclosure grant. A host must authenticate
  * the snapshot, seed evidence, all path constituents and expanded excerpts
@@ -73,13 +98,14 @@ export function planGraphExpansion(graph:ScopedGraphSnapshot, seeds:readonly Evi
     const row=adjacency.get(source)??[];
     row.push({sourceId:dest,step:{edge,traversal}});adjacency.set(source,row);
   };
+  const edgeIds=new Set<string>();
   for(const e of graph.edges){
     check();
-    if(!isDigest(e.edgeId)||!versions.has(e.from)||!versions.has(e.to)||!versions.has(e.author)||versions.get(e.from)!==e.sourceSha256||versions.get(e.to)!==e.targetSha256
-      ||versions.get(e.author)!==e.authorSha256||!e.anchors.length
-      ||e.anchors.some(a=>a.sourceId!==e.author||a.sourceSha256!==e.authorSha256
-        ||a.locator.sourceVersion!==a.sourceSha256||!isDigest(a.blockId)))return stale();
-    if(e.status.truth!=='unverified')return stale();
+    if(!isRecord(e)||!isDigest(e.edgeId)||edgeIds.has(e.edgeId)||!versions.has(e.from)||!versions.has(e.to)||!versions.has(e.author)||versions.get(e.from)!==e.sourceSha256||versions.get(e.to)!==e.targetSha256
+      ||versions.get(e.author)!==e.authorSha256||!Array.isArray(e.anchors)||!e.anchors.length||e.anchors.length>2
+      ||!e.anchors.every(a=>validAnchor(a,e.author,e.authorSha256)))return stale();
+    if(!isRecord(e.status)||e.status.truth!=='unverified'||(e.status.declared!==null&&!graphText(e.status.declared)))return stale();
+    edgeIds.add(e.edgeId);
     if(e.kind==='navigation'){if(e.relationId!==null||e.author!==e.from)return stale();continue;}
     if(e.kind!=='relation'||!e.relationId)return stale();
     const rule=rules.get(e.relationId);
@@ -88,19 +114,19 @@ export function planGraphExpansion(graph:ScopedGraphSnapshot, seeds:readonly Evi
     if(options.direction!=='incoming')add(e.from,e.to,e,'forward');
     if(options.direction!=='outgoing')add(e.to,e.from,e,'reverse');
   }
-  for(const row of adjacency.values())row.sort((a,b)=>compare(a.sourceId,b.sourceId)
-    ||compare(a.step.edge.edgeId,b.step.edge.edgeId)||compare(a.step.traversal,b.step.traversal));
+  for(const row of adjacency.values())row.sort((a,b)=>compare(a.step.edge.edgeId,b.step.edge.edgeId)
+    ||compare(a.step.traversal,b.step.traversal)||compare(a.sourceId,b.sourceId));
   const seen=new Set<string>(), queue:QueueEntry[]=[];
   for(const [index,seed] of seeds.entries()){
-    if(seed.retrievalMode!=='lexical'||seed.indexGenerationId!==graph.scope.generationId
+    if(!isRecord(seed)||seed.retrievalMode!=='lexical'||seed.indexGenerationId!==graph.scope.generationId
       ||seed.rank!==index+1||seed.lexicalRank!==index+1||!versions.has(seed.sourceId)||versions.get(seed.sourceId)!==seed.sourceSha256
-      ||!isDigest(seed.sourceSha256)||seed.sourceLocators.length!==1
-      ||seed.sourceLocators[0]!.sourceVersion!==seed.sourceSha256)return stale();
+      ||!isDigest(seed.sourceSha256)||!validSeed(seed,seed.sourceSha256))return stale();
     if(seen.has(seed.sourceId))continue;
     seen.add(seed.sourceId);
     queue.push({sourceId:seed.sourceId,sourceSha256:seed.sourceSha256,seedSourceId:seed.sourceId,
       seedLexicalRank:seed.lexicalRank,path:[]});
   }
+  const lexicalCount=queue.length;
   const expanded:ExpandedCandidate[]=[];
   for(let i=0;i<queue.length;i++){
     check();const entry=queue[i]!;
@@ -122,6 +148,7 @@ export function planGraphExpansion(graph:ScopedGraphSnapshot, seeds:readonly Evi
   // Top-K is explicit ranking selection, not an exceeded traversal budget.
   // Keep every bounded expanded candidate in the private plan so the host can
   // report coverage and never silently pretend a truncated traversal succeeded.
-  return freezeScope({lexicalCount:seeds.length,expanded:structuredClone(expanded),
-    omittedByTopK:Math.max(0,seeds.length+expanded.length-q.limit)});
+  const uniqueCandidateCount=lexicalCount+expanded.length;
+  return freezeScope({lexicalHitCount:seeds.length,lexicalCount,uniqueCandidateCount,expanded:structuredClone(expanded),
+    omittedByTopK:Math.max(0,uniqueCandidateCount-q.limit)});
 }
