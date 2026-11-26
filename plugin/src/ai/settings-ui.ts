@@ -39,9 +39,9 @@ export function refreshProviderOperationStatus(root: HTMLElement, status?: Opera
 export function renderProviderSettings(root: HTMLElement, app: App, preferences: ProviderPreferences,
   drafts: AiDrafts, openEditors: Set<string>, expert: boolean,
   save: (role: AiRole, preference: ProviderPreference) => Promise<void>,
-  refresh: (focusKey: string) => void, operationStatus?: OperationStatusReader): () => void {
+  refresh: (focusKey: string) => void, operationStatus?: OperationStatusReader, roles: readonly AiRole[]=AI_ROLES): () => void {
   const disposers: (() => void)[] = [];
-  for (const role of AI_ROLES) {
+  for (const role of roles) {
     const pref = preferences[role];
     const known = preferenceStatus(role, pref);
     const section = root.createEl('section');

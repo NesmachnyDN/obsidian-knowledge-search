@@ -641,6 +641,12 @@ export class SearchController {
     return !this.disposed && this.retainedSessions.has(session) && operation && !operation.retired
       && operation.retained?.session === session && operation.retained.owner === owner ? operation : undefined;
   }
+  /** Presentation-only ownership check; never grants disclosure or reads sources. */
+  retainedChatTurnCurrent(session:RetainedChatSessionOwner,owner:RetainedChatTurnOwner):boolean {
+    const operation=this.ownedRetainedTurn(session,owner);
+    if(!operation||operation.revision!==this.revision||operation.sourceRevision!==this.sourceRevision)return false;
+    try{return remainingOperationMs(operation.context)>0;}catch{return false;}
+  }
   cancelRetainedChatTurn(session: RetainedChatSessionOwner, owner: RetainedChatTurnOwner): void {
     const operation = this.ownedRetainedTurn(session,owner);
     if (operation) this.retireScopedRetrieval(operation,'CANCELLED');
