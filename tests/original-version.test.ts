@@ -52,3 +52,43 @@ test('canonical original version proof refuses links, non-original paths, and ov
       await assert.rejects(reader.readVersionProof(path), { code: 'SOURCE_REJECTED' });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+const fs = require('node:fs/promises') as typeof import('node:fs/promises');
+
+test('original reader denies ancestor move and symlink substitution after descriptor open', async t => {
+  for (const proof of [false, true]) for (const duringRewalk of [false, true]) {
+    const base = await mkdtemp(join(tmpdir(), 'oks-original-ancestor-race-'));
+    const root = join(base, 'vault');
+    const nested = join(root, 'nested');
+    const outside = join(base, 'outside');
+    try {
+      await mkdir(nested, { recursive: true });
+      await writeFile(join(nested, 'note.md'), 'original');
+      const reader = await BoundedVaultReader.open(root, () => ['nested/note.md']);
+      const original = fs.open;
+      let substituted = false;
+      let parentOpens = 0;
+      const mock = t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+        const handle = await original(...args);
+        const path = String(args[0]);
+        if (path.endsWith('/nested')) parentOpens++;
+        if (!substituted && (duringRewalk ? path.endsWith('/nested') && parentOpens === 2 : path.endsWith('/note.md'))) {
+          substituted = true;
+          try {
+            await rename(nested, outside);
+            await symlink(outside, nested);
+          } catch (error) {
+            await handle.close();
+            throw error;
+          }
+        }
+        return handle;
+      });
+      try {
+        const read = proof ? reader.readVersionProof('nested/note.md') : reader.read('nested/note.md');
+        await assert.rejects(read, { code: duringRewalk ? 'SOURCE_CHANGED' : 'SOURCE_REJECTED' });
+        assert.equal(substituted, true);
+      } finally { mock.mock.restore(); }
+    } finally { await rm(base, { recursive: true, force: true }); }
+  }
+});

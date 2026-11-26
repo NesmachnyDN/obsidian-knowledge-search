@@ -1,6 +1,6 @@
 import { constants, type BigIntStats } from 'node:fs';
 import { homedir } from 'node:os';
-import { lstat, open, realpath, stat } from 'node:fs/promises';
+import { lstat, open, readlink, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { BOUNDS, StandaloneError, hash, isDigest, validPath } from './contracts';
 
@@ -109,6 +109,7 @@ export class BoundedVaultReader implements SourceProvider {
     const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
     let directory: Awaited<ReturnType<typeof open>> | undefined;
     let handle: Awaited<ReturnType<typeof open>> | undefined;
+    let finalDirectory: Awaited<ReturnType<typeof open>> | undefined;
     try {
       try {
         directory = await open(this.root, directoryFlags);
@@ -136,12 +137,33 @@ export class BoundedVaultReader implements SourceProvider {
         count += bytesRead;
       }
       if (count > BOUNDS.fileBytes) throw new StandaloneError('SOURCE_LIMIT');
-      const after = await handle.stat({ bigint: true });
       const target = join(this.root, ...parts);
-      const pathAfter = await lstat(target, { bigint: true });
+      // The opened parent can be moved outside the root during the read.
+      // Rewalk nested ancestry without following any substituted symlink.
+      // For a root-level note the initial root descriptor is still anchored.
+      if (parts.length > 1) {
+        finalDirectory = await open(this.root, directoryFlags);
+        const rootInfo = await finalDirectory.stat();
+        if (!rootInfo.isDirectory() || rootInfo.dev !== this.device || rootInfo.ino !== this.inode)
+          throw new StandaloneError('VAULT_IDENTITY_CHANGED');
+        for (const part of parts.slice(0, -1)) {
+          const child = await open('/proc/self/fd/' + finalDirectory.fd + '/' + part, directoryFlags);
+          const previous = finalDirectory;
+          finalDirectory = child;
+          await previous.close();
+        }
+      }
+      const finalParent = finalDirectory ?? directory;
+      const pathAfter = await lstat('/proc/self/fd/' + finalParent.fd + '/' + parts[parts.length - 1]!,
+        { bigint: true });
       await this.rootCheck();
+      const after = await handle.stat({ bigint: true });
+      // Linux procfs reports the actual descriptor path, not the caller's
+      // pathname alias. An observed escaped, removed or replaced path denies.
       if (after.size !== BigInt(count) || !sameVersion(opened, after)
-          || !sameVersion(opened, pathAfter)) throw new StandaloneError('SOURCE_CHANGED');
+          || !sameVersion(opened, pathAfter)
+          || await readlink('/proc/self/fd/' + handle.fd) !== target)
+        throw new StandaloneError('SOURCE_CHANGED');
       return { bytes: bytes.subarray(0, count), version: versionFields(opened) };
     } catch (cause) {
       if (cause instanceof StandaloneError) throw cause;
@@ -150,7 +172,9 @@ export class BoundedVaultReader implements SourceProvider {
       await this.rootCheck();
       throw new StandaloneError('SOURCE_REJECTED');
     } finally {
-      try { await handle?.close(); } finally { await directory?.close(); }
+      try { await handle?.close(); } finally {
+        try { await finalDirectory?.close(); } finally { await directory?.close(); }
+      }
     }
   }
 }
