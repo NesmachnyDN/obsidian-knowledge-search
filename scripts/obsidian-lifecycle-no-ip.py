@@ -60,7 +60,8 @@ def deny_ip():
 
 
 def verify_denial():
-    status = dict(line.split(':', 1) for line in open('/proc/self/status') if ':' in line)
+    with open('/proc/self/status', encoding='ascii') as stream:
+        status = dict(line.split(':', 1) for line in stream if ':' in line)
     if status.get('NoNewPrivs', '').strip() != '1' or status.get('Seccomp', '').strip() != '2':
         raise RuntimeError('inherited filter not proved')
     cases = [(family, kind) for family in (socket.AF_INET, socket.AF_INET6)
@@ -77,7 +78,7 @@ def verify_denial():
         pass
 
 
-if __name__ == '__main__':
+def main():
     if sys.argv[1:] == ['--verify-inherited']:
         verify_denial()
         print('DIRECT_NETWORK_DENIED')
@@ -107,3 +108,12 @@ if __name__ == '__main__':
         os.execvpe(sys.argv[2], sys.argv[2:], child_env)
     else:
         raise SystemExit('NO_IP_TEST_ARGUMENTS')
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception:
+        # A guard denial is expected in negative tests. Never expose the local
+        # executable, fixture paths, argv, environment or raw exception trace.
+        print('DIRECT_NETWORK_DENIAL_UNAVAILABLE', file=sys.stderr)
+        raise SystemExit(2) from None
