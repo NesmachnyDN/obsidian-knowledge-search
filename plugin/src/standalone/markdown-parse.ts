@@ -42,7 +42,7 @@ function typeOf(value: Scalar): TypedProperty['valueType'] {
     ? 'date' : 'string';
   return typeof value === 'number' ? 'number' : 'boolean';
 }
-function valueOf(raw: string): { value: Scalar | Scalar[]; valueType: TypedProperty['valueType'] } {
+export function valueOf(raw: string): { value: Scalar | Scalar[]; valueType: TypedProperty['valueType'] } {
   if (raw.startsWith('[')) {
     if (!raw.endsWith(']')) throw new StandaloneError('PROPERTY_INCOMPATIBLE');
     // Only explicit JSON-style inline lists; YAML aliases/maps are forbidden.
@@ -57,7 +57,7 @@ function valueOf(raw: string): { value: Scalar | Scalar[]; valueType: TypedPrope
   // Quoted YAML text is always a string, including ISO dates and 'null'.
   return { value, valueType: raw.startsWith('"') || raw.startsWith("'") ? 'string' : typeOf(value) };
 }
-function frontmatter(lines: string[]): { properties: TypedProperty[]; valid: boolean } {
+export function frontmatter(lines: string[]): { properties: TypedProperty[]; valid: boolean } {
   const result: TypedProperty[] = [];
   const keys = new Set<string>();
   try {
@@ -115,6 +115,26 @@ export function physicalLines(raw: Uint8Array): Line[] {
   if (offset !== raw.byteLength) throw new StandaloneError('INVALID_UTF8');
   return lines;
 }
+/** Conservative syntax gate shared by original policy proofs and graph metadata.
+ * It does not interpret values: the canonical parser remains the only interpreter. */
+export function unambiguousPropertyLines(rawLines: readonly string[]): boolean {
+  for(const line of rawLines){
+    if(/[\u0085\u2028\u2029\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(line))return false;
+    const match=/^(?:[A-Za-z_][\w-]*:[ \t]*| {2,}- )(.*)$/.exec(line);
+    if(!match)return false;
+    const raw=match[1]!.trim();
+    if(!raw)continue;
+    // JSON-style inline sequences have already passed valueOf; disallow escapes
+    // and control characters rather than introducing another YAML interpreter.
+    if(raw.startsWith('[')&&raw.endsWith(']')&&!/[\\\u0000-\u001f]/.test(raw))continue;
+    if(/^"[^"\\\u0000-\u001f]*"$/.test(raw)||/^'(?:[^'\u0000-\u001f]|'')*'$/.test(raw))continue;
+    if(raw==='~'||raw==='null'||raw==='true'||raw==='false'||/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(raw)||/^\d{4}-\d{2}-\d{2}$/.test(raw)&&typeOf(raw)==='date')continue;
+    // Restrict unquoted words to simple, non-ambiguous scalar spellings.
+    if(/^[\p{L}][\p{L}\p{M}\p{N} _./-]*$/u.test(raw)&&!/^(?:null|true|false|yes|no|on|off)$/i.test(raw))continue;
+    return false;
+  }
+  return true;
+}
 /** Policy-only completeness check in the existing parser worker. The canonical
  * frontmatter parser interprets values; this proof merely excludes syntax where
  * its limited grammar cannot establish an unambiguous original mapping. */
@@ -133,21 +153,7 @@ export function parsePolicyMetadata(path:string,data:Uint8Array,rootId:string,sh
   const rawLines=lines.slice(1,end).map(x=>x.text);
   const metadata=frontmatter(rawLines);
   if(!metadata.valid)return proof('unresolved');
-  for(const line of rawLines){
-    if(/[\u0085\u2028\u2029\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(line))return proof('unresolved');
-    const match=/^(?:[A-Za-z_][\w-]*:[ \t]*| {2,}- )(.*)$/.exec(line);
-    if(!match)return proof('unresolved');
-    const raw=match[1]!.trim();
-    if(!raw)continue;
-    // JSON-style inline sequences have already passed valueOf; disallow escapes
-    // and control characters rather than introducing another YAML interpreter.
-    if(raw.startsWith('[')&&raw.endsWith(']')&&!/[\\\u0000-\u001f]/.test(raw))continue;
-    if(/^"[^"\\\u0000-\u001f]*"$/.test(raw)||/^'(?:[^'\u0000-\u001f]|'')*'$/.test(raw))continue;
-    if(raw==='~'||raw==='null'||raw==='true'||raw==='false'||/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(raw)||/^\d{4}-\d{2}-\d{2}$/.test(raw)&&typeOf(raw)==='date')continue;
-    // Restrict unquoted words to simple, non-ambiguous scalar spellings.
-    if(/^[\p{L}][\p{L}\p{M}\p{N} _./-]*$/u.test(raw)&&!/^(?:null|true|false|yes|no|on|off)$/i.test(raw))continue;
-    return proof('unresolved');
-  }
+  if(!unambiguousPropertyLines(rawLines))return proof('unresolved');
   const property=metadata.properties.find(p=>p.key==='llm_processing');
   if(!property)return proof('absent',metadata.properties);
   if(property.valueType==='string'&&property.value==='external')return proof('external',metadata.properties);
