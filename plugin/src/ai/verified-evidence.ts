@@ -56,7 +56,7 @@ export class VerifiedEvidenceOperation {
       : approval.candidates.length < 1) || approval.candidates.length > config.limits.maxCandidates) throw new ProviderFailure('LIMIT_EXCEEDED');
     const snapshot = structuredClone(approval);
     if (!Number.isSafeInteger(context.deadlineUnixMs)) throw new ProviderFailure('CONFIG_INVALID');
-    context = role === 'embedding'
+    context = role === 'embedding'&&!snapshot.grant.notePolicyBinding
       ? {signal:context.signal,deadlineUnixMs:Math.min(context.deadlineUnixMs,Date.now()+config.limits.timeoutMs)}
       : bindActiveDeadline(context,config.limits.timeoutMs,snapshot.grant?.expiresUnixMs);
     const check = (): void => {

@@ -4,6 +4,7 @@ import type { StandaloneEngine } from '../standalone/engine';
 import { ProviderFailure, type CallContext, type ProviderConfig } from './contracts';
 import { configDigest } from './disclosure';
 import { policyOriginals, type ProcessingPolicyInput, type ProcessingPolicyPort, type GenerationPolicyInput, type GenerationPolicyPort, type RerankPolicyInput, type RerankPolicyPort, type GenerationPolicyBinding } from './generation-policy';
+import type { AiRole } from './contracts';
 import { POLICY_VERSION, type PolicySnapshot, type TrustedProfile, type Restriction, type PolicyEnvelope } from './processing-policy';
 import { decideNewMaterialMarking, validNewMaterialRuleConfig, type MaterialLifecycle, type TrustedImportProvenance,
   type NewMaterialRuleConfig } from './new-material-policy';
@@ -16,7 +17,7 @@ export type GenerationPolicyHostState=Readonly<{
 /** Trusted native adapter. No credential, network, grant or second parser.
  * A profile must come from independently admitted host authority, never a note,
  * endpoint convention, UI label, or this module. */
-export class ProcessingPolicyHost<R extends 'generation'|'reranking'> implements ProcessingPolicyPort<R>{
+export class ProcessingPolicyHost<R extends AiRole> implements ProcessingPolicyPort<R>{
   constructor(readonly selected:()=>boolean,
     private readonly engine:()=>Pick<StandaloneEngine,'evaluateProcessingPolicy'>|undefined,
     private readonly state:(input:ProcessingPolicyInput<R>)=>GenerationPolicyHostState|null,

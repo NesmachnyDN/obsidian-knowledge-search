@@ -1,5 +1,6 @@
 import { hash, isDigest } from '../standalone/contracts';
 import { generationPolicyPayload, generationPolicySourceDigest, sameGenerationPolicy, type GenerationPolicyBinding } from './generation-policy';
+import { embeddingPolicyPayload } from './embedding-policy';
 import { parsePreference } from './config';
 import { ProviderFailure, type AiRole, type AuthorizedCandidates, type ProviderConfig } from './contracts';
 
@@ -47,10 +48,16 @@ export function projectDisclosure(role: AiRole, config: ProviderConfig, scopeId:
     || !Array.isArray(grant.sources) || grant.sources.length > config.limits.maxCandidates)
     throw new ProviderFailure('LIMIT_EXCEEDED');
   const policy=grant.notePolicyBinding;
+  const embedding=policy?.embedding;
   if(policy||notePolicy){
-    if((role!=='generation'&&role!=='reranking')||!sameGenerationPolicy(policy,notePolicy)||!policy
+    if(!sameGenerationPolicy(policy,notePolicy)||!policy
       ||policy.deadlineUnixMs<grant.expiresUnixMs||now>=policy.deadlineUnixMs
-      ||grant.sources.length!==candidates.length)return deny();
+      ||grant.sources.length!==candidates.length
+      ||(role==='embedding')!==!!embedding)return deny();
+    if(embedding&&(embedding.scopeId!==scopeId||!isDigest(embedding.spaceId)
+      ||embedding.queryClassification!==query.classification
+      ||!['query','document'].includes(embedding.purpose)
+      ||(embedding.purpose==='query'?candidates.length!==0:candidates.length===0)))return deny();
   }
   const passages = candidates.map((c, id) => {
     bytes += checkedBytes(c.text, config.limits.maxInputBytes - bytes);
@@ -62,7 +69,11 @@ export function projectDisclosure(role: AiRole, config: ProviderConfig, scopeId:
     // Source IDs, hashes, paths, classification and authorization stay local.
     return { id, text: c.text };
   });
-  if(policy&&(policy.payloadDigest!==generationPolicyPayload(query.text,candidates,role as 'generation'|'reranking')
-    ||policy.sourceDigest!==generationPolicySourceDigest({role:role as 'generation'|'reranking',sources:candidates.map(c=>({sourceId:c.sourceId,sourceSha256:c.sourceSha256,excerptDigest:hash(c.text)}))})))return deny();
+  if(policy){
+    const sources=candidates.map(c=>({sourceId:c.sourceId,sourceSha256:c.sourceSha256,excerptDigest:hash(c.text)}));
+    const payload=embedding?embeddingPolicyPayload(embedding.purpose,embedding.spaceId,query.text,embedding.queryClassification,sources):
+      generationPolicyPayload(query.text,candidates,role as 'generation'|'reranking');
+    if(policy.payloadDigest!==payload||policy.sourceDigest!==generationPolicySourceDigest({role,sources}))return deny();
+  }
   return { query: query.text, passages };
 }
