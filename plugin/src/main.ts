@@ -15,7 +15,7 @@ import { ModelError } from './advanced/model-protocol';
 import { readSource, trustedVaultRoot } from './advanced/source';
 import type { AdvancedEvidenceHit, RetrievalRequest, RetrievalResponse } from './advanced/retrieval';
 import { IngestError, type IngestResponse } from './advanced/protocol';
-import { FileSystemAdapter, MarkdownView, Modal, Notice, Plugin, TFile, type App, type TAbstractFile } from 'obsidian';
+import { FileSystemAdapter, getLanguage, MarkdownView, Modal, Notice, Plugin, TFile, type App, type TAbstractFile } from 'obsidian';
 import { ProbeController } from './controller';
 import { FIXTURE_PATH, type Response } from './protocol';
 import { Supervisor } from './supervisor';
@@ -30,6 +30,11 @@ import { purgeDerivedIndex } from './search/purge';
 import { defaultSettings, parseSettings, type SearchSettings } from './search/settings';
 import { SearchSettingsTab } from './search/settings-tab';
 import { SearchView, SEARCH_VIEW } from './search/view';
+import { ChatView, CHAT_VIEW } from './search/chat-view';
+import { editorChatScope } from './search/chat-native-scope';
+import { settingsLocale } from './search/settings-i18n';
+import { renderProviderSettings, type AiDrafts } from './ai/settings-ui';
+import { applySettingsLayout } from './search/settings-layout';
 import { obsidianNavigator } from './search/obsidian-navigation';
 import { verifySpan, type SourceNavigator } from './search/navigation';
 
@@ -71,6 +76,8 @@ class ResultModal extends Modal {
 export default class SyntheticEvidencePlugin extends Plugin {
   settings: SearchSettings = defaultSettings();
   private navigator?: SourceNavigator<TFile>;
+  private chatSettings?: Modal;
+  private chatOpenEpoch=0;
   private retiringNavigator?: SourceNavigator<TFile>;
   private sourceReader?: BoundedVaultReader;
   private readonly markingTracker=new NewMaterialTracker<TFile>();
@@ -206,6 +213,14 @@ export default class SyntheticEvidencePlugin extends Plugin {
     this.registerView(SEARCH_VIEW, leaf => new SearchView(leaf, this.searchController,
       () => this.settings, action => this.controlSearch(action), this.denseUi, this.denseMachine));
     this.addCommand({ id: 'open-standalone-search', name: 'Open Standalone search', callback: () => { void this.openSearch(); } });
+    this.registerView(CHAT_VIEW,leaf=>new ChatView(leaf,this.searchController,()=>this.settings,()=>this.openChatSettings()));
+    const chatLabel=(en:string,ru:string)=>settingsLocale(getLanguage())==='ru'?ru:en;
+    const chat=(kind?:'active-note'|'editor-selection')=>{void this.openChat(kind).catch(error=>
+      new Notice('OKS Chat: '+(error instanceof StandaloneError?error.code:'NOT_READY')));};
+    this.addRibbonIcon('messages-square',chatLabel('Open OKS chat','Открыть чат OKS'),()=>chat());
+    this.addCommand({id:'open-chat',name:chatLabel('Open OKS chat','Открыть чат OKS'),callback:()=>chat()});
+    this.addCommand({id:'open-chat-active-note',name:chatLabel('Chat with active note','Чат по активной заметке'),callback:()=>chat('active-note')});
+    this.addCommand({id:'open-chat-editor-selection',name:chatLabel('Chat with editor selection','Чат по выделенному фрагменту'),callback:()=>chat('editor-selection')});
     this.addCommand({ id: 'open-first-search-source', name: 'Verify and open first search source', callback: () => { void this.searchController.open(0); } });
     for (const action of ['pause','resume','cancel','rebuild'] as const)
       this.addCommand({ id: `${action}-standalone`, name: `${action[0]!.toUpperCase() + action.slice(1)} Standalone indexing`,
@@ -295,6 +310,61 @@ export default class SyntheticEvidencePlugin extends Plugin {
     const leaf = this.app.workspace.getLeavesOfType(SEARCH_VIEW)[0] ?? this.app.workspace.getLeaf('tab');
     await leaf.setViewState({ type: SEARCH_VIEW, active: true });
     if (!this.unloaded) await this.app.workspace.revealLeaf(leaf);
+  }
+  /** Explicit editor capture is pinned before opening the chat leaf. */
+  async openChat(kind?:'active-note'|'editor-selection'):Promise<void> {
+    const epoch=++this.chatOpenEpoch;
+    const revision=this.searchController.sourceAuthorityRevision();
+    const current=()=>!this.unloaded&&!this.denseSettingsChanging&&epoch===this.chatOpenEpoch
+      &&this.searchController.sourceAuthorityCurrent(revision);
+    if(!current())throw new StandaloneError('SOURCE_CHANGED');
+    let captured:ReturnType<typeof editorChatScope>|undefined;
+    let pinned=()=>current();
+    if(kind){
+      const reader=this.sourceReader,view=this.app.workspace.getActiveViewOfType(MarkdownView),file=view?.file;
+      if(!reader||!view||!(file instanceof TFile))throw new StandaloneError('SOURCE_REJECTED');
+      const path=file.path,editor=view.editor,editorText=editor.getValue();
+      const selections=()=>editor.listSelections().map(item=>({anchor:{line:item.anchor.line,utf16Column:item.anchor.ch},
+        head:{line:item.head.line,utf16Column:item.head.ch}}));
+      const selected=selections(),selectionKey=JSON.stringify(selected);
+      if(kind==='editor-selection'&&selected.length!==1)throw new StandaloneError('SCOPE_INVALID');
+      pinned=()=>current()&&this.sourceReader===reader&&view.file===file&&file.path===path
+        &&this.app.vault.getAbstractFileByPath(path)===file&&view.editor===editor&&editor.getValue()===editorText
+        &&(kind!=='editor-selection'||JSON.stringify(selections())===selectionKey);
+      const active=()=>pinned()&&this.app.workspace.getActiveViewOfType(MarkdownView)===view;
+      if(!active())throw new StandaloneError('SOURCE_CHANGED');
+      const bytes=await reader.read(path);
+      if(!active())throw new StandaloneError('SOURCE_CHANGED');
+      captured=editorChatScope(kind,path,editorText,bytes,selected[0]);
+    }
+    const leaf=this.app.workspace.getLeavesOfType(CHAT_VIEW)[0]??this.app.workspace.getLeaf('tab');
+    if(!pinned())throw new StandaloneError('SOURCE_CHANGED');
+    if(!(leaf.view instanceof ChatView))await leaf.setViewState({type:CHAT_VIEW,active:true});
+    if(!pinned()||!(leaf.view instanceof ChatView))throw new StandaloneError('SOURCE_CHANGED');
+    const chat=leaf.view;
+    if(captured)chat.applyHostScope(captured);
+    if(current())await this.app.workspace.revealLeaf(leaf);
+  }
+  private openChatSettings():void {
+    if(this.unloaded)return;
+    this.chatSettings?.close();
+    const plugin=this, drafts:AiDrafts={},openEditors=new Set<string>(['ai-generation']);
+    const modal=new class extends Modal {
+      private active=false;
+      private release?:()=>void;
+      onOpen():void {this.active=true;this.render();}
+      private render():void {
+        if(!this.active||plugin.unloaded)return;
+        this.release?.();this.contentEl.replaceChildren();applySettingsLayout(this.contentEl);
+        this.release=renderProviderSettings(this.contentEl,plugin.app,plugin.settings.ai,drafts,openEditors,
+          plugin.settings.presentationMode==='expert',async(role,pref)=>{
+            if(!this.active||plugin.unloaded||role!=='generation')throw new StandaloneError('CANCELLED');
+            await plugin.patchSettings(settings=>{settings.ai[role]=pref;});
+          },()=>this.render(),undefined,['generation']);
+      }
+      onClose():void {this.active=false;this.release?.();this.release=undefined;this.contentEl.replaceChildren();}
+    }(this.app);
+    this.chatSettings=modal;modal.open();
   }
   /** Explicit complete replacement (tests/machine adapter); never used by individual settings controls. */
   updateSettings(next: SearchSettings): Promise<void> {
@@ -812,6 +882,9 @@ export default class SyntheticEvidencePlugin extends Plugin {
     cleanup(() => this.resultModal?.close());
     this.resultModal = undefined;
     void this.controller?.unload().catch(() => { console.warn('PLUGIN_UNLOAD_CLEANUP_FAILED'); });
+    cleanup(() => this.chatSettings?.close());
+    this.chatSettings=undefined;
+    cleanup(() => this.app.workspace.detachLeavesOfType(CHAT_VIEW));
     cleanup(() => this.app.workspace.detachLeavesOfType(SEARCH_VIEW));
     void this.stopStandalone().catch(() => { console.warn('PLUGIN_UNLOAD_CLEANUP_FAILED'); });
     void this.stopAdvanced().catch(() => { /* failed barrier remains closed to reload */ });

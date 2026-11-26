@@ -24,11 +24,33 @@ class HostPlugin {
   app: unknown; manifest = { id: 'oks-synthetic-evidence' }; saved: unknown = null;
   loadData(): Promise<unknown> { return Promise.resolve(this.saved); }
   async saveData(value: unknown): Promise<void> { this.saved = value; }
-  registerView(): void {} addCommand(): void {} addSettingTab(): void {} registerEvent(): void {} register(_callback: () => void): void {}
+  views=new Map<string,(leaf:unknown)=>unknown>();
+  registerView(type:string,factory:(leaf:unknown)=>unknown):void {this.views.set(type,factory);}
+  addRibbonIcon():void {} addCommand(): void {} addSettingTab(): void {} registerEvent(): void {} register(_callback: () => void): void {}
 }
 class FileSystemAdapter { constructor(private root: string) {} getBasePath(): string { return this.root; } }
 class Empty {}
-const host = { Plugin: HostPlugin, FileSystemAdapter, ItemView: Empty, Modal: Empty, Notice: Empty,
+class TestElement {
+  children:TestElement[]=[];textContent='';value='';type='';placeholder='';checked=false;disabled=false;
+  attributes=new Map<string,string>();onclick?:()=>void;oninput?:()=>void;onchange?:()=>void;
+  ownerDocument={createElement:(tag:string)=>new TestElement(tag)};
+  constructor(readonly tagName:string='section'){}
+  appendChild(child:TestElement):TestElement {
+    this.children.push(child);if(this.tagName==='select'&&this.children.length===1)this.value=child.value;return child;
+  }
+  replaceChildren(...children:TestElement[]):void{this.children=children;}
+  addClass():void{}
+  setAttribute(key:string,value:string):void{this.attributes.set(key,value);}
+  contains(el:TestElement):boolean{return this===el||this.children.some(child=>child.contains(el));}
+  all():TestElement[]{return [this,...this.children.flatMap(child=>child.all())];}
+  querySelectorAll(selector:string):TestElement[]{const type=selector.includes('password')?'password':'checkbox';
+    return this.all().filter(el=>el.tagName==='input'&&el.type===type);}
+}
+class HostItemView {
+  contentEl=new TestElement();
+  constructor(_leaf:unknown){}
+}
+const host = { getLanguage:()=>'en', Plugin: HostPlugin, FileSystemAdapter, ItemView: HostItemView, Modal: Empty, Notice: Empty,
   PluginSettingTab: Empty, Setting: Empty, TFile: Empty, MarkdownView: Empty };
 const originalLoad = Module._load;
 Module._load = function(name, ...args) { return name === 'obsidian' ? host : originalLoad.call(this,name,...args); };
@@ -2094,4 +2116,68 @@ test('POLICY.2b native create identity, saved rules, rename and unload guard rea
     assert.deepEqual(await readFile(join(f.vault,file.path)),modified);
     f.plugin.onunload();await assert.rejects(preview(rules),/SOURCE_REJECTED/);
   }finally{await f.cleanup();}
+});
+
+test('06H.2 native registered chat separates retrieve, classify, preview and one-shot generation; stale controls cannot send',async()=>{
+  const f=await fixture();
+  const file=Object.assign(new Empty(),{path:'fixture.md'});
+  Object.assign(f.plugin.app.vault,{getMarkdownFiles:()=>[file],getAbstractFileByPath:(path:string)=>path===file.path?file:null});
+  let sends=0;
+  const server=createServer((req,res)=>{
+    let body='';req.on('data',chunk=>body+=chunk);
+    req.on('end',()=>{
+      sends++;
+      assert.equal(req.url,'/v1/chat/completions');assert.equal(req.headers.authorization,'Bearer fixture-token');
+      const payload=JSON.parse(body) as {model:string;messages:{content:string}[]};
+      const input=JSON.parse(payload.messages[1]!.content) as {question:string;passages:{id:number;text:string}[]};
+      assert.equal(input.question,'REQ-LIFE-1');assert.ok(input.passages.length>0);
+      res.writeHead(200,{'content-type':'application/json'});
+      res.end(JSON.stringify({model:payload.model,usage:{completion_tokens:5},choices:[{index:0,finish_reason:'stop',
+        message:{role:'assistant',content:JSON.stringify({claims:[{kind:'quotation',text:'REQ-LIFE-1',citationIds:[0]}]})}}]}));
+    });
+  });
+  let view:({contentEl:TestElement;onOpen():Promise<void>;onClose():Promise<void>})|undefined;
+  const wait=async<T>(read:()=>T|undefined):Promise<T>=>{
+    const until=Date.now()+3000;
+    while(Date.now()<until){const value=read();if(value!==undefined)return value;await new Promise(r=>setTimeout(r,5));}
+    assert.fail('native synthetic UI did not reach expected phase: '+view?.contentEl.all().map(el=>el.textContent).join(' | '));
+  };
+  try{
+    await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
+    const addr=server.address();assert.ok(addr&&typeof addr!=='string');
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    await f.plugin.patchSettings(settings=>{settings.ai.generation={state:'configured',transport:'local',
+      origin:'http://127.0.0.1:'+addr.port,identity:{model:'fixture',revision:'v1'},
+      limits:{timeoutMs:1500,maxInputBytes:4096,maxCandidates:8,maxOutputTokens:32,maxConcurrent:1}};});
+    const factory=(f.plugin as unknown as HostPlugin).views.get('oks-native-chat');assert.ok(factory);
+    view=factory({}) as NonNullable<typeof view>;await view.onOpen();
+    const root=view.contentEl;
+    const find=(text:string)=>root.all().find(el=>el.textContent===text);
+    const button=(text:string)=>{const el=find(text);assert.ok(el,'button '+text);assert.equal(typeof el.onclick,'function');return el;};
+    const control=(label:string)=>{const el=root.all().find(el=>el.attributes.get('aria-label')===label);assert.ok(el,label);return el;};
+    const question=control('Question');question.value='REQ-LIFE-1';question.oninput?.();
+    button('Retrieve evidence').onclick!();assert.equal(sends,0);
+    assert.ok(find('SCOPE_INVALID'));
+    const scope=control('Scope');scope.value='vault-wide';scope.oninput?.();button('Apply scope').onclick!();
+    const retrieve=button('Retrieve evidence'), bind=async()=>{
+      retrieve.onclick!();
+      const password=await wait(()=>root.all().find(el=>el.type==='password'));
+      assert.equal(sends,0);password.value='fixture-token';button('Bind token and classify').onclick!();
+      assert.equal(password.value,'');
+      const prepare=await wait(()=>find('Prepare exact preview'));
+      for(const select of root.all().filter(el=>el.attributes.get('aria-label')==='Classification'))select.value='synthetic';
+      prepare.onclick!();return wait(()=>find('Authorize and send once'));
+    };
+    const stale=await bind();assert.equal(sends,0);
+    question.oninput?.();stale.onclick!();assert.equal(sends,0);
+    const confirm=await bind();assert.equal(sends,0);
+    confirm.onclick!();confirm.onclick!();
+    await wait(()=>find('Completed. History verified locally.'));
+    assert.equal(sends,1);assert.ok(find('Quotation'));assert.ok(find('REQ-LIFE-1'));
+    confirm.onclick!();assert.equal(sends,1);
+    const selected=root.all().find(el=>el.type==='checkbox');assert.ok(selected);selected.checked=true;selected.onchange?.();
+    question.oninput?.();assert.equal(selected.checked,false);
+    await view.onClose();assert.equal(root.children.length,0);
+    confirm.onclick!();assert.equal(sends,1);
+  }finally{await view?.onClose();await new Promise<void>(r=>server.close(()=>r()));await f.cleanup();}
 });
