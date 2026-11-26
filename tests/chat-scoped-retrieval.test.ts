@@ -690,6 +690,7 @@ test('06H.2-A2b2d: loopback exact explicit history, fresh attestation, no hidden
   await generationFixture(async cfg=>{
     const c=new SearchController(async()=>{},undefined,undefined,undefined,{config:()=>cfg,scopeId:()=>root,verify:async candidate=>assert.deepEqual(candidate,hit)});
     try{
+      cfg.limits.maxInputBytes=1024;
       c.attach(engine(async()=>lease({snapshot:scope,search:async req=>{lexical.push(req.query);return response(req.requestId);}})));
       const session=c.openRetainedChatSession();
       const start=async(query:string,prior:string[]=[])=>{
@@ -716,6 +717,9 @@ test('06H.2-A2b2d: loopback exact explicit history, fresh attestation, no hidden
         return c.readRetainedChatHistory(session).at(-1)!.id;
       };
       const first=await finish('первый');
+      // A successful compatible transcript survives unrelated offline Basic Search.
+      assert.equal((await c.search(uiRequest('ordinary',1))).ok,true);
+      assert.equal(c.readRetainedChatHistory(session)[0]!.id,first);
       await finish('second',[first]);
       assert.deepEqual(wire.slice(0,2),[
         {question:'первый',passages:[{id:0,text:hit.originalExcerpt}]},
@@ -723,6 +727,14 @@ test('06H.2-A2b2d: loopback exact explicit history, fresh attestation, no hidden
       ]);
       assert.deepEqual(lexical.slice(0,2),['первый','second']);
       await finish('third');
+      const multibyte=await finish('я'.repeat(256));
+      assert.deepEqual(await c.startRetainedChatTurn(session,selector,{...request,query:'я'.repeat(257)}).result,error('INVALID_REQUEST'));
+      const oversized=await start('я'.repeat(256),[multibyte]);
+      let oversizedDraft=oversized.draft;
+      oversizedDraft=c.attestRetainedChatClassification(session,oversized.turn.owner,oversizedDraft,oversizedDraft.priorQuestions[0]!.id,'public');
+      const beforeOversized=wire.length;
+      await assert.rejects(c.prepareRetainedChatGeneration(session,oversized.turn.owner,oversizedDraft),{message:'LIMIT_EXCEEDED'});
+      assert.equal(wire.length,beforeOversized);
       assert.deepEqual(wire[2],{question:'third',passages:[{id:0,text:hit.originalExcerpt}]});
       for(let i=0;i<10;i++)await finish('turn-'+i);
       assert.equal(c.readRetainedChatHistory(session).length,12);
@@ -733,13 +745,13 @@ test('06H.2-A2b2d: loopback exact explicit history, fresh attestation, no hidden
       const {turn}=await start('replacement',[newest]);
       await assert.rejects(c.bindRetainedGenerationCredential(session,turn.owner,'replacement'),{message:'CANCELLED'});
       assert.deepEqual(c.readRetainedChatHistory(session),[]);
-      assert.equal(wire.length,13);
+      assert.equal(wire.length,14);
       await finish('before scope change');
       scope={...scope,coverage:{...scope.coverage,excluded:1}};
       const changed=await start('new scope');
       assert.deepEqual(c.readRetainedChatHistory(session),[]);
       c.cancelRetainedChatTurn(session,changed.turn.owner);
-      assert.equal(wire.length,14);
+      assert.equal(wire.length,15);
     }finally{c.dispose();}
   },(req,res)=>{
     assert.equal(req.headers.authorization,'Bearer fixture');
@@ -748,4 +760,92 @@ test('06H.2-A2b2d: loopback exact explicit history, fresh attestation, no hidden
       reply(res,generated([{kind:'quotation',text:hit.originalExcerpt,citationIds:[0]}]));
     });
   });
+});
+
+test('06H.2-A2b2d: serialized history limits reject atomically and evict only an inactive completed session',async()=>{
+  const cfg:ProviderConfig={state:'configured',transport:'local',origin:'http://127.0.0.1:1',identity:{model:'synthetic',revision:'v1'},
+    limits:{timeoutMs:1000,maxInputBytes:4096,maxCandidates:3,maxOutputTokens:32,maxConcurrent:1}};
+  const c=new SearchController(async()=>{},undefined,undefined,undefined,{config:()=>cfg,scopeId:()=>root,verify:async()=>{}});
+  const complete=async(session:object,question:string,expectedError?:string):Promise<void>=>{
+    const turn=c.startRetainedChatTurn(session,selector,{...request,requestId:question,query:question});
+    assert.equal((await turn.result).ok,true);
+    const stamp=await c.bindRetainedGenerationCredential(session,turn.owner,'synthetic');
+    let draft=c.createRetainedChatClassificationDraft(session,turn.owner,stamp);
+    draft=c.attestRetainedChatClassification(session,turn.owner,draft,draft.question.id,'synthetic');
+    draft=c.attestRetainedChatClassification(session,turn.owner,draft,draft.evidence[0]!.id,'synthetic');
+    const result=await c.confirmRetainedChatGeneration(session,turn.owner,await c.prepareRetainedChatGeneration(session,turn.owner,draft));
+    if(expectedError) assert.deepEqual(result,error(expectedError)); else assert.equal(result.ok,true);
+  };
+  try {
+    c.attach(engine(async()=>lease()));
+    (c as unknown as {generator:{run:()=>Promise<readonly {kind:'quotation';text:string;citations:readonly EvidenceHit[]}[]>}}).generator={
+      run:async()=>[{kind:'quotation',text:'x'.repeat(70*1024),citations:[hit]}]
+    };
+    const rejected=c.openRetainedChatSession();
+    await complete(rejected,'too-large','LIMIT_EXCEEDED');
+    assert.deepEqual(c.readRetainedChatHistory(rejected),[]);
+    c.closeRetainedChatSession(rejected);
+
+    (c as unknown as {generator:{run:()=>Promise<readonly {kind:'quotation';text:string;citations:readonly EvidenceHit[]}[]>}}).generator={
+      run:async()=>[{kind:'quotation',text:'x'.repeat(60*1024),citations:[hit]}]
+    };
+    const sessions=[c.openRetainedChatSession(),c.openRetainedChatSession(),c.openRetainedChatSession(),c.openRetainedChatSession()];
+    for(const [index,session] of sessions.entries()) await complete(session,`bounded-${index}`);
+    const priorLarge=c.readRetainedChatHistory(sessions[3]!)[0]!.id;
+    await complete(sessions[3]!,'byte-eviction');
+    assert.equal(c.readRetainedChatHistory(sessions[3]!).length,1);
+    assert.notEqual(c.readRetainedChatHistory(sessions[3]!)[0]!.id,priorLarge);
+    const sizes=sessions.map(session=>Buffer.byteLength(JSON.stringify({history:c.readRetainedChatHistory(session),lastUsed:Date.now()}),'utf8'));
+    assert.ok(sizes.every(size=>size<=64*1024));
+    assert.ok(sizes.reduce((sum,size)=>sum+size,0)<=256*1024);
+    const active=c.startRetainedChatTurn(sessions[3]!,selector,{...request,requestId:'active',query:'active'});
+    assert.equal((await active.result).ok,true);
+    const fifth=c.openRetainedChatSession();
+    assert.throws(()=>c.readRetainedChatHistory(sessions[0]!),{message:'CANCELLED'});
+    assert.equal((await c.readRetainedChatTurn(sessions[3]!,active.owner)).ok,true);
+    c.closeRetainedChatSession(fifth);
+  } finally { c.dispose(); }
+});
+
+test('06H.2-A2b2d: history revocation clears prior context and stale consent performs zero requests',async()=>{
+  for(const reason of ['source','runtime','provider','classification'] as const){
+    let calls=0;
+    await generationFixture(async cfg=>{
+      let current=cfg;
+      const c=new SearchController(async()=>{},undefined,undefined,undefined,{config:()=>current,scopeId:()=>root,verify:async()=>{}});
+      try {
+        c.attach(engine(async()=>lease()));const session=c.openRetainedChatSession();
+        const start=async(query:string,prior:string[]=[])=>{
+          const turn=c.startRetainedChatTurn(session,selector,{...request,query},prior);
+          assert.equal((await turn.result).ok,true);
+          const stamp=await c.bindRetainedGenerationCredential(session,turn.owner,'fixture');
+          let draft=c.createRetainedChatClassificationDraft(session,turn.owner,stamp);
+          for(const item of [draft.question,...draft.priorQuestions,...draft.evidence]){
+            draft=c.attestRetainedChatClassification(session,turn.owner,draft,item.id,'synthetic');
+          }
+          return {turn,draft,preview:await c.prepareRetainedChatGeneration(session,turn.owner,draft)};
+        };
+        const first=await start('first');
+        assert.equal((await c.confirmRetainedChatGeneration(session,first.turn.owner,first.preview)).ok,true);
+        const id=c.readRetainedChatHistory(session)[0]!.id;
+        const next=await start('next',[id]);
+        assert.equal(calls,1);
+        if(reason==='source'){
+          let observed:number|undefined;
+          c.invalidateSource([()=>{observed=c.readRetainedChatHistory(session).length;}]);
+          assert.equal(observed,0);
+        } else if(reason==='runtime'){
+          c.beginRuntimeSettingsChange(undefined,false);c.endRuntimeSettingsChange();
+        } else if(reason==='provider'){
+          current={...cfg,identity:{...cfg.identity,revision:'changed'}};
+        } else {
+          assert.throws(()=>c.attestRetainedChatClassification(session,next.turn.owner,next.draft,next.draft.priorQuestions[0]!.id,'confidential'),{message:'DISCLOSURE_DENIED'});
+        }
+        assert.equal((await c.confirmRetainedChatGeneration(session,next.turn.owner,next.preview)).ok,false);
+        assert.deepEqual(c.readRetainedChatHistory(session),[]);
+        assert.deepEqual(await c.startRetainedChatTurn(session,selector,request,[id]).result,error('DISCLOSURE_DENIED'));
+        assert.equal(calls,1,reason);
+      }finally{c.dispose();}
+    },(req,res)=>{calls++;req.resume();reply(res,generated([{kind:'quotation',text:hit.originalExcerpt,citationIds:[0]}]));});
+  }
 });

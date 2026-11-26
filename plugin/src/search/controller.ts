@@ -399,7 +399,7 @@ export class SearchController {
       if (!this.disposed) {
         this.pending?.resolve(failure('INTERNAL_FAILURE'));
         this.pending = undefined;
-        this.resetSharedState({phase:'error',message:'INTERNAL_FAILURE',response:null});
+        this.resetSharedState({phase:'error',message:'INTERNAL_FAILURE',response:null},undefined,true);
       }
       this.queueLifecycle();
       this.notificationVersion++;
@@ -422,14 +422,14 @@ export class SearchController {
       throw new StandaloneError('INTERNAL_FAILURE');
     this.runtimeSettingsChanging = true;
     ++this.sourceRevision;
-    this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null});
+    this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null},undefined,true);
     if (this.disposed) return;
     if (revokeRerankProfile) this.rerankProfiles.revoke();
     this.emit(false, retire, true);
     if (this.explicitRetirementPending) throw new StandaloneError('INTERNAL_FAILURE');
   }
   endRuntimeSettingsChange(): void { this.runtimeSettingsChanging = false; }
-  invalidate(): void { if (!this.disposed) this.invalidateState(); }
+  invalidate(): void { if (!this.disposed) this.invalidateState(true); }
   /** Source-event retirement can itself synchronously call abort listeners.
    * Run it only after the same logical shared reset as lexical search. */
   invalidateSource(obligations: readonly (() => void)[]): void {
@@ -440,7 +440,7 @@ export class SearchController {
     // ordinary shared reset, revoke any lexical reservation made in its callbacks.
     if (this.retirement.sourceRunning) return;
     if (this.retirement.running) {
-      this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null});
+      this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null},undefined,true);
       return;
     }
     this.transitionSourceRetirement(false);
@@ -489,14 +489,14 @@ export class SearchController {
     this.retirement.sourceRunning = true;
     try {
       if (retry) for (const obligation of this.retirement.obligations) obligation.attempted = false;
-      this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null});
+      this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null},undefined,true);
     } finally {
       this.retirement.sourceRunning = false;
       if (!this.disposed) this.emit();
       else this.drainNotifications();
     }
   }
-  private resetSharedState(state: UiState, reserve?: (revision: number) => void): number {
+  private resetSharedState(state: UiState, reserve?: (revision: number) => void, invalidateHistory = false): number {
     const revision = ++this.revision;
     this.sharedResetDepth++;
     try {
@@ -504,9 +504,10 @@ export class SearchController {
       // callbacks. A nested reset or terminal seal can then settle that job,
       // never be overwritten by the interrupted caller, and own publication.
       this.lastQuery = '';
-      // A shared authority transition (source, runtime, provider or host
-      // revocation) cannot leave a transcript eligible for later disclosure.
-      this.clearAllRetainedHistory();
+      // Ordinary Basic Search is not a chat authority transition.  Source,
+      // runtime, provider or host revocation must clear history before any
+      // cancellation callback can reenter.
+      if (invalidateHistory) this.clearAllRetainedHistory();
       this.pending?.resolve(failure('SUPERSEDED')); this.pending = undefined;
       this.state = state;
       reserve?.(revision);
@@ -533,8 +534,8 @@ export class SearchController {
   private ownsRevision(revision: number): boolean {
     return !this.disposed && this.revision === revision;
   }
-  private invalidateState(final = false, retireHost?: RetirementTarget, requireRetirement = false): void {
-    const revision = this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null});
+  private invalidateState(invalidateHistory = false, final = false, retireHost?: RetirementTarget, requireRetirement = false): void {
+    const revision = this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null},undefined,invalidateHistory);
     if (this.ownsRevision(revision)) this.emit(final, retireHost, requireRetirement);
   }
   message(error: string): void {
@@ -794,6 +795,9 @@ export class SearchController {
           resolve(preview);
         } catch(error) {
           const reason=deadlineFailure(operation.context)??(error instanceof ProviderFailure?error:new ProviderFailure('SOURCE_STALE'));
+          // This preparation owns its terminal failure. Retire before notifying,
+          // but do not let retirement's generic cancellation mask the typed cause.
+          retained.rejectPreview=undefined;
           this.retireScopedRetrieval(operation,reason.code);
           reject(reason);
         } finally {
@@ -1544,7 +1548,7 @@ export class SearchController {
     if (!this.enabled || !this.engine) return failure('DISABLED');
     if (this.sharedAuthorityFault && this.pendingHostRetirement && this.notifying) return failure('INTERNAL_FAILURE');
     const engine = this.engine, revision = this.revision + 1;
-    try { this.invalidateState(false, retireHost, true); }
+    try { this.invalidateState(true, false, retireHost, true); }
     catch { return failure('INTERNAL_FAILURE'); }
     // The initial shared invalidation is synchronous. Do not execute a stale
     // control command after an observer supersedes its revision or detaches.
