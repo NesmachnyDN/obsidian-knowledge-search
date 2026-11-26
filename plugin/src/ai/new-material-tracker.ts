@@ -223,9 +223,9 @@ export class NewMaterialTracker<T extends object> {
     const current=this.exact.get(proof.version.sourceId);
     return admitted(current)&&current.owner===owner&&sameProof(current.proof,proof)?current.state:'unresolved';
   }
-  private inventory(context:LifecycleContext,input:BaselineInventory<T>):readonly BaselineCandidate<T>[]|null {
+  private inventory(context:LifecycleContext,input:BaselineInventory<T>,allowEmpty=false):readonly BaselineCandidate<T>[]|null {
     if(!input||input.complete!==true||!Array.isArray(input.candidates)
-      ||input.candidates.length===0||input.candidates.length>BOUNDS.sources)return null;
+      ||(!allowEmpty&&input.candidates.length===0)||input.candidates.length>BOUNDS.sources)return null;
     const paths=new Set<string>(),owners=new Set<T>(),out:BaselineCandidate<T>[]=[];
     for(const candidate of input.candidates){
       if(!candidate||!objectIdentity(candidate.owner)||!validProof(candidate.proof,context.rootId))return null;
@@ -237,13 +237,26 @@ export class NewMaterialTracker<T extends object> {
     if(this.exact.size+out.length>BOUNDS.sources)return null;
     return Object.freeze(out.sort((a,b)=>a.proof.version.sourceId<b.proof.version.sourceId?-1:1));
   }
+  /** Readiness is not a classification or permission; no startup initialization. */
+  initialBaselineAvailable(context:LifecycleContext):boolean {
+    return this.current(context)&&!this.restorePending&&!this.restoreUsed&&!this.admissionPending&&!this.pending
+      &&!this.baselineDone&&this.lifecycleRevision===0&&this.eventSequence===0&&!this.legacyTouched
+      &&!this.overflow&&this.entries.size===0&&this.exact.size===0;
+  }
+  previewDurableInitialBaseline(context:LifecycleContext,input:BaselineInventory<T>,now:number,ttlMs:number):BaselinePreview<T>|null {
+    if(!this.initialBaselineAvailable(context)){this.sealLifecycle();return null;}
+    return this.makeBaselinePreview(context,input,now,ttlMs,true);
+  }
   previewInitialBaseline(context:LifecycleContext,input:BaselineInventory<T>,now:number,ttlMs:number):BaselinePreview<T>|null {
+    return this.makeBaselinePreview(context,input,now,ttlMs,false);
+  }
+  private makeBaselinePreview(context:LifecycleContext,input:BaselineInventory<T>,now:number,ttlMs:number,allowEmpty:boolean):BaselinePreview<T>|null {
     if(this.admissionPending){this.sealLifecycle();return null;}
     if(this.restorePending||!this.current(context)||this.baselineDone)return null;
     this.pending=undefined;
     if(!Number.isSafeInteger(now)||now<0||!Number.isSafeInteger(ttlMs)||ttlMs<=0||ttlMs>300000
       ||!Number.isSafeInteger(now+ttlMs))return null;
-    const candidates=this.inventory(context,input);
+    const candidates=this.inventory(context,input,allowEmpty);
     if(!candidates)return null;
     const preview=Object.freeze({context:this.context!,startedAt:now,expiresAt:now+ttlMs,candidates});
     this.lifecycleRevision++;this.pending=preview;return preview;
