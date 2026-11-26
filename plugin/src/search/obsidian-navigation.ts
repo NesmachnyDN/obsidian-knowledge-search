@@ -12,7 +12,7 @@ export function obsidianNavigator(app: App, reader: SourceProvider, sharedFence:
       guard();
       const leaf = app.workspace.getLeaf('tab');
       guard();
-      await leaf.openFile(file, { active: true, state: { mode: 'source' } });
+      await leaf.openFile(file, { active: true, state: { mode: 'source', source: true } });
       guard();
       const view = leaf.view;
       if (!(view instanceof MarkdownView) || view.file !== file || view.file.path !== file.path)
@@ -24,7 +24,11 @@ export function obsidianNavigator(app: App, reader: SourceProvider, sharedFence:
           if (leaf.view !== view || view.file !== file) throw new StandaloneError('NAVIGATION_REJECTED');
           view.editor.setSelection(from, to); guard();
           view.editor.scrollIntoView({ from, to }, true); guard();
-          view.editor.focus();
+          view.editor.focus(); guard();
+          // Live Preview can hide a Property line and discard selection.
+          // Do not report success unless the exact verified span is selected.
+          if (view.editor.getSelection() !== view.editor.getRange(from,to))
+            throw new StandaloneError('NAVIGATION_REJECTED');
         },
       };
     },
