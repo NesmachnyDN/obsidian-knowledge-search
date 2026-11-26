@@ -27,7 +27,7 @@ const snapshot=(raw:string,extra:Partial<PolicySnapshot>={}):PolicySnapshot=>({s
   adapter:'fixture-adapter',ownerId:'turn-1',hostId:'host-1',scopeId:hash('scope'),policyRevision:'p1',configRevision:'c1',credentialEpoch:1,
   deadlineUnixMs:Date.now()+30000,payloadDigest:hash('synthetic payload'),restrictions:[],evaluationComplete:true,...extra});
 async function evaluate(raw:string,extra:Partial<PolicySnapshot>={},reader?:MemoryReader,signal=new AbortController().signal){
-  const s=snapshot(raw,extra);return new EligibilityEvaluator(reader??new MemoryReader(new Map([['note.md',raw]])),parser,{snapshot:()=>s,current:()=>true}).evaluate(signal);
+  const s=snapshot(raw,extra);return new EligibilityEvaluator(reader??new MemoryReader(new Map([['note.md',raw]])),parser,{snapshot:()=>s,current:()=>true}).evaluate({signal,deadlineUnixMs:s.deadlineUnixMs});
 }
 const front=(value:string)=>`---\nllm_processing: ${value}\n---\n# synthetic`;
 
@@ -76,7 +76,7 @@ test('POLICY.1b stale originals, cancellation, mutation and changed authority fa
   reader=new MemoryReader(new Map([['note.md',raw]]),(path,n)=>{if(n===2)reader.notes.set(path,front('private'));});
   assert.equal((await evaluate(raw,{},reader)).reason,'source-stale');
   let s=snapshot(raw);reader=new MemoryReader(new Map([['note.md',raw]]),()=>{s={...s,policyRevision:'p2'};});
-  assert.equal((await new EligibilityEvaluator(reader,parser,{snapshot:()=>s,current:()=>true}).evaluate(new AbortController().signal)).reason,'authority-changed');
+  assert.equal((await new EligibilityEvaluator(reader,parser,{snapshot:()=>s,current:()=>true}).evaluate({signal:new AbortController().signal,deadlineUnixMs:s.deadlineUnixMs})).reason,'authority-changed');
   const abort=new AbortController();reader=new MemoryReader(new Map([['note.md',raw]]),()=>abort.abort());
   assert.equal((await evaluate(raw,{},reader,abort.signal)).reason,'cancelled');
   assert.equal((await evaluate(raw,{deadlineUnixMs:Date.now()-1})).allowed,false);
@@ -85,11 +85,11 @@ test('POLICY.1b stale originals, cancellation, mutation and changed authority fa
 test('POLICY.1b decision envelope immutable, binds exact scope, credential, payload and profile',async()=>{
   const raw=front('external'),s=snapshot(raw),r=new MemoryReader(new Map([['note.md',raw]]));let current=s;
   const evaluator=new EligibilityEvaluator(r,parser,{snapshot:()=>current,current:()=>true});const sig=new AbortController().signal;
-  const result=await evaluator.evaluate(sig);assert.equal(result.allowed,true);assert.ok(Object.isFrozen(result));assert.ok(Object.isFrozen(result.sourceVersions[0]));
+  const result=await evaluator.evaluate({signal:sig,deadlineUnixMs:s.deadlineUnixMs});assert.equal(result.allowed,true);assert.ok(Object.isFrozen(result));assert.ok(Object.isFrozen(result.sourceVersions[0]));
   assert.throws(()=>{(result as unknown as {allowed:boolean}).allowed=false;});
-  assert.equal((await evaluator.evaluate(sig)).bindingDigest,result.bindingDigest);
+  assert.equal((await evaluator.evaluate({signal:sig,deadlineUnixMs:s.deadlineUnixMs})).bindingDigest,result.bindingDigest);
   for(const change of [{credentialEpoch:2},{payloadDigest:hash('other')},{scopeId:hash('other')},{profile:profile({admissionId:'other'})}]){
-    current={...s,...change};assert.notEqual((await evaluator.evaluate(sig)).bindingDigest,result.bindingDigest);
+    current={...s,...change};assert.notEqual((await evaluator.evaluate({signal:sig,deadlineUnixMs:s.deadlineUnixMs})).bindingDigest,result.bindingDigest);
   }
 });
 
@@ -108,7 +108,7 @@ test('POLICY.1b existing worker carries version-bound compact proof, lexical par
     const doc=await worker.parse('note.md',bytes,root);
     assert.equal(doc.properties[0]?.value,'private');assert.equal(doc.sha256,hash(raw));
     const r=await new EligibilityEvaluator(new MemoryReader(new Map([['note.md',raw]])),worker,
-      {snapshot:()=>s,current:()=>true}).evaluate(new AbortController().signal);
+      {snapshot:()=>s,current:()=>true}).evaluate({signal:new AbortController().signal,deadlineUnixMs:s.deadlineUnixMs});
     assert.equal(r.reason,'private');
     const s2=await worker.policyMetadata('note.md',Buffer.from('---\nllm_processing: private\nllm_processing: external\n---'),root);
     assert.equal(s2.state,'unresolved');
@@ -121,11 +121,58 @@ test('POLICY.1b all originals are reread, foreign proof and incomplete authority
   const s=snapshot(raw,{subjects:[note('note.md',raw),note('other.md',other)]});
   const r=new MemoryReader(notes,(path,n)=>{if(path==='other.md'&&n===2)notes.set('note.md',front('private'));});
   const host={snapshot:()=>s,current:()=>true};
-  assert.equal((await new EligibilityEvaluator(r,parser,host).evaluate(new AbortController().signal)).reason,'source-stale');
+  assert.equal((await new EligibilityEvaluator(r,parser,host).evaluate({signal:new AbortController().signal,deadlineUnixMs:s.deadlineUnixMs})).reason,'source-stale');
   const reader=new MemoryReader(new Map([['note.md',raw],['other.md',other]]));
   const foreign:PolicyMetadataParser={policyMetadata:async(path,bytes,root)=>({...parsePolicyMetadata(path,bytes,root,hash(bytes)),scopeId:hash('foreign')})};
-  assert.equal((await new EligibilityEvaluator(reader,foreign,host).evaluate(new AbortController().signal)).reason,'source-stale');
+  assert.equal((await new EligibilityEvaluator(reader,foreign,host).evaluate({signal:new AbortController().signal,deadlineUnixMs:s.deadlineUnixMs})).reason,'source-stale');
   for(const invalid of [{...s,evaluationComplete:false},{...s,credentialEpoch:0},{...s,unexpected:true}]){
-    assert.equal((await new EligibilityEvaluator(reader,parser,{snapshot:()=>invalid,current:()=>true}).evaluate(new AbortController().signal)).allowed,false);
+    assert.equal((await new EligibilityEvaluator(reader,parser,{snapshot:()=>invalid,current:()=>true}).evaluate({signal:new AbortController().signal,deadlineUnixMs:s.deadlineUnixMs})).allowed,false);
+  }
+});
+
+function deferred<T>(){let resolve!:(v:T)=>void;const promise=new Promise<T>(r=>{resolve=r;});return {promise,resolve};}
+const tick=()=>new Promise<void>(r=>setImmediate(r));
+test('POLICY.1b bounded pending reads: abort/deadline retire logical result, physical slot drains before next evaluation',async()=>{
+  for(const mode of ['abort','deadline'] as const){
+    const raw=front('external'),entered=deferred<void>(),release=deferred<Uint8Array>();let reads=0;
+    const reader:SourceProvider={rootId:hash('fixture-root'),list:async()=>['note.md'],versionHints:async()=>[],read:async()=>{
+      if(++reads===1){entered.resolve();return release.promise;}return Buffer.from(raw);
+    }};
+    let s=snapshot(raw,{deadlineUnixMs:Date.now()+(mode==='deadline'?100:30000)});
+    const abort=new AbortController(),evaluator=new EligibilityEvaluator(reader,parser,{snapshot:()=>s,current:()=>true});
+    const pending=evaluator.evaluate({signal:abort.signal,deadlineUnixMs:s.deadlineUnixMs});
+    await entered.promise;if(mode==='abort')abort.abort();
+    const result=await pending;assert.equal(result.reason,mode==='abort'?'cancelled':'timeout');
+    assert.equal(result.allowed,false);assert.deepEqual(result.sourceVersions,[]);
+    s=snapshot(raw);const fresh={signal:new AbortController().signal,deadlineUnixMs:s.deadlineUnixMs};
+    assert.equal((await evaluator.evaluate(fresh)).reason,'busy');assert.equal(reads,1);
+    release.resolve(Buffer.from(front('private')));await tick();
+    assert.equal((await evaluator.evaluate(fresh)).allowed,true);assert.equal(reads,3);
+  }
+});
+test('POLICY.1b cancelled or timed-out worker proof cannot cross evaluation boundary',async()=>{
+  const {WorkerMarkdownParser}=await import('../plugin/src/standalone/worker');
+  const {syntheticNodeWorkerPort}=await import('./helpers/browser-worker-port');
+  const {join}=await import('node:path');
+  for(const mode of ['abort','deadline'] as const){
+    let deliver:(()=>void)|undefined;const held=deferred<void>();let messages=0;
+    const worker=new WorkerMarkdownParser(join(process.cwd(),'.test-build','standalone-worker.js'),source=>{
+      const port=syntheticNodeWorkerPort(source);return {...port,onMessage:handler=>port.onMessage(message=>{
+        if(++messages===1){deliver=()=>handler(message);held.resolve();}else handler(message);
+      })};
+    });
+    try{
+      const raw=front('external'),reader=new MemoryReader(new Map([['note.md',raw]]));
+      let s=snapshot(raw,{deadlineUnixMs:Date.now()+(mode==='deadline'?500:30000)});
+      const abort=new AbortController(),evaluator=new EligibilityEvaluator(reader,worker,{snapshot:()=>s,current:()=>true});
+      const pending=evaluator.evaluate({signal:abort.signal,deadlineUnixMs:s.deadlineUnixMs});await held.promise;
+      if(mode==='abort')abort.abort();
+      const result=await pending;assert.equal(result.reason,mode==='abort'?'cancelled':'timeout');assert.equal(result.allowed,false);
+      s=snapshot(raw);const fresh={signal:new AbortController().signal,deadlineUnixMs:s.deadlineUnixMs};
+      assert.equal((await evaluator.evaluate(fresh)).reason,'busy');
+      await assert.rejects(worker.parse('note.md',Buffer.from(raw),reader.rootId),/PARSER_BUSY/);
+      deliver!();await tick();assert.equal((await evaluator.evaluate(fresh)).allowed,true);
+      assert.equal((await worker.parse('note.md',Buffer.from(raw),reader.rootId)).properties[0]?.value,'external');
+    }finally{await worker.close();}
   }
 });

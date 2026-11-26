@@ -54,3 +54,19 @@ integration.  Run TypeScript, focused and full Node/Python regression, build, pa
 reproducibility, licenses/audit, independent full-diff review, CI and post-merge
 regression. Historical
 transport/UI tests and all runtime paths remain unchanged.
+
+## Async dependency retirement
+
+The evaluator takes the existing host CallContext and binds the shared active
+elapsed deadline without extending it (at most 30 seconds). The snapshot and
+context deadline must match at entry. Every original read and worker proof has
+bounded logical waiting; on cancellation or expiry the result is terminal and
+ineligible. The evaluator retains one physical dependency slot until actual
+settlement, including non-cancellable source reads and late worker replies;
+no queued or subsequent operation can reuse it while draining. The worker's
+existing bounded physical request lifecycle remains independent of the shorter
+logical deadline; no forced worker restart or loss of Basic Search on ordinary
+policy cancellation. Host retirement remains authoritative across instances.
+Test cancellation and deadline during reads and actual bundled-worker replies,
+late completion isolation, busy admission, and successful new evaluation only
+after drain. No new lifecycle authority or runtime admission is introduced.

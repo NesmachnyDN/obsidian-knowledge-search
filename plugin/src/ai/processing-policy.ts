@@ -2,7 +2,8 @@ import { BOUNDS, hash, isDigest, validPath } from '../standalone/contracts';
 import type { SourceProvider } from '../standalone/source';
 import type { PolicyMetadataParser } from '../standalone/worker';
 import type { PolicyMetadataState } from '../standalone/shared';
-import { AI_ROLES, type AiRole, type ProviderConfig } from './contracts';
+import { AI_ROLES, ProviderFailure, type AiRole, type CallContext, type ProviderConfig } from './contracts';
+import { bindActiveDeadline, remainingOperationMs, expireActiveDeadline, deadlineFailure } from './active-deadline';
 import { configDigest } from './disclosure';
 
 /** Prospective eligibility only. This module cannot mint consent or perform I/O to a provider. */
@@ -10,7 +11,8 @@ export const POLICY_VERSION = 'oks-policy-1b';
 export type ProfileClass = 'external' | 'trusted-internal';
 export type PolicyReason = 'eligible' | 'private' | 'invalid-property' | 'metadata-unresolved'
   | 'source-stale' | 'source-unresolved' | 'cancelled' | 'profile-unadmitted'
-  | 'profile-mismatch' | 'restricted' | 'ownership-unresolved' | 'lineage-unresolved' | 'authority-changed';
+  | 'profile-mismatch' | 'restricted' | 'ownership-unresolved' | 'lineage-unresolved' | 'authority-changed'
+  | 'busy' | 'timeout';
 export type TrustedProfile = Readonly<{
   profileId: string; admissionId: string; role: AiRole; configDigest: string;
   adapter: string; classification: ProfileClass;
@@ -53,7 +55,7 @@ function validSnapshot(s: PolicySnapshot): boolean {
     && identifier(s.hostId) && isDigest(s.scopeId) && identifier(s.policyRevision)
     && identifier(s.configRevision) && isDigest(s.payloadDigest)
     && Number.isSafeInteger(s.credentialEpoch) && s.credentialEpoch > 0
-    && Number.isSafeInteger(s.deadlineUnixMs) && s.deadlineUnixMs > Date.now()
+    && Number.isSafeInteger(s.deadlineUnixMs) && s.deadlineUnixMs > 0
     && s.evaluationComplete === true && Array.isArray(s.subjects) && s.subjects.length > 0
     && s.subjects.length <= BOUNDS.limit && unique(s.subjects.map(x=>x.sourceId))
     && s.subjects.every(x=>exact(x,['sourceId','expectedSha256','kind','ownerIds'],['parentSourceIds'])&&identifier(x.sourceId) && isDigest(x.expectedSha256)
@@ -81,32 +83,72 @@ function restricts(s: PolicySnapshot, x: PolicySubject): boolean {
 /** Existing host supplies the live authority port. No production callers or
  * profile registry are introduced in POLICY.1b. Results are not capabilities. */
 export class EligibilityEvaluator {
+  // Reserve before host callbacks. A non-cancellable read or worker request
+  // remains physically admitted until its actual settlement, even after the
+  // caller receives a terminal deadline/cancellation result. No queue.
+  private active=false;
+  private pending=false;
   constructor(private readonly reader: SourceProvider, private readonly parser: PolicyMetadataParser,
     private readonly host: PolicyHost) {}
-  async evaluate(signal:AbortSignal):Promise<PolicyEnvelope> {
+  private awaitDependency<T>(context:CallContext,current:()=>boolean,work:()=>Promise<T>):Promise<T> {
+    const remaining=remainingOperationMs(context);
+    if(this.pending)return Promise.reject(new ProviderFailure('BUSY'));
+    this.pending=true;
+    return new Promise<T>((resolve,reject)=>{
+      let settled=false;
+      const finish=(value?:T,error?:unknown):void=>{
+        if(settled)return;
+        settled=true;clearTimeout(timer);context.signal.removeEventListener('abort',cancel);
+        const terminal=deadlineFailure(context);
+        if(terminal||error!==undefined)reject(terminal??error);else resolve(value as T);
+      };
+      const cancel=()=>finish(undefined,new ProviderFailure('CANCELLED'));
+      const timer=setTimeout(()=>{expireActiveDeadline(context);finish(undefined,new ProviderFailure('TIMEOUT'));},remaining);
+      context.signal.addEventListener('abort',cancel,{once:true});
+      Promise.resolve().then(()=>{
+        remainingOperationMs(context);
+        if(!current())throw new ProviderFailure('CANCELLED');
+        remainingOperationMs(context);
+        return work();
+      }).then(value=>{this.pending=false;finish(value);},error=>{this.pending=false;finish(undefined,error??new ProviderFailure('SOURCE_STALE'));});
+      if(context.signal.aborted)cancel();
+    });
+  }
+  async evaluate(context:CallContext):Promise<PolicyEnvelope> {
+    if(this.active||this.pending)return freeze({policyVersion:POLICY_VERSION,allowed:false,reason:'busy',bindingDigest:null,rootId:'',sourceVersions:[]});
+    this.active=true;
+    try{return await this.evaluateOwned(context);}finally{this.active=false;}
+  }
+  private async evaluateOwned(context:CallContext):Promise<PolicyEnvelope> {
+    const signal=context.signal;
     const versions:{sourceId:string;sha256:string;metadataState:PolicyMetadataState;reason:PolicyReason}[]=[];
     const rootId=this.reader.rootId;
     let bindingDigest:string|null=null;
     const done=(reason:PolicyReason):PolicyEnvelope=>freeze({policyVersion:POLICY_VERSION,
       allowed:reason==='eligible',reason,bindingDigest,rootId,sourceVersions:versions.map(x=>({...x}))});
-    const failure=():PolicyReason=>signal.aborted?'cancelled':'authority-changed';
+    const failure=():PolicyReason=>{
+      const terminal=deadlineFailure(context);
+      return terminal?.code==='TIMEOUT'?'timeout':signal.aborted||terminal?.code==='CANCELLED'?'cancelled':'authority-changed';
+    };
     let s:PolicySnapshot;
     try {
       if(signal.aborted||!this.host.current())return done(failure());
       const value=this.host.snapshot();
-      if(!value||!isDigest(rootId)||!validSnapshot(value))return done('source-unresolved');
+      if(!value||!isDigest(rootId)||!validSnapshot(value)||value.deadlineUnixMs!==context.deadlineUnixMs)return done('source-unresolved');
       s=structuredClone(value);
       if(!validSnapshot(s))return done('source-unresolved');
       const p=profileReason(s); if(p)return done(p);
+      context=bindActiveDeadline(context,30000,s.deadlineUnixMs);
       bindingDigest=hash(JSON.stringify([POLICY_VERSION,rootId,s]));
-    }catch{return done('source-unresolved');}
+    }catch(error){return done(error instanceof ProviderFailure&&error.code==='TIMEOUT'?'timeout':signal.aborted?'cancelled':'source-unresolved');}
     const current=():boolean=>{
-      if(signal.aborted||Date.now()>=s.deadlineUnixMs||this.reader.rootId!==rootId)return false;
+      if(signal.aborted||this.reader.rootId!==rootId)return false;
       try {
+        remainingOperationMs(context);
         if(!this.host.current())return false;
         const value=this.host.snapshot();
         return !!value&&validSnapshot(value)&&hash(JSON.stringify([POLICY_VERSION,rootId,value]))===bindingDigest
-          &&this.host.current()&&!signal.aborted&&Date.now()<s.deadlineUnixMs;
+          &&this.host.current()&&remainingOperationMs(context)>0;
       }catch{return false;}
     };
     if(!current())return done(failure());
@@ -129,10 +171,10 @@ export class EligibilityEvaluator {
     for(const x of notes){
       try{
         if(!current())return done(failure());
-        const bytes=await this.reader.read(x.sourceId);
+        const bytes=await this.awaitDependency(context,current,()=>this.reader.read(x.sourceId));
         if(!current())return done(failure());
         if(bytes.byteLength>BOUNDS.fileBytes||hash(bytes)!==x.expectedSha256)return done('source-stale');
-        const doc=await this.parser.policyMetadata(x.sourceId,bytes,rootId);
+        const doc=await this.awaitDependency(context,current,()=>this.parser.policyMetadata(x.sourceId,bytes,rootId));
         if(!current())return done(failure());
         if(doc.sha256!==x.expectedSha256||doc.sourceId!==x.sourceId||doc.scopeId!==rootId)return done('source-stale');
         const reason:PolicyReason=doc.state==='absent'||doc.state==='external'?'eligible':doc.state==='private'?'private':doc.state==='invalid'?'invalid-property':'metadata-unresolved';
@@ -146,7 +188,7 @@ export class EligibilityEvaluator {
     for(const x of notes){
       try{
         if(!current())return done(failure());
-        const bytes=await this.reader.read(x.sourceId);
+        const bytes=await this.awaitDependency(context,current,()=>this.reader.read(x.sourceId));
         if(!current())return done(failure());
         if(bytes.byteLength>BOUNDS.fileBytes||hash(bytes)!==x.expectedSha256)return done('source-stale');
       }catch{return done(current()?'source-unresolved':failure());}
