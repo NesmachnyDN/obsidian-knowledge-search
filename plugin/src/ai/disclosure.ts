@@ -48,7 +48,7 @@ export function projectDisclosure(role: AiRole, config: ProviderConfig, scopeId:
     throw new ProviderFailure('LIMIT_EXCEEDED');
   const policy=grant.notePolicyBinding;
   if(policy||notePolicy){
-    if(role!=='generation'||!sameGenerationPolicy(policy,notePolicy)||!policy
+    if((role!=='generation'&&role!=='reranking')||!sameGenerationPolicy(policy,notePolicy)||!policy
       ||policy.deadlineUnixMs<grant.expiresUnixMs||now>=policy.deadlineUnixMs
       ||grant.sources.length!==candidates.length)return deny();
   }
@@ -62,7 +62,7 @@ export function projectDisclosure(role: AiRole, config: ProviderConfig, scopeId:
     // Source IDs, hashes, paths, classification and authorization stay local.
     return { id, text: c.text };
   });
-  if(policy&&(policy.payloadDigest!==generationPolicyPayload(query.text,candidates)
-    ||policy.sourceDigest!==generationPolicySourceDigest({sources:candidates.map(c=>({sourceId:c.sourceId,sourceSha256:c.sourceSha256,excerptDigest:hash(c.text)}))})))return deny();
+  if(policy&&(policy.payloadDigest!==generationPolicyPayload(query.text,candidates,role as 'generation'|'reranking')
+    ||policy.sourceDigest!==generationPolicySourceDigest({role:role as 'generation'|'reranking',sources:candidates.map(c=>({sourceId:c.sourceId,sourceSha256:c.sourceSha256,excerptDigest:hash(c.text)}))})))return deny();
   return { query: query.text, passages };
 }

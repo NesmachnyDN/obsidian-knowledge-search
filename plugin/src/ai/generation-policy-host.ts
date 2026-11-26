@@ -3,7 +3,7 @@ import type { PolicyMetadataProof } from '../standalone/shared';
 import type { StandaloneEngine } from '../standalone/engine';
 import { ProviderFailure, type CallContext, type ProviderConfig } from './contracts';
 import { configDigest } from './disclosure';
-import { policyOriginals, type GenerationPolicyInput, type GenerationPolicyPort, type GenerationPolicyBinding } from './generation-policy';
+import { policyOriginals, type ProcessingPolicyInput, type ProcessingPolicyPort, type GenerationPolicyInput, type GenerationPolicyPort, type RerankPolicyInput, type RerankPolicyPort, type GenerationPolicyBinding } from './generation-policy';
 import { POLICY_VERSION, type PolicySnapshot, type TrustedProfile, type Restriction, type PolicyEnvelope } from './processing-policy';
 import { decideNewMaterialMarking, validNewMaterialRuleConfig, type MaterialLifecycle, type TrustedImportProvenance,
   type NewMaterialRuleConfig } from './new-material-policy';
@@ -16,13 +16,15 @@ export type GenerationPolicyHostState=Readonly<{
 /** Trusted native adapter. No credential, network, grant or second parser.
  * A profile must come from independently admitted host authority, never a note,
  * endpoint convention, UI label, or this module. */
-export class GenerationPolicyHost implements GenerationPolicyPort{
+export class ProcessingPolicyHost<R extends 'generation'|'reranking'> implements ProcessingPolicyPort<R>{
   constructor(readonly selected:()=>boolean,
     private readonly engine:()=>Pick<StandaloneEngine,'evaluateProcessingPolicy'>|undefined,
-    private readonly state:(input:GenerationPolicyInput)=>GenerationPolicyHostState|null){}
-  private readState(input:GenerationPolicyInput):GenerationPolicyHostState|null{
+    private readonly state:(input:ProcessingPolicyInput<R>)=>GenerationPolicyHostState|null,
+    private readonly role:R){}
+  private readState(input:ProcessingPolicyInput<R>):GenerationPolicyHostState|null{
+    if(input.role!==this.role)return null;
     const originals=policyOriginals(input),value=this.state(input);
-    if(!value||!value.complete||configDigest('generation',value.config)!==configDigest('generation',input.config)
+    if(!value||!value.complete||configDigest(this.role,value.config)!==configDigest(this.role,input.config)
       ||!Array.isArray(value.materials)||value.materials.length>originals.length
       ||value.rules!==undefined&&!validNewMaterialRuleConfig(value.rules))return null;
     if(value.rules!==undefined&&(value.materials.length!==originals.length||originals.some((x,i)=>{
@@ -31,14 +33,14 @@ export class GenerationPolicyHost implements GenerationPolicyPort{
     })))return null;
     return structuredClone(value);
   }
-  private snapshot(input:GenerationPolicyInput,value:GenerationPolicyHostState):PolicySnapshot{
+  private snapshot(input:ProcessingPolicyInput<R>,value:GenerationPolicyHostState):PolicySnapshot{
     return {subjects:policyOriginals(input).map(x=>({sourceId:x.sourceId,expectedSha256:x.sourceSha256,kind:'original',ownerIds:[x.sourceId]})),
-      profile:value.profile,role:'generation',config:input.config,adapter:value.adapter,ownerId:input.ownerId,hostId:input.hostId,
+      profile:value.profile,role:this.role,config:input.config,adapter:value.adapter,ownerId:input.ownerId,hostId:input.hostId,
       scopeId:input.scopeId,policyRevision:hash(JSON.stringify([value.policyRevision,input.scopeBinding,value.rules??null,value.materials])),
       configRevision:value.configRevision,credentialEpoch:input.credentialEpoch,deadlineUnixMs:input.deadlineUnixMs,
       payloadDigest:input.payloadDigest,restrictions:value.restrictions,evaluationComplete:true};
   }
-  current(input:GenerationPolicyInput,binding:GenerationPolicyBinding):boolean{
+  current(input:ProcessingPolicyInput<R>,binding:GenerationPolicyBinding):boolean{
     try{
       const engine=this.engine();if(!engine||!this.selected())return false;
       const value=this.readState(input);
@@ -46,7 +48,7 @@ export class GenerationPolicyHost implements GenerationPolicyPort{
         &&hash(JSON.stringify([POLICY_VERSION,input.scopeId,this.snapshot(input,value)]))===binding.bindingDigest;
     }catch{return false;}
   }
-  async evaluate(input:GenerationPolicyInput,context:CallContext,current:()=>boolean):Promise<PolicyEnvelope>{
+  async evaluate(input:ProcessingPolicyInput<R>,context:CallContext,current:()=>boolean):Promise<PolicyEnvelope>{
     const engine=this.engine();
     if(!engine||!this.selected()||!current())throw new ProviderFailure('NOT_READY');
     const live=()=>current()&&this.selected()&&this.engine()===engine&&current();
@@ -71,4 +73,12 @@ export class GenerationPolicyHost implements GenerationPolicyPort{
     }
     return envelope;
   }
+}
+export class GenerationPolicyHost extends ProcessingPolicyHost<'generation'> implements GenerationPolicyPort {
+  constructor(selected:()=>boolean,engine:()=>Pick<StandaloneEngine,'evaluateProcessingPolicy'>|undefined,
+    state:(input:GenerationPolicyInput)=>GenerationPolicyHostState|null){super(selected,engine,state,'generation');}
+}
+export class RerankPolicyHost extends ProcessingPolicyHost<'reranking'> implements RerankPolicyPort {
+  constructor(selected:()=>boolean,engine:()=>Pick<StandaloneEngine,'evaluateProcessingPolicy'>|undefined,
+    state:(input:RerankPolicyInput)=>GenerationPolicyHostState|null){super(selected,engine,state,'reranking');}
 }

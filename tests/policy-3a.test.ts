@@ -12,11 +12,12 @@ import {WorkerMarkdownParser} from '../plugin/src/standalone/worker';
 import {syntheticNodeWorkerPort} from './helpers/browser-worker-port';
 import {SearchController,uiRequest} from '../plugin/src/search/controller';
 import {verifySpan} from '../plugin/src/search/navigation';
-import {GenerationPolicyHost,type GenerationPolicyHostState} from '../plugin/src/ai/generation-policy-host';
+import {GenerationPolicyHost,RerankPolicyHost,type GenerationPolicyHostState} from '../plugin/src/ai/generation-policy-host';
 import {GenerationPolicyGate,generationPolicyPayload,policyOriginals,uniquePolicySources,type GenerationPolicyInput} from '../plugin/src/ai/generation-policy';
 import {configDigest,projectDisclosure} from '../plugin/src/ai/disclosure';
 import {NEW_MATERIAL_RULE_CONFIG_VERSION,type NewMaterialRuleConfig} from '../plugin/src/ai/new-material-policy';
 import type {ProviderConfig} from '../plugin/src/ai/contracts';
+import {RerankRuntimeProfiles} from '../plugin/src/ai/rerank-profile';
 import type {PolicyEnvelope} from '../plugin/src/ai/processing-policy';
 
 const request={requestId:'synthetic-turn',query:'REQ-42',limit:5};
@@ -38,6 +39,11 @@ async function fixture(notes:Record<string,string>,use:(f:{
   const server=createServer((req:IncomingMessage,res:ServerResponse)=>{
     let wire='';req.on('data',chunk=>wire+=String(chunk));req.on('end',()=>{
       const payload=JSON.parse(wire);
+      if(req.url==='/v1/rerank'){
+        requests.push(payload);beforeResponse();
+        res.writeHead(200,{'content-type':'application/json'});
+        res.end(JSON.stringify({model:payload.model,results:payload.documents.map((_:unknown,index:number)=>({index,relevance_score:1/(index+1)}))}));return;
+      }
       const content=JSON.parse(payload.messages[1].content);
       requests.push(content);beforeResponse();
       res.writeHead(200,{'content-type':'application/json'});
@@ -62,8 +68,11 @@ async function fixture(notes:Record<string,string>,use:(f:{
     const host=new GenerationPolicyHost(()=>true,()=>engine,input=>({...state,
       materials:policyOriginals(input).map(source=>({lifecycle:{state:lifecycle,sourceId:source.sourceId,
         sha256:source.sourceSha256,rootId:reader.rootId},provenance:null}))}));
-    controller=new SearchController(async()=>{},undefined,undefined,undefined,
-      {config:()=>cfg,scopeId:()=>reader.rootId,verify:async hit=>{verifySpan(hit,await reader.read(hit.sourceId));}},undefined,undefined,host);
+    const rerankHost=new RerankPolicyHost(()=>true,()=>engine,input=>({...state,
+      materials:policyOriginals(input).map(source=>({lifecycle:{state:lifecycle,sourceId:source.sourceId,
+        sha256:source.sourceSha256,rootId:reader.rootId},provenance:null}))}));
+    const port={config:()=>cfg,scopeId:()=>reader.rootId,verify:async(hit:import('../plugin/src/standalone/contracts').EvidenceHit)=>{verifySpan(hit,await reader.read(hit.sourceId));}};
+    controller=new SearchController(async()=>{},undefined,undefined,port,port,undefined,undefined,host,rerankHost);
     controller.attach(engine);
     await use({engine,reader,root,config:cfg,host,controller,state:patch=>{state={...state,...patch};},
       lifecycle:value=>{lifecycle=value;},requests,onResponse:callback=>{beforeResponse=callback;}});
@@ -235,5 +244,93 @@ test('POLICY.3a canonical worker remains reserved after logical original-read ca
       const proof=await f.engine.previewPolicyMetadata('a.md',()=>true);
       assert.equal(proof.state,'absent');
     }finally{release();f.reader.read=original;}
+  });
+});
+
+test('POLICY.3b rerank canonical originals, exact role and shared credential authority',async()=>{
+  await fixture({'a.md':raw('external','REQ-42 public needle.'),'b.md':raw('private','REQ-42 private needle.')},async f=>{
+    const c=f.controller;
+    const profile={profileId:'rerank-fixture',admissionId:'synthetic-review',role:'reranking' as const,
+      configDigest:configDigest('reranking',f.config),adapter:'synthetic-adapter',classification:'external' as const};
+    f.state({profile});
+    const registry=(c as unknown as {rerankProfiles:RerankRuntimeProfiles}).rerankProfiles;
+    registry.installSyntheticFixture(f.config,f.reader.rootId,'policy-rerank-fixture');
+    assert.equal((await c.search(uiRequest('REQ-42',5))).ok,true);
+    assert.throws(()=>c.prepareRerank(),{message:'NOT_READY'});
+    await assert.rejects(c.prepareRerankWithPolicy('synthetic-token'),{message:'DISCLOSURE_DENIED'});
+    assert.equal(f.requests.length,0);
+    assert.equal((await c.search(uiRequest('public',5))).ok,true);
+    const prepare=()=>c.prepareRerankWithPolicy('synthetic-token');
+    const first=await prepare();assert.ok(first.policy);assert.equal(first.role,'reranking');
+    await assert.rejects(c.rerankConfirmed(first,'synthetic','other-token'),{message:'DISCLOSURE_DENIED'});
+    await assert.rejects(c.prepareGenerationWithPolicy('other-token'),{message:'BUSY'});
+    await assert.rejects(c.generationConfirmed(first,'synthetic'),{message:'DISCLOSURE_DENIED'});
+    const foreign=c.createGenerationViewOwner();
+    await assert.rejects(c.rerankConfirmedWithPolicy(first,'synthetic',foreign),{message:'DISCLOSURE_DENIED'});
+    await c.rerankConfirmedWithPolicy(first,'synthetic');
+    assert.equal(c.snapshot().rerank?.phase,'results',JSON.stringify(c.snapshot().rerank));
+    assert.deepEqual(f.requests,[{model:'synthetic-generator@fixture-v1',query:'public',
+      documents:['REQ-42 public needle.'],top_n:1,max_tokens_per_query:0,max_tokens_per_doc:0}]);
+    await assert.rejects(c.rerankConfirmedWithPolicy(first,'synthetic'),{message:'DISCLOSURE_DENIED'});
+    const wrongRole=await prepare();
+    f.state({profile:{...profile,role:'generation'}});
+    await assert.rejects(c.rerankConfirmedWithPolicy(wrongRole,'synthetic'),{message:'CANCELLED'});
+    assert.equal(f.requests.length,1);
+    f.state({profile});
+    const cancelled=await prepare();c.cancelRerank();
+    await assert.rejects(c.rerankConfirmedWithPolicy(cancelled,'synthetic'),{message:'DISCLOSURE_DENIED'});
+    const revoked=await prepare();f.state({policyRevision:'p2'});
+    await assert.rejects(c.rerankConfirmedWithPolicy(revoked,'synthetic'),{message:'CANCELLED'});
+    assert.equal(f.requests.length,1);
+    const publication=await prepare();f.onResponse(()=>f.state({policyRevision:'p3'}));
+    await c.rerankConfirmedWithPolicy(publication,'synthetic');
+    assert.equal(c.snapshot().rerank?.phase,'error');assert.equal(f.requests.length,2);
+  });
+});
+test('POLICY.3b rerank pending canonical read cannot be replaced after logical cancellation',async()=>{
+  await fixture({'a.md':raw('external')},async f=>{
+    const c=f.controller;
+    f.state({profile:{profileId:'rerank-fixture',admissionId:'synthetic-review',role:'reranking',
+      configDigest:configDigest('reranking',f.config),adapter:'synthetic-adapter',classification:'external'}});
+    (c as unknown as {rerankProfiles:RerankRuntimeProfiles}).rerankProfiles.installSyntheticFixture(f.config,f.reader.rootId,'policy-rerank-fixture');
+    assert.equal((await c.search(uiRequest('REQ-42',5))).ok,true);
+    const original=f.reader.read.bind(f.reader);
+    let release!:()=>void,entered!:()=>void;
+    const hold=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r);
+    f.reader.read=async path=>{entered();await hold;return original(path);};
+    try{
+      const pending=c.prepareRerankWithPolicy('synthetic-token');
+      const rejected=assert.rejects(pending,{message:'CANCELLED'});
+      await started;c.cancelRerank();await rejected;
+      await assert.rejects(c.prepareRerankWithPolicy('synthetic-token'),{message:'BUSY'});
+      release();await f.engine.whenIdle();
+      f.reader.read=original;
+      const next=await c.prepareRerankWithPolicy('synthetic-token');
+      await c.rerankConfirmedWithPolicy(next,'synthetic');
+      assert.equal(c.snapshot().rerank?.phase,'results',JSON.stringify(c.snapshot().rerank));
+      assert.equal(f.requests.length,1);
+    }finally{release();f.reader.read=original;}
+  });
+});
+
+test('POLICY.3b changed original, missing role admission and configured marking fail closed',async()=>{
+  await fixture({'a.md':raw('external')},async f=>{
+    const c=f.controller;
+    const profile={profileId:'rerank-fixture',admissionId:'synthetic-review',role:'reranking' as const,
+      configDigest:configDigest('reranking',f.config),adapter:'synthetic-adapter',classification:'external' as const};
+    const registry=(c as unknown as {rerankProfiles:RerankRuntimeProfiles}).rerankProfiles;
+    assert.equal((await c.search(uiRequest('REQ-42',5))).ok,true);
+    f.state({profile});
+    await assert.rejects(c.prepareRerankWithPolicy('synthetic-token'),{message:'NOT_READY'});
+    registry.installSyntheticFixture(f.config,f.reader.rootId,'policy-rerank-fixture');
+    f.state({profile:null});
+    await assert.rejects(c.prepareRerankWithPolicy('synthetic-token'),{message:'DISCLOSURE_DENIED'});
+    f.state({profile,rules:{version:NEW_MATERIAL_RULE_CONFIG_VERSION,defaultAction:'set-private',rules:[]}});
+    await assert.rejects(c.prepareRerankWithPolicy('synthetic-token'),{message:'DISCLOSURE_DENIED'});
+    f.state({rules:undefined});
+    const preview=await c.prepareRerankWithPolicy('synthetic-token');
+    await writeFile(join(f.root,'a.md'),raw('private'));
+    await c.rerankConfirmedWithPolicy(preview,'synthetic');
+    assert.equal(c.snapshot().rerank?.phase,'error');assert.equal(f.requests.length,0);
   });
 });
