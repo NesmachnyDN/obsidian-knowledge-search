@@ -2082,11 +2082,11 @@ test('systemic source ledger overflow is terminal-only and Basic reload reconcil
   }finally{replacement?.onunload();await f.cleanup();}
 });
 
-test('POLICY.2b native create identity, saved rules, rename and unload guard read-only preview',async()=>{
+test('POLICY.2c native create, same-owner edits and exact rename preserve new identity while preview verifies current bytes',async()=>{
   const f=await fixture();
-  const file=Object.assign(new Empty(),{path:'fixture.md'});
+  let file=Object.assign(new Empty(),{path:'fixture.md'});
   const events=new Map<string,(file:unknown,oldPath?:string)=>void>();
-  Object.assign(f.plugin.app.vault,{on:(name:string,fn:(file:unknown,oldPath?:string)=>void)=>{events.set(name,fn);return {};},getAbstractFileByPath:()=>file});
+  Object.assign(f.plugin.app.vault,{on:(name:string,fn:(file:unknown,oldPath?:string)=>void)=>{events.set(name,fn);return {};},getAbstractFileByPath:(path:string)=>path===file.path?file:null});
   Object.assign(f.plugin.app.metadataCache,{on:(name:string,fn:(file:unknown)=>void)=>{events.set('metadata:'+name,fn);return {};}});
   Object.assign(f.plugin.app.workspace,{getActiveFile:()=>file});
   const preview=(f.plugin as unknown as {previewNewMaterial(c:NewMaterialRuleConfig):Promise<NewMaterialDecision>}).previewNewMaterial.bind(f.plugin);
@@ -2098,20 +2098,28 @@ test('POLICY.2b native create identity, saved rules, rename and unload guard rea
     await f.plugin.patchSettings(s=>{s.markingRules=rules;});
     await f.plugin.standalone!.whenIdle();
     assert.deepEqual(f.plugin.settings.markingRules,rules);
+    file=Object.assign(new Empty(),{path:'new-note.md'});
+    await writeFile(join(f.vault,file.path),original);
     events.get('create')!(file);await f.plugin.standalone!.whenIdle();
     const decision=await preview(rules);
     assert.equal(decision.action,'set-private');assert.equal(decision.externalBlocked,true);
     const modified=Buffer.concat([original,Buffer.from('\n# Modified synthetic')]);
     await writeFile(join(f.vault,file.path),modified);
+    const revision=f.plugin.searchController.sourceAuthorityRevision();
     events.get('modify')!(file);await f.plugin.standalone!.whenIdle();
-    assert.equal((await preview(rules)).reason,'lifecycle-unresolved');
-    events.get('create')!(file);await f.plugin.standalone!.whenIdle();
-    assert.equal((await preview(rules)).action,'set-private');
+    assert.equal(f.plugin.searchController.sourceAuthorityCurrent(revision),false);
+    const edited=await preview(rules);
+    assert.equal(edited.action,'set-private');assert.equal(edited.externalBlocked,true);
+    assert.equal(edited.sha256,hash(modified));assert.notEqual(edited.sha256,decision.sha256);
     events.get('metadata:changed')!(file);await f.plugin.standalone!.whenIdle();
-    assert.equal((await preview(rules)).reason,'lifecycle-unresolved');
-    events.get('create')!(file);await f.plugin.standalone!.whenIdle();
     assert.equal((await preview(rules)).action,'set-private');
-    events.get('rename')!(file,'old.md');await f.plugin.standalone!.whenIdle();
+    const oldPath=file.path;
+    await rename(join(f.vault,oldPath),join(f.vault,'renamed-note.md'));file.path='renamed-note.md';
+    events.get('rename')!(file,oldPath);await f.plugin.standalone!.whenIdle();
+    const moved=await preview(rules);
+    assert.equal(moved.action,'set-private');assert.equal(moved.sourceId,file.path);
+    assert.equal(moved.sha256,hash(modified));
+    events.get('rename')!(file,'unknown.md');await f.plugin.standalone!.whenIdle();
     assert.equal((await preview(rules)).reason,'lifecycle-unresolved');
     assert.deepEqual(await readFile(join(f.vault,file.path)),modified);
     f.plugin.onunload();await assert.rejects(preview(rules),/SOURCE_REJECTED/);

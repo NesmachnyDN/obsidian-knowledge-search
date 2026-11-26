@@ -20,7 +20,7 @@ test('POLICY.2b optional nested settings migrate safely and round-trip detached 
   const large={...rules,rules:Array.from({length:16},(_,i)=>({id:String(i),action:'set-private',when:{properties:[{key:'text',valueType:'string',operator:'eq',value:'x'.repeat(4096)}]}}))};
   assert.equal(validNewMaterialRuleConfig(large),false);
 });
-test('POLICY.2b only tracked current native create identity is verified new; rename/delete/reload deny unknown',()=>{
+test('POLICY.2b only tracked current native create identity is verified new; invalidation/delete/reload deny unknown',()=>{
   const tracker=new NewMaterialTracker<object>(),owner={},other={};
   assert.equal(tracker.state('inbox/note.md',owner),'unresolved');
   tracker.created('inbox/note.md',owner);
@@ -43,4 +43,51 @@ test('POLICY.2b unknown lifecycle on a current original never completes marking 
   assert.equal(r.complete,false);assert.equal(r.externalBlocked,true);assert.equal(r.reason,'lifecycle-unresolved');
   assert.equal(translateSettings('Preview active note','ru'),'Проверить активную заметку');
   assert.equal(translateSettings('Preview active note','en'),'Preview active note');
+});
+
+test('POLICY.2c live creation survives same-owner edits and exact renames, not replacements or collisions',()=>{
+  const tracker=new NewMaterialTracker<object>(),owner={},other={};
+  tracker.changed('old.md',owner);
+  assert.equal(tracker.state('old.md',owner),'unresolved');
+  tracker.created('inbox/note.md',owner);
+  tracker.changed('inbox/note.md',owner);
+  tracker.changed('inbox/note.md',owner);
+  assert.equal(tracker.state('inbox/note.md',owner),'verified-new');
+  tracker.renamed('inbox/note.md','notes/new.md',owner);
+  assert.equal(tracker.state('inbox/note.md',owner),'unresolved');
+  assert.equal(tracker.state('notes/new.md',owner),'verified-new');
+  tracker.renamed('notes/new.md','notes/new.md',owner);
+  assert.equal(tracker.state('notes/new.md',owner),'verified-new');
+  tracker.created('target.md',other);
+  tracker.renamed('notes/new.md','target.md',owner);
+  assert.equal(tracker.state('target.md',owner),'unresolved');
+  assert.equal(tracker.state('target.md',other),'unresolved');
+  tracker.created('fresh.md',owner);
+  tracker.changed('fresh.md',other);
+  assert.equal(tracker.state('fresh.md',owner),'unresolved');
+  tracker.renamed('fresh.md','moved.md',owner);
+  assert.equal(tracker.state('moved.md',owner),'unresolved');
+  tracker.created('invalid.md',owner);
+  tracker.renamed('invalid.md','../escape.md',owner);
+  assert.equal(tracker.state('invalid.md',owner),'unresolved');
+  assert.equal(tracker.state('../escape.md',owner),'unresolved');
+  tracker.created('folder/note.md',owner);
+  tracker.invalidate('folder');
+  assert.equal(tracker.state('folder/note.md',owner),'unresolved');
+  tracker.created('restart.md',owner);
+  tracker.clear();
+  tracker.changed('restart.md',owner);
+  assert.equal(tracker.state('restart.md',owner),'unresolved');
+});
+test('POLICY.2c new identity continuity still requires current bytes and current restrictive rules',()=>{
+  const tracker=new NewMaterialTracker<object>(),owner={},sourceId='inbox/note.md',rootId=hash('root');
+  tracker.created(sourceId,owner);
+  tracker.changed(sourceId,owner);
+  const sha256=hash('# edited'),proof=parsePolicyMetadata(sourceId,Buffer.from('# edited'),rootId,sha256);
+  const input={sourceId,sha256,rootId,proof,lifecycle:{state:tracker.state(sourceId,owner),sourceId,sha256,rootId},provenance:null};
+  assert.equal(decideNewMaterialMarking(defaultMarkingRules(),input).externalBlocked,false);
+  const restrictive={...defaultMarkingRules(),defaultAction:'set-private' as const};
+  const denied=decideNewMaterialMarking(restrictive,input);
+  assert.equal(denied.action,'set-private');assert.equal(denied.externalBlocked,true);
+  assert.equal(decideNewMaterialMarking(restrictive,{...input,sha256:hash('replacement')}).externalBlocked,true);
 });
