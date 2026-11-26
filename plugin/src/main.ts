@@ -127,7 +127,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private readonly embeddingPolicyHost=new ProcessingPolicyHost<'embedding'>(
     ()=>this.settings.ai.embedding.state==='configured'&&this.settings.ai.embedding.transport==='cloud',
     ()=>this.standalone,input=>this.policyHostState(input),'embedding',input=>this.denseHost?.resolvedPolicyScope(input)??null);
-  private policyHostState(input:ProcessingPolicyInput<'generation'|'reranking'|'embedding'>):GenerationPolicyHostState|null {
+  private policyHostState(input:Pick<ProcessingPolicyInput<'generation'|'reranking'|'embedding'>,'role'|'scopeId'|'scopeSources'|'sources'>):GenerationPolicyHostState|null {
     const config=this.settings.ai[input.role],reader=this.sourceReader;
     if(this.unloaded||this.denseSettingsChanging||!reader||reader.rootId!==input.scopeId||config.state!=='configured')return null;
     const materials=policyOriginals(input).map(source=>{

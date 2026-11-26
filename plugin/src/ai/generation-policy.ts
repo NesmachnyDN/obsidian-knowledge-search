@@ -21,7 +21,11 @@ export type ProcessingPolicyPort<R extends AiRole = Extract<AiRole,'generation'|
   current(input:ProcessingPolicyInput<R>,binding:GenerationPolicyBinding):boolean;
   evaluate(input:ProcessingPolicyInput<R>,context:CallContext,current:()=>boolean):Promise<PolicyEnvelope>;
 }>;
-export type GenerationPolicyPort = ProcessingPolicyPort<'generation'>;
+// Historical inspection is local-only: no epoch, owner, deadline, grant or transport.
+export type GenerationHistoryScope = Pick<GenerationPolicyInput,'role'|'config'|'scopeId'|'scopeBinding'|'scopeSources'|'sources'>;
+export type GenerationPolicyPort = ProcessingPolicyPort<'generation'> & Readonly<{
+  historyRevision?(scope:GenerationHistoryScope):string|null;
+}>;
 export type RerankPolicyPort = ProcessingPolicyPort<'reranking'>;
 export type GenerationPolicyBinding = Readonly<{
   bindingDigest:string; payloadDigest:string; sourceDigest:string; scopeBinding:string; deadlineUnixMs:number;

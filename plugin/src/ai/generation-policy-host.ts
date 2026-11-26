@@ -3,13 +3,14 @@ import type { PolicyMetadataProof } from '../standalone/shared';
 import type { StandaloneEngine } from '../standalone/engine';
 import { ProviderFailure, type CallContext, type ProviderConfig } from './contracts';
 import { configDigest } from './disclosure';
-import { policyOriginals, type ProcessingPolicyInput, type ProcessingPolicyPort, type GenerationPolicyInput, type GenerationPolicyPort, type RerankPolicyInput, type RerankPolicyPort, type GenerationPolicyBinding } from './generation-policy';
+import { policyOriginals, type ProcessingPolicyInput, type ProcessingPolicyPort, type GenerationHistoryScope, type GenerationPolicyPort, type RerankPolicyPort, type GenerationPolicyBinding } from './generation-policy';
 import type { AiRole } from './contracts';
 import { matchesEmbeddingPolicyScope,type EmbeddingPolicyScope } from './embedding-policy';
 import { POLICY_VERSION, type PolicySnapshot, type TrustedProfile, type Restriction, type PolicyEnvelope } from './processing-policy';
 import { decideNewMaterialMarking, validNewMaterialRuleConfig, type MaterialLifecycle, type TrustedImportProvenance,
   type NewMaterialRuleConfig } from './new-material-policy';
 
+type PolicyStateInput<R extends AiRole> = Pick<ProcessingPolicyInput<R>,'role'|'config'|'scopeId'|'scopeBinding'|'scopeSources'|'sources'|'embedding'>;
 type PolicyEngine=Pick<StandaloneEngine,'evaluateProcessingPolicy'>&Partial<Pick<StandaloneEngine,'processingPolicyDrain'>>;
 export type PolicyMaterial=Readonly<{lifecycle:MaterialLifecycle;provenance:TrustedImportProvenance|null}>;
 export type GenerationPolicyHostState=Readonly<{
@@ -22,12 +23,18 @@ export type GenerationPolicyHostState=Readonly<{
 export class ProcessingPolicyHost<R extends AiRole> implements ProcessingPolicyPort<R>{
   constructor(readonly selected:()=>boolean,
     private readonly engine:()=>PolicyEngine|undefined,
-    private readonly state:(input:ProcessingPolicyInput<R>)=>GenerationPolicyHostState|null,
+    private readonly state:(input:PolicyStateInput<R>)=>GenerationPolicyHostState|null,
     private readonly role:R,
     private readonly resolvedEmbeddingScope?:(input:ProcessingPolicyInput<'embedding'>)=>EmbeddingPolicyScope|null){}
   private readState(input:ProcessingPolicyInput<R>):GenerationPolicyHostState|null{
     if(input.role!==this.role)return null;
     if(this.role==='embedding'&&!matchesEmbeddingPolicyScope(input as ProcessingPolicyInput<'embedding'>,this.resolvedEmbeddingScope?.(input as ProcessingPolicyInput<'embedding'>)??null))return null;
+    const value=this.readPolicyState(input);
+    if(this.role==='embedding'&&!matchesEmbeddingPolicyScope(input as ProcessingPolicyInput<'embedding'>,this.resolvedEmbeddingScope?.(input as ProcessingPolicyInput<'embedding'>)??null))return null;
+    return value;
+  }
+  protected readPolicyState(input:PolicyStateInput<R>):GenerationPolicyHostState|null{
+    if(input.role!==this.role)return null;
     const originals=policyOriginals(input),value=this.state(input);
     if(!value||!value.complete||configDigest(this.role,value.config)!==configDigest(this.role,input.config)
       ||!Array.isArray(value.materials)||value.materials.length>originals.length
@@ -36,7 +43,6 @@ export class ProcessingPolicyHost<R extends AiRole> implements ProcessingPolicyP
       const m=value.materials[i]?.lifecycle;
       return !m||m.sourceId!==x.sourceId||m.sha256!==x.sourceSha256||m.rootId!==input.scopeId;
     })))return null;
-    if(this.role==='embedding'&&!matchesEmbeddingPolicyScope(input as ProcessingPolicyInput<'embedding'>,this.resolvedEmbeddingScope?.(input as ProcessingPolicyInput<'embedding'>)??null))return null;
     return structuredClone(value);
   }
   private snapshot(input:ProcessingPolicyInput<R>,value:GenerationPolicyHostState):PolicySnapshot{
@@ -86,9 +92,21 @@ export class ProcessingPolicyHost<R extends AiRole> implements ProcessingPolicyP
 }
 export class GenerationPolicyHost extends ProcessingPolicyHost<'generation'> implements GenerationPolicyPort {
   constructor(selected:()=>boolean,engine:()=>PolicyEngine|undefined,
-    state:(input:GenerationPolicyInput)=>GenerationPolicyHostState|null){super(selected,engine,state,'generation');}
+    state:(input:GenerationHistoryScope)=>GenerationPolicyHostState|null){
+    // State is resolved from the complete verified scope, not the current
+    // candidate subset or an operation's credential/consent envelope.
+    super(selected,engine,input=>state({...input,sources:[]}), 'generation');
+  }
+  historyRevision(scope:GenerationHistoryScope):string|null{
+    try{
+      if(!this.selected())return null;
+      const value=this.readPolicyState(scope);
+      return value&&this.selected()?hash(JSON.stringify([POLICY_VERSION,scope.scopeId,scope.scopeBinding,
+        policyOriginals(scope),value])):null;
+    }catch{return null;}
+  }
 }
 export class RerankPolicyHost extends ProcessingPolicyHost<'reranking'> implements RerankPolicyPort {
   constructor(selected:()=>boolean,engine:()=>PolicyEngine|undefined,
-    state:(input:RerankPolicyInput)=>GenerationPolicyHostState|null){super(selected,engine,state,'reranking');}
+    state:(input:PolicyStateInput<'reranking'>)=>GenerationPolicyHostState|null){super(selected,engine,state,'reranking');}
 }
