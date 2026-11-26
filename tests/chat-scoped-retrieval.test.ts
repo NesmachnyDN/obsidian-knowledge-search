@@ -1,5 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {createServer,type IncomingMessage,type ServerResponse} from 'node:http';
 import {SearchController,uiRequest} from '../plugin/src/search/controller';
 import {hash,type EvidenceHit,type SearchResponse,type SearchRequest} from '../plugin/src/standalone/contracts';
 import {type ChatScopeLease} from '../plugin/src/standalone/engine';
@@ -27,6 +28,18 @@ const lease=(patch:Partial<ChatScopeLease>={}):ChatScopeLease=>({
   current:()=>true,verify:async()=>{},search:async req=>response(req.requestId),...patch});
 const engine=(captureChatScope?:(value:unknown,signal:AbortSignal)=>Promise<ChatScopeLease>)=>({
   search:async(req:SearchRequest)=>response(req.requestId),status,cancel:()=>true,resume:()=>{},rebuild:()=>{},captureChatScope});
+const reply=(res:ServerResponse,value:unknown)=>{res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify(value));};
+async function generationFixture(run:(config:ProviderConfig)=>Promise<void>,handler:(req:IncomingMessage,res:ServerResponse)=>void):Promise<void>{
+  const server=createServer(handler);
+  await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
+  try {
+    const address=server.address();if(!address||typeof address==='string')throw Error('FIXTURE_ADDRESS');
+    await run({state:'configured',transport:'local',origin:`http://127.0.0.1:${address.port}`,
+      identity:{model:'synthetic-generator',revision:'fixture-v1'},limits:{timeoutMs:1000,maxInputBytes:4096,maxCandidates:3,maxOutputTokens:32,maxConcurrent:1}});
+  } finally {server.closeAllConnections();await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));}
+}
+const generated=(claims:unknown)=>({model:'synthetic-generator@fixture-v1',usage:{completion_tokens:4},choices:[{index:0,finish_reason:'stop',
+  message:{role:'assistant',content:JSON.stringify({claims})}}]});
 
 test('06H.2-A2b1: admission validates before capture, preserves one physical slot and exact cancel capability',async()=>{
   const c=new SearchController(async()=>{});
@@ -474,4 +487,162 @@ test('06H.2-A2b2b1: every changed resolver configuration/scope invalidates the o
       assert.equal(authority.current(turn.owner,digest,stamp),false);
     }finally{pending.resolve(null);c.dispose();}
   }
+});
+
+test('06H.2-A2b2c: retained chat sends only separately attested exact question and evidence once',async()=>{
+  let calls=0,authorization='',received:unknown;
+  await generationFixture(async cfg=>{
+    const port={config:()=>cfg,scopeId:()=>root,verify:async(candidate:EvidenceHit)=>assert.deepEqual(candidate,hit)};
+    const c=new SearchController(async()=>{},undefined,undefined,undefined,port);
+    try {
+      c.attach(engine(async()=>lease()));const session=c.openRetainedChatSession();
+      const turn=c.startRetainedChatTurn(session,selector,request);assert.equal((await turn.result).ok,true);
+      const stamp=await c.bindRetainedGenerationCredential(session,turn.owner,'synthetic-token');
+      let draft=c.createRetainedChatClassificationDraft(session,turn.owner,stamp);
+      assert.equal(draft.question.classification,'unknown');assert.equal(draft.evidence[0]!.classification,'unknown');
+      await assert.rejects(c.prepareRetainedChatGeneration(session,turn.owner,draft),{message:'DISCLOSURE_DENIED'});
+      draft=c.attestRetainedChatClassification(session,turn.owner,draft,draft.question.id,'synthetic');
+      draft=c.attestRetainedChatClassification(session,turn.owner,draft,draft.evidence[0]!.id,'public');
+      const preview=await c.prepareRetainedChatGeneration(session,turn.owner,draft);
+      const result=await c.confirmRetainedChatGeneration(session,turn.owner,preview);
+      assert.equal(result.ok,true);assert.equal(calls,1);assert.equal(authorization,'Bearer synthetic-token');
+      assert.deepEqual(received,{question:'synthetic',passages:[{id:0,text:hit.originalExcerpt}]});
+      assert.deepEqual(await c.readRetainedChatTurn(session,turn.owner),error('SUPERSEDED'));
+      assert.deepEqual(await c.confirmRetainedChatGeneration(session,turn.owner,preview),error('DISCLOSURE_DENIED'));
+    } finally {c.dispose();}
+  },(req,res)=>{calls++;authorization=String(req.headers.authorization);let body='';req.on('data',chunk=>body+=String(chunk));req.on('end',()=>{
+    received=JSON.parse((JSON.parse(body).messages[1] as {content:string}).content);reply(res,generated([{kind:'quotation',text:hit.originalExcerpt,citationIds:[0]}]));
+  });});
+});
+
+test('06H.2-A2b2c: forged/replayed, restrictive, cross-session and replaced credentials cannot dispatch',async()=>{
+  let calls=0;
+  await generationFixture(async cfg=>{
+    const port={config:()=>cfg,scopeId:()=>root,verify:async()=>{throw Error('no verification without consent');}};
+    const c=new SearchController(async()=>{},undefined,undefined,undefined,port),other=new SearchController(async()=>{},undefined,undefined,undefined,port);
+    try {
+      c.attach(engine(async()=>lease()));other.attach(engine(async()=>lease()));
+      const session=c.openRetainedChatSession(),turn=c.startRetainedChatTurn(session,selector,request);assert.equal((await turn.result).ok,true);
+      const foreign=other.openRetainedChatSession(),foreignTurn=other.startRetainedChatTurn(foreign,selector,request);assert.equal((await foreignTurn.result).ok,true);
+      const stamp=await c.bindRetainedGenerationCredential(session,turn.owner,'one');
+      const draft=c.createRetainedChatClassificationDraft(session,turn.owner,stamp);
+      assert.throws(()=>c.attestRetainedChatClassification(session,turn.owner,structuredClone(draft),draft.question.id,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      assert.throws(()=>other.createRetainedChatClassificationDraft(foreign,foreignTurn.owner,stamp),{message:'CANCELLED'});
+      const replacement=await c.bindRetainedGenerationCredential(session,turn.owner,'two');
+      assert.throws(()=>c.attestRetainedChatClassification(session,turn.owner,draft,draft.question.id,'synthetic'),{message:'DISCLOSURE_DENIED'});
+      const next=c.createRetainedChatClassificationDraft(session,turn.owner,replacement);
+      const allowed=c.attestRetainedChatClassification(session,turn.owner,next,next.question.id,'public');
+      assert.throws(()=>c.attestRetainedChatClassification(session,turn.owner,allowed,allowed.question.id,'blocked'),{message:'DISCLOSURE_DENIED'});
+      assert.deepEqual(await c.readRetainedChatTurn(session,turn.owner),error('SUPERSEDED'));
+      c.clearRetainedGenerationCredential(session,turn.owner);
+      await assert.rejects(c.prepareRetainedChatGeneration(session,turn.owner,next),{message:'DISCLOSURE_DENIED'});
+      assert.equal(calls,0);
+    } finally {c.dispose();other.dispose();}
+  },(req,res)=>{calls++;req.resume();reply(res,generated([]));});
+});
+
+test('06H.2-A2b2c: source/config drift and reentrant cancellation retire draft and preview before dispatch',async()=>{
+  const cfg:ProviderConfig={state:'configured',transport:'local',origin:'http://127.0.0.1:1',identity:{model:'synthetic',revision:'v1'},
+    limits:{timeoutMs:1000,maxInputBytes:4096,maxCandidates:3,maxOutputTokens:32,maxConcurrent:1}};
+  const c=new SearchController(async()=>{},undefined,undefined,undefined,{config:()=>cfg,scopeId:()=>root,verify:async()=>{}});
+  try {
+    c.attach(engine(async()=>lease()));const session=c.openRetainedChatSession(),turn=c.startRetainedChatTurn(session,selector,request);
+    assert.equal((await turn.result).ok,true);const stamp=await c.bindRetainedGenerationCredential(session,turn.owner,'fixture');
+    let draft=c.createRetainedChatClassificationDraft(session,turn.owner,stamp);
+    draft=c.attestRetainedChatClassification(session,turn.owner,draft,draft.question.id,'synthetic');
+    draft=c.attestRetainedChatClassification(session,turn.owner,draft,draft.evidence[0]!.id,'public');
+    const preview=await c.prepareRetainedChatGeneration(session,turn.owner,draft);
+    c.cancelRetainedChatTurn(session,turn.owner);
+    assert.deepEqual(await c.confirmRetainedChatGeneration(session,turn.owner,preview),error('DISCLOSURE_DENIED'));
+    const next=c.startRetainedChatTurn(session,selector,request);assert.equal((await next.result).ok,true);
+    const nextStamp=await c.bindRetainedGenerationCredential(session,next.owner,'fixture');
+    const stale=c.createRetainedChatClassificationDraft(session,next.owner,nextStamp);
+    cfg.identity.revision='v2';
+    assert.throws(()=>c.attestRetainedChatClassification(session,next.owner,stale,stale.question.id,'synthetic'),{message:'CANCELLED'});
+    assert.deepEqual(await c.readRetainedChatTurn(session,next.owner),error('SUPERSEDED'));
+  } finally {c.dispose();}
+});
+
+test('06H.2-A2b2c: empty claims are insufficient evidence and citation/provider failures retire without fallback',async()=>{
+  for(const outcome of ['empty','citation','server'] as const){
+    let calls=0;
+    await generationFixture(async cfg=>{
+      const c=new SearchController(async()=>{},undefined,undefined,undefined,{config:()=>cfg,scopeId:()=>root,verify:async()=>{}});
+      try {
+        c.attach(engine(async()=>lease()));const session=c.openRetainedChatSession(),turn=c.startRetainedChatTurn(session,selector,request);
+        assert.equal((await turn.result).ok,true);const stamp=await c.bindRetainedGenerationCredential(session,turn.owner,'fixture');
+        let draft=c.createRetainedChatClassificationDraft(session,turn.owner,stamp);
+        draft=c.attestRetainedChatClassification(session,turn.owner,draft,draft.question.id,'synthetic');
+        draft=c.attestRetainedChatClassification(session,turn.owner,draft,draft.evidence[0]!.id,'synthetic');
+        const result=await c.confirmRetainedChatGeneration(session,turn.owner,await c.prepareRetainedChatGeneration(session,turn.owner,draft));
+        assert.deepEqual(result,error(outcome==='empty'?'INSUFFICIENT_EVIDENCE':outcome==='citation'?'INVALID_RESPONSE':'SERVER_ERROR'));
+        assert.equal(calls,1);assert.deepEqual(await c.readRetainedChatTurn(session,turn.owner),error('SUPERSEDED'));
+      } finally {c.dispose();}
+    },(req,res)=>{calls++;req.resume();if(outcome==='server'){res.writeHead(500);res.end();}
+      else reply(res,generated(outcome==='empty'?[]:[{kind:'inference',text:'bad citation',citationIds:[9]}]));});
+  }
+});
+
+test('06H.2-A2b2c: cancelled preview and dispatch verification keep physical admission until drain',async()=>{
+  for(const phase of ['preview','dispatch'] as const){
+    let calls=0;
+    await generationFixture(async cfg=>{
+      const held=deferred<void>(),entered=deferred<void>();let block=false;
+      const c=new SearchController(async()=>{},undefined,undefined,undefined,{
+        config:()=>cfg,scopeId:()=>root,verify:async()=>{if(block){entered.resolve();await held.promise;}}
+      });
+      try {
+        c.attach(engine(async()=>lease()));const session=c.openRetainedChatSession(),turn=c.startRetainedChatTurn(session,selector,request);
+        assert.equal((await turn.result).ok,true);
+        const stamp=await c.bindRetainedGenerationCredential(session,turn.owner,'fixture');
+        let draft=c.createRetainedChatClassificationDraft(session,turn.owner,stamp);
+        draft=c.attestRetainedChatClassification(session,turn.owner,draft,draft.question.id,'public');
+        draft=c.attestRetainedChatClassification(session,turn.owner,draft,draft.evidence[0]!.id,'synthetic');
+        let outcome:Promise<unknown>;
+        if(phase==='preview'){
+          block=true;
+          outcome=assert.rejects(c.prepareRetainedChatGeneration(session,turn.owner,draft),{message:'CANCELLED'});
+        }else{
+          const preview=await c.prepareRetainedChatGeneration(session,turn.owner,draft);
+          block=true;
+          outcome=c.confirmRetainedChatGeneration(session,turn.owner,preview).then(result=>assert.deepEqual(result,error('CANCELLED')));
+        }
+        await entered.promise;
+        c.clearRetainedGenerationCredential(session,turn.owner);
+        await outcome;
+        assert.equal(calls,0);
+        assert.deepEqual(await c.startRetainedChatTurn(session,selector,request).result,error('BUSY'));
+        held.resolve();await flush();
+        assert.equal((await c.startRetainedChatTurn(session,selector,request).result).ok,true);
+      }finally{held.resolve();c.dispose();}
+    },(req,res)=>{calls++;req.resume();reply(res,generated([]));});
+  }
+});
+
+test('06H.2-A2b2c: no matching evidence and restrictive change after preview cannot dispatch',async()=>{
+  let calls=0;
+  await generationFixture(async cfg=>{
+    const c=new SearchController(async()=>{},undefined,undefined,undefined,{config:()=>cfg,scopeId:()=>root,verify:async()=>{}});
+    try{
+      let empty=true;
+      c.attach(engine(async()=>lease({search:async req=>({...response(req.requestId),hits:empty?[]:[structuredClone(hit)]})})));
+      const session=c.openRetainedChatSession(),turn=c.startRetainedChatTurn(session,selector,request);
+      assert.equal((await turn.result).ok,true);
+      const stamp=await c.bindRetainedGenerationCredential(session,turn.owner,'fixture');
+      assert.throws(()=>c.createRetainedChatClassificationDraft(session,turn.owner,stamp),{message:'INSUFFICIENT_EVIDENCE'});
+      assert.equal(calls,0);
+      empty=false;
+      const next=c.startRetainedChatTurn(session,selector,request);assert.equal((await next.result).ok,true);
+      const nextStamp=await c.bindRetainedGenerationCredential(session,next.owner,'fixture');
+      let draft=c.createRetainedChatClassificationDraft(session,next.owner,nextStamp);
+      draft=c.attestRetainedChatClassification(session,next.owner,draft,draft.question.id,'public');
+      draft=c.attestRetainedChatClassification(session,next.owner,draft,draft.evidence[0]!.id,'synthetic');
+      const preview=await c.prepareRetainedChatGeneration(session,next.owner,draft);
+      assert.equal(preview.config.origin,cfg.origin);assert.equal(preview.scopeId,root);
+      assert.equal(preview.inputBytes,Buffer.byteLength(request.query)+Buffer.byteLength(hit.originalExcerpt));
+      assert.throws(()=>c.attestRetainedChatClassification(session,next.owner,draft,draft.question.id,'confidential'),{message:'DISCLOSURE_DENIED'});
+      assert.deepEqual(await c.confirmRetainedChatGeneration(session,next.owner,preview),error('DISCLOSURE_DENIED'));
+      assert.equal(calls,0);
+    }finally{c.dispose();}
+  },(req,res)=>{calls++;req.resume();reply(res,generated([]));});
 });
