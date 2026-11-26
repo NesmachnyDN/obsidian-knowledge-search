@@ -101,7 +101,7 @@ def main():
                  'XDG_RUNTIME_DIR', 'XDG_SESSION_TYPE', 'ELECTRON_OZONE_PLATFORM_HINT',
                  'tmp', 'app', 'cli', 'repo', 'package_dir', 'previous_package_dir',
                  'first_sha', 'fixture_sha', 'OKS_POLICY_2E3A_TEST',
-                 'OKS_POLICY_2E3A_NO_IP', 'OKS_POLICY_2E3C_TEST', 'OKS_HOST_NO_ROUTE')
+                 'OKS_POLICY_2E3A_NO_IP', 'OKS_POLICY_2E3C_TEST', 'OKS_POLICY_2E3D3B_TEST', 'OKS_HOST_NO_ROUTE')
         child_env = {name: os.environ[name] for name in names if name in os.environ}
         child_env.update(PATH='/usr/bin:/bin', LANG='C.UTF-8')
         print('DIRECT_NETWORK_DENIED', flush=True)
