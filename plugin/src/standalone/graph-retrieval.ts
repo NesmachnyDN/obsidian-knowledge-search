@@ -26,6 +26,32 @@ export type LocalGraphResult = Readonly<{
   contextBytes:number;candidates:readonly LocalGraphCandidate[];
 }>;
 
+/** Host-only, exact-result lease. Never serialized or supplied by callers. */
+export type LocalGraphLease = Readonly<{
+  current():boolean; read():Promise<LocalGraphResult>; verify():Promise<void>;
+}>;
+
+/** Catalog authentication rehashes every original, including identity
+ * competitors. Bind every retained excerpt back to the authenticated parse. */
+export function verifyRetainedGraph(gen:IndexGeneration, snapshot:ScopedGraphSnapshot,result:LocalGraphResult):void {
+  if(result.rootId!==gen.rootId||result.generationId!==gen.generationId||result.mappingId!==snapshot.mappingId
+    ||result.projectionId!==snapshot.scopedProjectionId||JSON.stringify(result.scope)!==JSON.stringify(snapshot.scope))
+    throw new StandaloneError('GRAPH_SOURCE_STALE');
+  const docs=new Map(gen.documents.map(d=>[d.sourceId,d]));
+  const allowed=new Map(snapshot.scope.sources.map(s=>[s.sourceId,s.sourceSha256]));
+  const evidence=(item:GraphExcerpt):void=>{
+    const block=docs.get(item.sourceId)?.blocks[item.locator.blockOrder];
+    if(!block||allowed.get(item.sourceId)!==item.sourceSha256||block.sourceId!==item.sourceId
+      ||block.sourceSha256!==item.sourceSha256||block.blockId!==item.blockId||block.originalText!==item.excerpt
+      ||JSON.stringify(block.locator)!==JSON.stringify(item.locator))
+      throw new StandaloneError('GRAPH_EVIDENCE_INVALID');
+  };
+  for(const candidate of result.candidates){
+    evidence(candidate);
+    for(const step of candidate.path)for(const anchor of step.anchorEvidence)evidence(anchor);
+  }
+}
+
 const GRAPH_TIMEOUT_MS=30_000;
 export type GraphDeadline=Readonly<{check():void;wait<T>(physical:Promise<T>):Promise<T>}>;
 const deadlineError=(error:unknown):StandaloneError=>new StandaloneError(error instanceof ProviderFailure

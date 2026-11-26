@@ -2015,6 +2015,31 @@ test('06B.3b mapping revocation during physical read vetoes any late publication
     await assert.rejects(engine.retrieveLocalGraph(localGraphRequest(),new AbortController().signal),error('GRAPH_DISABLED'));
   }finally{gate.release();reader.read=actual;await cleanup();}
 });
+test('06B.3c1 retained lease reauthenticates the complete catalog, without repeating lexical ranking',async()=>{
+  const {engine,root,cleanup}=await setup({'a.md':graphCard('A','depends: B\n')+'REQ-LOCAL-1 selected.\n',
+    'b.md':graphCard('B'),'excluded.md':graphCard('C')});
+  const actual=engine.search.bind(engine);let searches=0;
+  try{
+    engine.configureGraph(graphMapping);engine.search=async req=>{searches++;return actual(req);};
+    const scope={mode:'selected',kind:'files',sourceIds:['a.md','b.md']};
+    const lease=engine.captureLocalGraph(localGraphRequest('REQ-LOCAL-1',10,scope),new AbortController().signal);
+    assert.equal((await lease.read()).candidates.length,2);assert.equal(searches,1);
+    await lease.verify();assert.equal(searches,1);assert.ok(lease.current());
+    await writeFile(join(root,'excluded.md'),graphCard('B'));
+    await assert.rejects(lease.verify(),error('GRAPH_SOURCE_STALE'));assert.equal(lease.current(),false);
+    await assert.rejects(lease.verify(),error('GRAPH_SOURCE_STALE'));
+  }finally{engine.search=actual;await cleanup();}
+});
+test('06B.3c1 mapping change retires retained graph lease even if mapping is restored',async()=>{
+  const {engine,cleanup}=await setup({'a.md':graphCard('A')+'REQ-LOCAL-1 selected.\n'});
+  try{
+    engine.configureGraph(graphMapping);
+    const lease=engine.captureLocalGraph(localGraphRequest(),new AbortController().signal);
+    await lease.read();await lease.verify();
+    engine.configureGraph(null);engine.configureGraph(graphMapping);
+    assert.equal(lease.current(),false);await assert.rejects(lease.verify(),error('GRAPH_SOURCE_STALE'));
+  }finally{await cleanup();}
+});
 test('06B.2b disabled default, explicit mapping and scoped graph exclude foreign identities and edges', async()=>{
   const {engine,cleanup}=await setup({'a.md':graphCard('A','depends: B\n'),'b.md':graphCard('B'),
     'c.md':graphCard('C','depends: A\n')});
