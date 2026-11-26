@@ -198,3 +198,140 @@ test('unsafe ancestor, missing/corrupt anchor and artifact overflow deny recover
     const b=await f.open();assert.deepEqual(await b.read(),first);
   });
 });
+
+/** POLICY.2e3d.2a: synthetic guarded durable publication, not host admission. */
+function baseline(entry:LedgerEntry):LedgerEntry{
+  if(!('proof' in entry))throw Error('expected synthetic original');
+  return {...entry,state:'existing',origin:'baseline',originVersionId:entry.proof.version.versionId};
+}
+function baselineGuard(signal=new AbortController().signal){
+  return {signal,revalidate:async()=>true,current:()=>true};
+}
+test('guarded initial baseline publishes captured exact records once and reopens',async()=>{
+  await fixture(async f=>{
+    const a=await f.open(),first=await a.initializeEmptyEpoch();
+    const entry=baseline(await f.entry()),entries=[entry],guard=baselineGuard();
+    const pending=a.commitInitialBaseline(first.anchor.snapshotSha256,entries,guard);
+    entries.length=0;
+    guard.current=()=>false;
+    const committed=await pending;
+    assert.equal(committed.snapshot.baselineAdmitted,true);
+    assert.deepEqual(committed.snapshot.entries,[entry]);
+    assert.ok(Object.isFrozen(committed.snapshot.entries[0]));
+    await assert.rejects(a.commitInitialBaseline(committed.anchor.snapshotSha256,[],baselineGuard()),error);
+    await a.close();const b=await f.open();assert.deepEqual(await b.read(),committed);
+  });
+});
+test('guarded baseline denies nonpristine history, stale CAS and nonbaseline records',async()=>{
+  await fixture(async f=>{
+    const a=await f.open(),first=await a.initializeEmptyEpoch(),entry=await f.entry();
+    for(const entries of [[entry],[{sourceId:'a.md',state:'deleted'} as const],
+      [{...baseline(entry),originVersionId:hash('wrong origin')} as LedgerEntry]]){
+      await assert.rejects(a.commitInitialBaseline(first.anchor.snapshotSha256,entries,baselineGuard()),error);
+    }
+    assert.deepEqual(await a.read(),first);
+    await assert.rejects(a.commitInitialBaseline(hash('stale'),[],baselineGuard()),error);
+    await a.close();
+    const b=await f.open(),next=await b.commit(first.anchor.snapshotSha256,false,[entry]);
+    await assert.rejects(b.commitInitialBaseline(next.anchor.snapshotSha256,[],baselineGuard()),error);
+    await b.close();const c=await f.open();assert.deepEqual(await c.read(),next);
+  });
+});
+test('guarded baseline denies uncommitted initialization and preaborted confirmation',async()=>{
+  await fixture(async f=>{
+    const a=await f.open();
+    await assert.rejects(a.commitInitialBaseline(hash('missing'),[],baselineGuard()),error);
+    await a.close();
+    const b=await f.open();assert.equal(await b.read(),null);
+    const first=await b.initializeEmptyEpoch();
+    const abort=new AbortController();abort.abort();
+    await assert.rejects(b.commitInitialBaseline(first.anchor.snapshotSha256,[],baselineGuard(abort.signal)),error);
+    await b.close();const c=await f.open();assert.deepEqual(await c.read(),first);
+  });
+});
+test('guarded baseline denial after staging never promotes candidate on reopen',async()=>{
+  for(const kind of ['revalidate-false','revalidate-throw','abort','owner-false','owner-throw','owner-abort','owner-close']){
+    await fixture(async f=>{
+      const a=await f.open(),first=await a.initializeEmptyEpoch(),abort=new AbortController();
+      const entry=baseline(await f.entry());let calls=0,revalidated=false;
+      const guard={signal:abort.signal,revalidate:async()=>{
+        revalidated=true;
+        assert.ok((await readdir(f.anchor)).some(n=>n.startsWith('.stage-')));
+        if(kind==='revalidate-throw')throw Error('synthetic invalidation');
+        if(kind==='abort')abort.abort();
+        return kind!=='revalidate-false';
+      },current:()=>{
+        calls++;
+        if(revalidated&&calls>=4){
+          if(kind==='owner-false')return false;
+          if(kind==='owner-throw')throw Error('synthetic owner lost');
+          if(kind==='owner-abort')abort.abort();
+          if(kind==='owner-close')void a.close();
+        }
+        return true;
+      }};
+      await assert.rejects(a.commitInitialBaseline(first.anchor.snapshotSha256,[entry],guard),error,kind);
+      assert.ok(revalidated);
+      assert.equal((await readFile(join(f.anchor,'CURRENT'),'utf8')),canonical(first.anchor));
+      await a.close();const b=await f.open();assert.deepEqual(await b.read(),first);
+      assert.deepEqual(await readdir(f.data),[first.anchor.snapshotSha256+'.json']);
+    });
+  }
+});
+test('guarded baseline close during revalidation retains exclusive lock until operation drains',async()=>{
+  await fixture(async f=>{
+    const a=await f.open(),first=await a.initializeEmptyEpoch(),entry=baseline(await f.entry());
+    let ready!:()=>void,release!:(ok:boolean)=>void;
+    const entered=new Promise<void>(r=>{ready=r;});
+    const suspended=new Promise<boolean>(r=>{release=r;});
+    const pending=a.commitInitialBaseline(first.anchor.snapshotSha256,[entry],
+      {...baselineGuard(),revalidate:()=>{ready();return suspended;}});
+    try{
+      await entered;
+      const closing=a.close();
+      await assert.rejects(f.open(),error);
+      await assert.rejects(a.read(),error);
+      release(true);
+      await assert.rejects(pending,error);
+      await closing;
+      const b=await f.open();assert.deepEqual(await b.read(),first);
+    }finally{release(false);await pending.catch(()=>{});}
+  });
+});
+test('guarded baseline cancellation after synchronous anchor switch is after commit point',async t=>{
+  const fs=require('node:fs') as typeof import('node:fs');
+  await fixture(async f=>{
+    const a=await f.open(),first=await a.initializeEmptyEpoch(),entry=baseline(await f.entry());
+    const abort=new AbortController(),original=fs.renameSync;
+    const mock=t.mock.method(fs,'renameSync',((from:import('node:fs').PathLike,to:import('node:fs').PathLike)=>{
+      original(from,to);abort.abort();
+    }) as typeof fs.renameSync);
+    let committed;
+    try{committed=await a.commitInitialBaseline(first.anchor.snapshotSha256,[entry],baselineGuard(abort.signal));}
+    finally{mock.mock.restore();}
+    assert.equal(abort.signal.aborted,true);
+    assert.equal(committed.snapshot.baselineAdmitted,true);
+    await a.close();const b=await f.open();assert.deepEqual(await b.read(),committed);
+  });
+});
+test('guarded baseline interrupted at anchor switch recovers only trusted current revision',async t=>{
+  const fs=require('node:fs') as typeof import('node:fs');
+  for(const switched of [false,true]){
+    await fixture(async f=>{
+      const a=await f.open(),first=await a.initializeEmptyEpoch(),entry=baseline(await f.entry());
+      const original=fs.renameSync;
+      const mock=t.mock.method(fs,'renameSync',((from:import('node:fs').PathLike,to:import('node:fs').PathLike)=>{
+        if(switched)original(from,to);
+        throw Error('synthetic publication interruption');
+      }) as typeof fs.renameSync);
+      try{await assert.rejects(a.commitInitialBaseline(first.anchor.snapshotSha256,[entry],baselineGuard()),error);}
+      finally{mock.mock.restore();}
+      await assert.rejects(a.read(),error);await a.close();
+      const b=await f.open(),recovered=await b.read();
+      if(switched){
+        assert.equal(recovered?.snapshot.baselineAdmitted,true);
+        assert.deepEqual(recovered?.snapshot.entries,[entry]);
+      }else assert.deepEqual(recovered,first);
+    });
+  }
+});

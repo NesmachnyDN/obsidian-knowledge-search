@@ -1,5 +1,6 @@
 /** Host-private durable evidence, never a processing-policy authority. */
 import { randomBytes, randomUUID } from 'node:crypto';
+import { renameSync } from 'node:fs';
 import { lstat, opendir, realpath, rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { BoundedVaultReader, privateIndexPath } from '../standalone/source';
@@ -16,6 +17,13 @@ const MAX_ANCHOR_BYTES=2048,MAX_ARTIFACTS=8;
 type Root=Readonly<{path:string;rootId:string}>;
 type Loaded={anchor:LedgerAnchor;snapshot:LedgerSnapshot};
 type Directories={anchor:string;data:string;fence:()=>Promise<void>};
+/** Trusted host predicates, not a lifecycle authority or caller-provided consent. */
+export type InitialBaselineCommitGuard=Readonly<{
+  signal:AbortSignal;
+  revalidate:()=>Promise<boolean>;
+  current:()=>boolean;
+}>;
+type PublicationGuard=Readonly<{revalidate:()=>Promise<boolean>;current:()=>boolean}>;
 const snapshotFile=(digest:string)=>digest+'.json';
 
 async function boundedNames(dir:string):Promise<string[]>{
@@ -165,7 +173,33 @@ export class DurableLifecycleLedger{
       return this.publish(d,next);
     }));
   }
-  private async publish(d:Directories,snapshot:LedgerSnapshot):Promise<Readonly<Loaded>>{
+  /** Guarded initial admission substrate; the native host must prove all predicates.
+   * Only a pristine committed empty epoch is supported by this bounded path.
+   */
+  async commitInitialBaseline(expectedDigest:string,entries:readonly LedgerEntry[],
+    guard:InitialBaselineCommitGuard):Promise<Readonly<Loaded>>{
+    const candidate:LedgerSnapshot={schemaVersion:1,rootId:this.root.rootId,epoch:'0'.repeat(64),
+      revision:1,previous:expectedDigest,baselineAdmitted:true,entries};
+    validateLedgerSnapshot(candidate,this.root.rootId);
+    const captured=immutableLedgerSnapshot(candidate).entries;
+    if(captured.some(entry=>entry.state!=='existing'||entry.originVersionId!==entry.proof.version.versionId))
+      return bad();
+    const {signal,revalidate,current:hostCurrent}=guard;
+    if(!(signal instanceof AbortSignal)||typeof revalidate!=='function'||typeof hostCurrent!=='function')return bad();
+    const current=():boolean=>{
+      if(this.closing||signal.aborted)return false;
+      const valid=hostCurrent()===true;
+      return valid&&!this.closing&&!signal.aborted;
+    };
+    return this.run(()=>this.withDirs(async d=>{
+      if(!current())return bad();
+      const old=await this.currentAt(d);
+      if(!old||old.anchor.snapshotSha256!==expectedDigest||old.snapshot.revision!==0
+        ||old.snapshot.baselineAdmitted||old.snapshot.entries.length!==0)return bad();
+      return this.publish(d,{...candidate,epoch:old.snapshot.epoch,entries:captured},{current,revalidate});
+    }));
+  }
+  private async publish(d:Directories,snapshot:LedgerSnapshot,guard?:PublicationGuard):Promise<Readonly<Loaded>>{
     validateLedgerSnapshot(snapshot,this.root.rootId);
     // Copy before asynchronous work: a caller cannot mutate the committed data.
     snapshot=immutableLedgerSnapshot(snapshot);
@@ -183,7 +217,17 @@ export class DurableLifecycleLedger{
     await persist(join(d.anchor,stage),Buffer.from(canonical(anchor),'utf8'));
     await d.fence();
     // Current anchor is the sole commit point. Never promote an orphan snapshot.
-    await rename(join(d.anchor,stage),join(d.anchor,CURRENT));
+    if(guard){
+      if(!guard.current()||await guard.revalidate()!==true||!guard.current())return bad();
+      await d.fence();
+      // No await between the final trusted host fence and the atomic switch.
+      // Cancellation before this point denies; cancellation after it cannot undo
+      // committed provenance and must independently retire live authority.
+      if(!guard.current())return bad();
+      renameSync(join(d.anchor,stage),join(d.anchor,CURRENT));
+    }else{
+      await rename(join(d.anchor,stage),join(d.anchor,CURRENT));
+    }
     await syncDirectory(d.anchor);
     const committed=await readCommitted(d,this.root.rootId,this.uid);
     if(!committed||!sameAnchor(committed.anchor,anchor))return bad();
