@@ -17,6 +17,8 @@ import { uiRequest } from '../plugin/src/search/controller';
 import { hash, type EvidenceHit, type SearchRequest, type SearchResponse } from '../plugin/src/standalone/contracts';
 import type { EngineState } from '../plugin/src/standalone/engine';
 import { defaultSettings } from '../plugin/src/search/settings';
+import { BoundedVaultReader } from '../plugin/src/standalone/source';
+import { DurableLifecycleLedger } from '../plugin/src/ai/lifecycle-ledger';
 const TEST_PYTHON = '/usr/bin/python3.12';
 // Controlled Node-only host adapter. Actual DOM/editor acceptance remains host smoke.
 const Module = require('node:module') as { _load: (name: string, ...args: unknown[]) => unknown };
@@ -89,6 +91,10 @@ async function fixture() {
   const internal = plugin as unknown as { initializeStandalone(): Promise<void>; initializing?: Promise<void>; settingsQueue: Promise<void> };
   return { root, vault, plugin, internal, layout: () => layout(), cleanup: async () => {
     plugin.onunload(); await internal.initializing; await internal.settingsQueue;
+    // The optional lifecycle owner drains independently of Basic. Do not
+    // restore process-global XDG or remove the synthetic root before it settles.
+    const lifecycleBarriers=(globalThis as unknown as Record<symbol,Map<string,Promise<void>>|undefined>)[Symbol.for('oks.policy.lifecycle-owner.close-barriers.v1')];
+    await lifecycleBarriers?.get(JSON.stringify([resolve(vault),plugin.manifest.id]))?.catch(()=>{});
     if (oldXdg === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = oldXdg;
     globalThis.Worker = oldWorker;
     await rm(root, { recursive: true, force: true });
@@ -2080,6 +2086,60 @@ test('systemic source ledger overflow is terminal-only and Basic reload reconcil
     assert.equal(result.value.hits[0]!.originalExcerpt,'REQ-LIFE-NEW: changed source.');
     assert.equal(c.sharedAuthorityTransition(),true);
   }finally{replacement?.onunload();await f.cleanup();}
+});
+
+type LifecycleTestOwner={opening?:Promise<void>;exactAuthorityActive():boolean;close():Promise<void>};
+const nativeLifecycleOwner=(plugin:InstanceType<typeof PluginClass>)=>
+  (plugin as unknown as {lifecycleOwner?:{owner:LifecycleTestOwner;key:string}}).lifecycleOwner;
+
+test('POLICY.2e3c production adapter restores a committed ledger and retires before source observers',async()=>{
+  const f=await fixture();
+  const file=Object.assign(new Empty(),{path:'fixture.md'});
+  const events=new Map<string,(file:unknown,oldPath?:string)=>void>();
+  Object.assign(f.plugin.app.vault,{on:(name:string,fn:(file:unknown,oldPath?:string)=>void)=>{events.set(name,fn);return {};},
+    getMarkdownFiles:()=>[file],getAbstractFileByPath:(path:string)=>path===file.path?file:null});
+  try{
+    await mkdir(join(f.root,'data'),{mode:0o700});
+    const reader=await BoundedVaultReader.open(f.vault,()=>[file.path]);
+    const proof=await reader.readLifecycleProof(file.path);
+    const seed=await DurableLifecycleLedger.open({path:f.vault,rootId:reader.rootId},f.plugin.manifest.id);
+    try{
+      const initial=await seed.initializeEmptyEpoch();
+      await seed.commit(initial.anchor.snapshotSha256,true,[{sourceId:file.path,state:'existing',origin:'baseline',originVersionId:proof.version.versionId,proof}]);
+    }finally{await seed.close();}
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    const owner=nativeLifecycleOwner(f.plugin)!.owner;await owner.opening;
+    assert.equal(owner.exactAuthorityActive(),true);
+    const invalidate=f.plugin.searchController.invalidateSource.bind(f.plugin.searchController);
+    let observed=false;
+    f.plugin.searchController.invalidateSource=(obligations)=>{
+      observed=true;assert.equal(owner.exactAuthorityActive(),false);return invalidate(obligations);
+    };
+    events.get('modify')!(file);
+    assert.equal(observed,true);assert.equal(owner.exactAuthorityActive(),false);
+    await owner.close();
+    const reopened=await DurableLifecycleLedger.open({path:f.vault,rootId:reader.rootId},f.plugin.manifest.id);
+    try{assert.equal((await reopened.read())?.snapshot.baselineAdmitted,true);}finally{await reopened.close();}
+    await f.plugin.standalone!.whenIdle();assert.equal(f.plugin.standalone!.status().status,'ready');
+  }finally{await f.cleanup();}
+});
+
+test('POLICY.2e3c pending prior lifecycle drain does not block Basic and unload cancels the optional startup',async()=>{
+  const f=await fixture();
+  const barriers=(globalThis as unknown as Record<symbol,Map<string,Promise<void>>>)[Symbol.for('oks.policy.lifecycle-owner.close-barriers.v1')]!;
+  const key=JSON.stringify([resolve(f.vault),f.plugin.manifest.id]);
+  let release!:()=>void;const prior=new Promise<void>(resolve=>{release=resolve;});
+  barriers.set(key,prior);
+  try{
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    assert.equal(f.plugin.standalone!.status().status,'ready');
+    const owner=nativeLifecycleOwner(f.plugin)!.owner;
+    assert.equal(owner.exactAuthorityActive(),false);
+    f.plugin.onunload();await owner.close();
+    assert.equal(owner.exactAuthorityActive(),false);
+    assert.ok(barriers.has(key)); // physical prior obligation still retained
+    release();await barriers.get(key);
+  }finally{release();await f.cleanup();}
 });
 
 test('POLICY.2c native create, same-owner edits and exact rename preserve new identity while preview verifies current bytes',async()=>{

@@ -61,7 +61,8 @@ function admitted<T extends object>(entry:Entry<T>|undefined):entry is Admitted<
 
 /**
  * One host-owned tracker. The accepted ephemeral pilot API remains unchanged.
- * Exact-version and durable restoration primitives are not yet wired to production.
+ * Native startup can restore committed evidence; live exact transitions and
+ * policy-use admission remain separate gates.
  * Only an admitted native host adapter may supply context, complete inventories,
  * event sequence/owner and fresh canonical descriptor proofs; note content and
  * arbitrary callers are not evidence. Durable epoch initialization and native admission are still separate gates.
@@ -119,6 +120,8 @@ export class NewMaterialTracker<T extends object> {
     return !this.overflow&&this.entries.get(path)===owner?'verified-new':'unresolved';
   }
   clear():void {this.entries.clear();this.overflow=false;this.lifecycleRevision++;this.sealLifecycle();}
+  /** Retire the exact epoch without changing the historical read-only pilot preview. */
+  retireExactLifecycle():void {this.lifecycleRevision++;this.sealLifecycle();}
 
 
   openLifecycle(context:LifecycleContext):boolean {
