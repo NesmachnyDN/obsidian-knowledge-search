@@ -1,6 +1,6 @@
 import { BOUNDS, isDigest, validPath } from '../standalone/contracts';
 import { BoundedVaultReader, type DescriptorLifecycleProof } from '../standalone/source';
-import { DurableLifecycleLedger } from './lifecycle-ledger';
+import { DurableLifecycleLedger, InitialBaselinePublicationError } from './lifecycle-ledger';
 import type { LedgerAnchor, LedgerEntry } from './lifecycle-ledger-schema';
 
 export type LifecycleState = 'existing'|'verified-new'|'unresolved';
@@ -29,6 +29,19 @@ export type LifecycleRestoreHost<T extends object> = Readonly<{
   signal:AbortSignal; current:()=>boolean; resolveNativeOwner:(sourceId:string)=>T|null;
 }>;
 export type LifecycleRestoreEvidence = Readonly<{baselineAdmitted:boolean;entries:readonly LedgerEntry[]}>;
+/**
+ * Native-only admission hooks.  They deliberately expose neither a grant nor
+ * a classification decision: the tracker remains the sole lifecycle state
+ * authority and the ledger remains durable evidence only.
+ */
+export type InitialBaselineAdmissionHost<T extends object> = Readonly<{
+  signal:AbortSignal;
+  current:()=>boolean;
+  monotonicNow:()=>number;
+  resolveNativeOwner:(sourceId:string)=>T|null;
+}>;
+/** Durable publication and live admission are intentionally separate facts. */
+export type InitialBaselineAdmissionOutcome='admitted'|'denied'|'committed-not-live'|'uncertain-publication';
 
 function objectIdentity(value:unknown):value is object {
   return typeof value==='object'&&value!==null;
@@ -80,11 +93,13 @@ export class NewMaterialTracker<T extends object> {
   private lifecycleRevision=0;
   private restoreUsed=false;
   private restorePending=false;
+  private admissionPending=false;
+  private admissionSignalCleanup?:()=>void;
   private legacyTouched=false;
   private noteLegacyMutation():void {
     this.legacyTouched=true;
     // The pilot path cannot supply exact-version transition evidence.
-    if(this.restoreUsed)this.sealLifecycle();
+    if(this.restoreUsed||this.admissionPending||this.admissionSignalCleanup)this.sealLifecycle();
   }
   created(path:string,owner:T):void {
     this.noteLegacyMutation();
@@ -135,9 +150,10 @@ export class NewMaterialTracker<T extends object> {
   }
   private sealLifecycle():void {
     this.sealed=true;this.exact.clear();this.pending=undefined;
+    this.admissionSignalCleanup?.();this.admissionSignalCleanup=undefined;
   }
   private event(context:LifecycleContext,event:NativeLifecycleEvent,kind:NativeLifecycleEvent['kind']):boolean {
-    if(this.restorePending){this.sealLifecycle();return false;}
+    if(this.restorePending||this.admissionPending){this.sealLifecycle();return false;}
     if(!this.current(context))return false;
     this.lifecycleRevision++;
     this.pending=undefined;
@@ -156,7 +172,7 @@ export class NewMaterialTracker<T extends object> {
     return this.store(proof.version.sourceId,Object.freeze({owner,state,proof:copyProof(proof),origin,originVersionId}));
   }
   reviseRules(context:LifecycleContext,nextRevision:string):boolean {
-    if(this.restorePending){this.sealLifecycle();return false;}
+    if(this.restorePending||this.admissionPending){this.sealLifecycle();return false;}
     if(!this.current(context)||!isDigest(nextRevision))return false;
     this.lifecycleRevision++;
     this.pending=undefined;
@@ -203,7 +219,7 @@ export class NewMaterialTracker<T extends object> {
     return this.store(path,kind==='delete'?'deleted':'ambiguous');
   }
   lifecycleState(context:LifecycleContext,owner:T,proof:DescriptorLifecycleProof):LifecycleState {
-    if(this.restorePending||!this.current(context)||!validProof(proof,context.rootId))return 'unresolved';
+    if(this.restorePending||this.admissionPending||!this.current(context)||!validProof(proof,context.rootId))return 'unresolved';
     const current=this.exact.get(proof.version.sourceId);
     return admitted(current)&&current.owner===owner&&sameProof(current.proof,proof)?current.state:'unresolved';
   }
@@ -222,6 +238,7 @@ export class NewMaterialTracker<T extends object> {
     return Object.freeze(out.sort((a,b)=>a.proof.version.sourceId<b.proof.version.sourceId?-1:1));
   }
   previewInitialBaseline(context:LifecycleContext,input:BaselineInventory<T>,now:number,ttlMs:number):BaselinePreview<T>|null {
+    if(this.admissionPending){this.sealLifecycle();return null;}
     if(this.restorePending||!this.current(context)||this.baselineDone)return null;
     this.pending=undefined;
     if(!Number.isSafeInteger(now)||now<0||!Number.isSafeInteger(ttlMs)||ttlMs<=0||ttlMs>300000
@@ -232,6 +249,7 @@ export class NewMaterialTracker<T extends object> {
     this.lifecycleRevision++;this.pending=preview;return preview;
   }
   confirmInitialBaseline(context:LifecycleContext,preview:BaselinePreview<T>,input:BaselineInventory<T>,now:number):boolean {
+    if(this.admissionPending){this.sealLifecycle();return false;}
     // Capability identity is instance-local and cannot be replayed by copying
     // serialized data. Every matching confirmation consumes it, even denial.
     if(!preview||preview!==this.pending)return false;
@@ -248,6 +266,99 @@ export class NewMaterialTracker<T extends object> {
   }
 
   /**
+   * Consume a single local preview and publish its exact complete inventory to
+   * the durable ledger.  No live `existing` state is installed until the
+   * guarded ledger commit has returned and a second complete observation still
+   * has the identical native owners and descriptor proofs.
+   *
+   * This is intentionally host-private substrate: it has no production caller
+   * in this slice and does not create a processing grant.
+   */
+  async admitInitialBaseline(context:LifecycleContext,preview:BaselinePreview<T>,ledger:DurableLifecycleLedger,
+      reader:BoundedVaultReader,host:InitialBaselineAdmissionHost<T>):Promise<InitialBaselineAdmissionOutcome> {
+    if(this.admissionPending){this.sealLifecycle();return 'denied';}
+    if(!preview||preview!==this.pending)return 'denied';
+    this.pending=undefined;
+    if(this.restorePending||!this.current(context)||this.baselineDone||this.exact.size!==0||this.eventSequence!==0
+      ||this.lifecycleRevision!==1||this.legacyTouched||this.overflow||this.entries.size!==0
+      ||!(ledger instanceof DurableLifecycleLedger)||!(reader instanceof BoundedVaultReader)||reader.rootId!==context.rootId
+      ||!ledger.rootAvailable(context.rootId)||!host||!(host.signal instanceof AbortSignal)
+      ||typeof host.current!=='function'||typeof host.monotonicNow!=='function'||typeof host.resolveNativeOwner!=='function'
+      ||!sameContext(preview.context,context)) { this.sealLifecycle();return 'denied'; }
+    // Reserve the operation before invoking any callback. The host signal is a
+    // one-shot epoch fence, and remains bound to a successfully admitted epoch.
+    this.admissionPending=true;
+    const capturedContext=this.context!,revision=this.lifecycleRevision,sequence=this.eventSequence;
+    const {signal,current:hostCurrent,monotonicNow,resolveNativeOwner}=host;
+    const abort=()=>this.sealLifecycle();
+    signal.addEventListener('abort',abort,{once:true});
+    this.admissionSignalCleanup=()=>signal.removeEventListener('abort',abort);
+    let lastNow=preview.startedAt;
+    const intact=():boolean=>this.admissionPending&&!this.restorePending&&!signal.aborted
+      &&this.current(capturedContext)&&this.lifecycleRevision===revision&&this.eventSequence===sequence
+      &&!this.legacyTouched&&!this.overflow&&this.entries.size===0&&this.exact.size===0&&!this.baselineDone
+      &&ledger.rootAvailable(capturedContext.rootId);
+    const current=():boolean=>{
+      if(!intact())return false;
+      try{
+        const now=monotonicNow();
+        if(!Number.isFinite(now)||now<lastNow||now>=preview.expiresAt||!intact())return false;
+        lastNow=now;
+        return hostCurrent()===true&&intact();
+      }catch{return false;}
+    };
+    const ownersCurrent=():boolean=>{
+      if(!current())return false;
+      for(const candidate of preview.candidates){
+        if(!intact()||resolveNativeOwner(candidate.proof.version.sourceId)!==candidate.owner||!intact())return false;
+      }
+      return current();
+    };
+    const observe=async():Promise<boolean>=>{
+      if(!current())return false;
+      const inventory=await reader.completeMarkdownInventory(signal);
+      if(!current()||inventory.rootId!==capturedContext.rootId||inventory.sources.length!==preview.candidates.length)return false;
+      if(!inventory.sources.every((proof,index)=>sameProof(proof,preview.candidates[index]!.proof)))return false;
+      return ownersCurrent();
+    };
+    const guard={signal,revalidate:observe,current:ownersCurrent};
+    let publicationInFlight=false,durableCommitted=false;
+    try {
+      if(!await observe()||!current())return 'denied';
+      let empty=await ledger.read();
+      if(!current())return 'denied';
+      if(empty===null){
+        publicationInFlight=true;
+        empty=await ledger.initializeEmptyEpochForInitialBaseline(guard);
+        publicationInFlight=false;
+      }
+      if(!current()||empty.snapshot.rootId!==capturedContext.rootId||empty.snapshot.revision!==0
+        ||empty.snapshot.baselineAdmitted||empty.snapshot.entries.length!==0)return 'denied';
+      const entries=preview.candidates.map(candidate=>Object.freeze({sourceId:candidate.proof.version.sourceId,
+        state:'existing' as const,origin:'baseline' as const,originVersionId:candidate.proof.version.versionId,
+        proof:copyProof(candidate.proof)}));
+      publicationInFlight=true;
+      const committed=await ledger.commitInitialBaseline(empty.anchor.snapshotSha256,entries,guard);
+      publicationInFlight=false;durableCommitted=true;
+      // The commit result does not confer live authority. Re-observe all
+      // originals and owners; fence the exact ledger anchor before publication.
+      if(!await observe()||!ownersCurrent()||!ledger.committedAnchorCurrent(committed.anchor)||!intact())
+        return 'committed-not-live';
+      for(const candidate of preview.candidates)this.exact.set(candidate.proof.version.sourceId,Object.freeze({owner:candidate.owner,
+        state:'existing',proof:candidate.proof,origin:'baseline',originVersionId:candidate.proof.version.versionId}));
+      this.baselineDone=true;
+      return 'admitted';
+    }catch(error) {
+      if(durableCommitted)return 'committed-not-live';
+      if(error instanceof InitialBaselinePublicationError)return error.outcome;
+      return publicationInFlight?'uncertain-publication':'denied';
+    }finally{
+      if(!this.baselineDone)this.sealLifecycle();
+      this.admissionPending=false;
+    }
+  }
+
+  /**
    * One explicit, host-serialized recovery attempt for a pristine opened
    * tracker. It never accepts caller-supplied snapshots or source proofs.
    * The host must synchronously abort its captured one-shot signal on every
@@ -256,6 +367,7 @@ export class NewMaterialTracker<T extends object> {
    */
   async restoreCommittedLifecycle(context:LifecycleContext,ledger:DurableLifecycleLedger,reader:BoundedVaultReader,
       host:LifecycleRestoreHost<T>):Promise<boolean> {
+    if(this.admissionPending){this.sealLifecycle();return false;}
     if(this.restoreUsed||this.restorePending||!this.current(context))return false;
     this.restoreUsed=true;
     if(this.exact.size!==0||this.eventSequence!==0||this.lifecycleRevision!==0||this.pending
@@ -327,7 +439,7 @@ export class NewMaterialTracker<T extends object> {
   }
   /** Immutable bounded evidence for a future host-authorized ledger commit. */
   exportCommittedLifecycleEvidence(context:LifecycleContext):LifecycleRestoreEvidence|null {
-    if(this.restorePending||!this.current(context))return null;
+    if(this.restorePending||this.admissionPending||!this.current(context))return null;
     const entries:LedgerEntry[]=[];
     for(const [sourceId,entry] of [...this.exact.entries()].sort(([a],[b])=>a<b?-1:a>b?1:0)){
       if(entry==='deleted'||entry==='ambiguous')entries.push(Object.freeze({sourceId,state:entry}));

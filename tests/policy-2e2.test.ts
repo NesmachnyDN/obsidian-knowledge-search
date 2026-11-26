@@ -210,13 +210,16 @@ function baselineGuard(signal=new AbortController().signal){
 test('guarded initial baseline publishes captured exact records once and reopens',async()=>{
   await fixture(async f=>{
     const a=await f.open(),first=await a.initializeEmptyEpoch();
-    const entry=baseline(await f.entry()),entries=[entry],guard=baselineGuard();
+    const original=baseline(await f.entry());if(!('proof' in original))throw Error('expected proof');
+    const expected=original,entry={...original,proof:{...original.proof,version:{...original.proof.version}}},
+      entries=[entry],guard=baselineGuard();
     const pending=a.commitInitialBaseline(first.anchor.snapshotSha256,entries,guard);
     entries.length=0;
+    (entry.proof.version as {versionId:string}).versionId=hash('mutated nested proof after invocation');
     guard.current=()=>false;
     const committed=await pending;
     assert.equal(committed.snapshot.baselineAdmitted,true);
-    assert.deepEqual(committed.snapshot.entries,[entry]);
+    assert.deepEqual(committed.snapshot.entries,[expected]);
     assert.ok(Object.isFrozen(committed.snapshot.entries[0]));
     await assert.rejects(a.commitInitialBaseline(committed.anchor.snapshotSha256,[],baselineGuard()),error);
     await a.close();const b=await f.open();assert.deepEqual(await b.read(),committed);

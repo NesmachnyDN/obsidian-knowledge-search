@@ -4,7 +4,7 @@ import { renameSync } from 'node:fs';
 import { lstat, opendir, realpath, rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { BoundedVaultReader, privateIndexPath } from '../standalone/source';
-import { hash } from '../standalone/contracts';
+import { hash, StandaloneError } from '../standalone/contracts';
 import { canonical } from '../advanced/protocol';
 import { withPrivateDerivedDirectory } from '../advanced/private-directory';
 import { parseCanonical, persist, strictFile, syncDirectory } from '../advanced/storage';
@@ -24,6 +24,11 @@ export type InitialBaselineCommitGuard=Readonly<{
   current:()=>boolean;
 }>;
 type PublicationGuard=Readonly<{revalidate:()=>Promise<boolean>;current:()=>boolean}>;
+type PublicationAttempt={switchAttempted:boolean};
+/** An exception after the switch was attempted cannot prove rollback. */
+export class InitialBaselinePublicationError extends StandaloneError {
+  constructor(public readonly outcome:'denied'|'uncertain-publication') { super('LIFECYCLE_LEDGER_UNAVAILABLE'); }
+}
 const snapshotFile=(digest:string)=>digest+'.json';
 
 async function boundedNames(dir:string):Promise<string[]>{
@@ -149,6 +154,18 @@ export class DurableLifecycleLedger{
       const loaded=await this.currentAt(d);return loaded?Object.freeze(loaded):null;
     }));
   }
+  /** Only the existing host-private ledger can attest its current in-process state. */
+  rootAvailable(rootId:string):boolean {
+    return this.root.rootId===rootId&&!this.closing&&!this.poisoned;
+  }
+  committedAnchorCurrent(anchor:LedgerAnchor):boolean {
+    return this.rootAvailable(anchor.rootId)&&!this.active&&sameAnchor(this.current,anchor);
+  }
+  private async guardedPublication(action:(attempt:PublicationAttempt)=>Promise<Readonly<Loaded>>):Promise<Readonly<Loaded>> {
+    const attempt={switchAttempted:false};
+    try{return await this.run(()=>action(attempt));}
+    catch{throw new InitialBaselinePublicationError(attempt.switchAttempted?'uncertain-publication':'denied');}
+  }
   /** Explicit host action only. Opening or reading an empty store does not
    * initialize an epoch. Actual owner authorization is a 2e3 prerequisite. */
   async initializeEmptyEpoch():Promise<Readonly<Loaded>>{
@@ -156,6 +173,27 @@ export class DurableLifecycleLedger{
       if(await this.currentAt(d)!==null)return bad();
       return this.publish(d,{schemaVersion:1,rootId:this.root.rootId,epoch:randomBytes(32).toString('hex'),
         revision:0,previous:null,baselineAdmitted:false,entries:[]});
+    }));
+  }
+  /**
+   * Reserved for an explicit initial-baseline confirmation.  Empty storage is
+   * evidence of nothing: this method merely creates the durable epoch while a
+   * still-current native confirmation is held.  It is deliberately distinct
+   * from the low-level test/recovery substrate above.
+   */
+  async initializeEmptyEpochForInitialBaseline(guard:InitialBaselineCommitGuard):Promise<Readonly<Loaded>>{
+    const {signal,revalidate,current:hostCurrent}=guard;
+    if(!(signal instanceof AbortSignal)||typeof revalidate!=='function'||typeof hostCurrent!=='function')return bad();
+    const current=():boolean=>{
+      if(this.closing||signal.aborted)return false;
+      const valid=hostCurrent()===true;
+      return valid&&!this.closing&&!signal.aborted;
+    };
+    return this.guardedPublication(attempt=>this.withDirs(async d=>{
+      if(!current()||await this.currentAt(d)!==null||!current())return bad();
+      if(await revalidate()!==true||!current())return bad();
+      return this.publish(d,{schemaVersion:1,rootId:this.root.rootId,epoch:randomBytes(32).toString('hex'),
+        revision:0,previous:null,baselineAdmitted:false,entries:[]},{current,revalidate},attempt);
     }));
   }
   async commit(expectedDigest:string,baselineAdmitted:boolean,entries:readonly LedgerEntry[]):Promise<Readonly<Loaded>>{
@@ -191,15 +229,15 @@ export class DurableLifecycleLedger{
       const valid=hostCurrent()===true;
       return valid&&!this.closing&&!signal.aborted;
     };
-    return this.run(()=>this.withDirs(async d=>{
+    return this.guardedPublication(attempt=>this.withDirs(async d=>{
       if(!current())return bad();
       const old=await this.currentAt(d);
       if(!old||old.anchor.snapshotSha256!==expectedDigest||old.snapshot.revision!==0
         ||old.snapshot.baselineAdmitted||old.snapshot.entries.length!==0)return bad();
-      return this.publish(d,{...candidate,epoch:old.snapshot.epoch,entries:captured},{current,revalidate});
+      return this.publish(d,{...candidate,epoch:old.snapshot.epoch,entries:captured},{current,revalidate},attempt);
     }));
   }
-  private async publish(d:Directories,snapshot:LedgerSnapshot,guard?:PublicationGuard):Promise<Readonly<Loaded>>{
+  private async publish(d:Directories,snapshot:LedgerSnapshot,guard?:PublicationGuard,attempt?:PublicationAttempt):Promise<Readonly<Loaded>>{
     validateLedgerSnapshot(snapshot,this.root.rootId);
     // Copy before asynchronous work: a caller cannot mutate the committed data.
     snapshot=immutableLedgerSnapshot(snapshot);
@@ -224,6 +262,7 @@ export class DurableLifecycleLedger{
       // Cancellation before this point denies; cancellation after it cannot undo
       // committed provenance and must independently retire live authority.
       if(!guard.current())return bad();
+      if(attempt)attempt.switchAttempted=true;
       renameSync(join(d.anchor,stage),join(d.anchor,CURRENT));
     }else{
       await rename(join(d.anchor,stage),join(d.anchor,CURRENT));
