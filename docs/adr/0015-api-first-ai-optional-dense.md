@@ -32,3 +32,7 @@ This ADR **supersedes only the mandatory offline Advanced AI gate, the local-onl
 The pre-existing OKS-05D local BGE-M3 implementation attempt is **in flight on another worktree** and must not be overwritten or mislabeled as required target architecture. Its code/tests and host resource experiments can remain useful as an optional local API-backed candidate after explicit re-scoping; the older local-offline execution prompt remains historical evidence, not a release requirement. Reconcile active 05D PR/contracts against this ADR before accepting or merging functionality that claims MVP compliance.
 
 A separate scoped SDD implementation slice must establish provider contracts/configuration/secret storage/permissions, API-backed indexing and optional rerank/generation. Independent review remains mandatory. This ADR records the owner's direction; it does not claim implementation, endpoint readiness, vendor privacy compliance or measured quality.
+
+## Prospective classification refinement
+
+[ADR-0019](0019-note-processing-policy.md) refines decision 6 for future accepted role/profile implementations: verified absent/exact external note Properties can establish eligibility, not authorization; unresolved or private sources deny external processing, explicit restrictive rules win, and free-text handling, exact consent and provider admission remain separate. Historical stricter runtime and acceptance evidence remain unchanged until independent implementation acceptance.

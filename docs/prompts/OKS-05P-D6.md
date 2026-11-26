@@ -38,3 +38,7 @@ during HTTP, restart/dispose, disabled/cloud/legacy conflict and basic
 search preservation. Run typecheck, full local regression, immutable
 package and isolated host smoke, CI and separate exact-HEAD review.
 No Gate B claim.
+
+## Prospective transition reference (not a change to this pilot)
+
+This reviewed pilot contract and its stricter synthetic/public authorization remain unchanged for current execution and historical evidence. Subsequent 05P role integration (including all B/C/D clients) follows [ADR-0019](../adr/0019-note-processing-policy.md) and [OKS-06H-POLICY](OKS-06H-POLICY.md) only through independently accepted bounded implementation slices. No grant from metadata alone, no change to provider admission, one-shot consent, scope, credential, lifecycle or existing evidence gates.

@@ -22,3 +22,7 @@ smoke. Independent exact-head full diff review plus CI before merge.
 Next dependent slice: loopback authenticated rerank API adapter and controller
 with verified lexical evidence and lifecycle revalidation. Real Gate B remains
 unavailable pending measured authorized model API and host acceptance.
+
+## Prospective transition reference (not a change to this pilot)
+
+This reviewed pilot contract and its stricter synthetic/public authorization remain unchanged for current execution and historical evidence. Subsequent 05P role integration (including all B/C/D clients) follows [ADR-0019](../adr/0019-note-processing-policy.md) and [OKS-06H-POLICY](OKS-06H-POLICY.md) only through independently accepted bounded implementation slices. No grant from metadata alone, no change to provider admission, one-shot consent, scope, credential, lifecycle or existing evidence gates.
