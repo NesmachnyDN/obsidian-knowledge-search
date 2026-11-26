@@ -17,13 +17,13 @@ type Pointer = { schemaVersion: 1; rootId: string; filename: string; sha256: str
 const pointerName = 'CURRENT';
 const namePattern = /^[0-9a-f]{64}\.json$/;
 const stagePattern = /^\.stage-[0-9a-f-]{36}$/;
-export const strictFile = async (file: string, maximum: number): Promise<Buffer> => {
+export const strictFile = async (file: string, maximum: number, expectedUid?:number): Promise<Buffer> => {
   // Inspect the opened inode, not a filename checked before a separate read.
   const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const info = await handle.stat();
     if (!info.isFile() || info.nlink !== 1 || info.size > maximum || info.size < 1
-        || (info.mode & 0o077) !== 0)
+        || (info.mode & 0o077) !== 0 || (expectedUid!==undefined&&info.uid!==expectedUid))
       throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
     const bytes = Buffer.alloc(info.size + 1);
     let count = 0;
@@ -35,7 +35,8 @@ export const strictFile = async (file: string, maximum: number): Promise<Buffer>
     const after = await handle.stat();
     if (count !== info.size || after.size !== info.size || after.dev !== info.dev
         || after.ino !== info.ino || after.mtimeMs !== info.mtimeMs
-        || after.ctimeMs !== info.ctimeMs)
+        || after.ctimeMs !== info.ctimeMs
+        || (expectedUid!==undefined&&(after.uid!==expectedUid||after.nlink!==1||(after.mode&0o077)!==0)))
       throw new IngestError('INDEX_PUBLICATION_UNCERTAIN');
     return bytes.subarray(0, count);
   } finally {

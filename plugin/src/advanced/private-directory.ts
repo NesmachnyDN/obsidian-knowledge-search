@@ -16,7 +16,7 @@ const beneath = (path: string, root: string): boolean =>
  * after closing its descriptor. Reject symlinked ancestors even outside Vault.
  */
 export async function withPrivateDerivedDirectory<T>(path: string, vaultPath: string,
-  action: (anchoredDir: string) => Promise<T>): Promise<T> {
+  action: (anchoredDir: string) => Promise<T>, durableAuthority = false): Promise<T> {
   const target = resolve(path), vault = resolve(vaultPath);
   if (!target.startsWith(sep) || beneath(target, vault)) refused();
   let current: string = sep;
@@ -40,6 +40,23 @@ export async function withPrivateDerivedDirectory<T>(path: string, vaultPath: st
         }
         try { child = await open(childPath, directoryFlags); }
         catch { refused(); }
+      }
+      if (durableAuthority) {
+        try {
+          const st = await child!.stat();
+          const uid = process.getuid?.();
+          // A trusted owner and non-writable ancestry (or a root-owned sticky
+          // directory, e.g. /tmp) exclude untrusted namespace replacement.
+          if (uid === undefined || !st.isDirectory() || (st.uid !== uid && st.uid !== 0)
+              || ((st.mode & 0o022) !== 0 && !(st.uid === 0 && (st.mode & 0o1000) !== 0)))
+            refused();
+          // Persist every parent entry, including ones left by a previous
+          // interrupted first initialization, before committing durable state.
+          await dir.sync();
+        } catch (error) {
+          await child!.close();
+          throw error;
+        }
       }
       await dir.close();
       dir = child!;
