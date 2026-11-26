@@ -44,8 +44,33 @@ fi
 if [[ "${OKS_06B4_HOST_TEST:-0}" == 1 && "${OKS_06B_GRAPH_TEST:-0}" != 1 ]]; then
   echo "HOST_SMOKE_FAILURE: graph stress requires isolated graph mode" >&2; exit 2
 fi
+# POLICY.2e3a evidence-only test; never combine with another host scenario.
+# Direct-IP denial is a separate, test-only fallback preserving real system UIDs.
+if [[ "${OKS_POLICY_2E3A_NO_IP:-0}" == 1 ]]; then
+  [[ "${OKS_POLICY_2E3A_TEST:-0}" == 1 && "${OKS_HOST_NO_ROUTE:-0}" == 0 ]] ||
+    { echo "HOST_SMOKE_FAILURE: no-IP mode requires separate lifecycle scenario" >&2; exit 2; }
+  export OKS_POLICY_2E3A_NO_IP
+  exec </dev/null
+fi
+if [[ "${OKS_POLICY_2E3A_TEST:-0}" == 1 ]]; then
+  [[ ( "${OKS_HOST_NO_ROUTE:-0}" == 1 || "${OKS_POLICY_2E3A_NO_IP:-0}" == 1 ) && -n "${OKS_STANDALONE_PACKAGE_DIR:-}" &&
+     -z "${OKS_STANDALONE_PREVIOUS_PACKAGE_DIR:-}" && -z "${OKS_06UX_VISUAL_DIR:-}" &&
+     -z "${OKS_06UX_L10N_RU_VISUAL_DIR:-}" && "${OKS_NATIVE_CHAT_TEST:-0}" == 0 &&
+     "${OKS_06B_GRAPH_TEST:-0}" == 0 && "${OKS_06B4_HOST_TEST:-0}" == 0 &&
+     "${OKS_AI_RERANK_TEST:-0}" == 0 && "${OKS_ADVANCED_HEALTH_TEST:-0}" == 0 &&
+     "${OKS_ADVANCED_INGESTION_TEST:-0}" == 0 && "${OKS_ADVANCED_RETRIEVAL_TEST:-0}" == 0 &&
+     "${OKS_06UX_TEST:-0}" == 0 && "${OKS_06UX_L10N_SWITCH_TEST:-0}" == 0 &&
+     "${OKS_06UX_L10N_RU_TEST:-0}" == 0 ]] ||
+    { echo "HOST_SMOKE_FAILURE: lifecycle requires isolated verified package and separate mode" >&2; exit 2; }
+  export OKS_POLICY_2E3A_TEST
+  umask 077
+fi
 tmp="$(mktemp -d /tmp/oks-native-host-XXXXXXXX)"
 trap 'rm -rf -- "$tmp"' EXIT
+if [[ "${OKS_POLICY_2E3A_TEST:-0}" == 1 ]]; then
+  "$repo/node_modules/.bin/esbuild" "$repo/scripts/obsidian-lifecycle-host-entry.ts" --bundle \
+    --platform=node --format=cjs --target=es2022 --outfile="$tmp/lifecycle-probe.cjs"
+fi
 if [[ "${OKS_06B4_HOST_TEST:-0}" == 1 ]]; then
   cp "$repo/benchmarks/graph/v1/corpus.json" "$tmp/graph-corpus.json"
   cp "$repo/benchmarks/graph/v1/manifest.json" "$tmp/graph-manifest.json"
@@ -143,6 +168,8 @@ fi
 if [[ "${OKS_HOST_NO_ROUTE:-0}" == 1 ]]; then
   command -v unshare >/dev/null || { echo "HOST_SMOKE_UNAVAILABLE: unshare missing" >&2; exit 2; }
   host_isolation=(unshare -Urn --)
+elif [[ "${OKS_POLICY_2E3A_NO_IP:-0}" == 1 ]]; then
+  host_isolation=(python3 -I -B "$repo/scripts/obsidian-lifecycle-no-ip.py" --)
 fi
 env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolation[@]}" xvfb-run -a -e "$tmp/display.log" -s '-screen 0 1280x800x24' bash -c '
   set -euo pipefail
@@ -196,6 +223,19 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
   initial="$(timeout 8s "$cli" eval "code=JSON.stringify({plugin:!!app.plugins.plugins[\"oks-synthetic-evidence\"],status:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standalone?.status(),error:app.plugins.plugins[\"oks-synthetic-evidence\"]?.standaloneError})")"
   [[ "$initial" == *"\"status\":\"ready\""* && "$initial" == *"\"sources\":2"* ]] ||
     { printf "HOST_SMOKE_FAILURE: native plugin not indexed; result=%s\n" "$initial" >&2; exit 1; }
+  if [[ "${OKS_POLICY_2E3A_TEST:-0}" == 1 ]]; then
+    if [[ "${OKS_HOST_NO_ROUTE:-0}" == 1 ]]; then
+      test "$(ip -o link show | wc -l)" -eq 1
+      test -z "$(ip route show default)"
+    else
+      python3 -I -B "$repo/scripts/obsidian-lifecycle-no-ip.py" --verify-inherited
+    fi
+    lifecycle="$(timeout 40s "$cli" eval "code=$(cat "$repo/scripts/obsidian-lifecycle-host-smoke.js")")"
+    [[ "$lifecycle" == *"OBSIDIAN_POLICY_2E3A_PASS:"* ]] ||
+      { echo "HOST_SMOKE_FAILURE: lifecycle capability ($lifecycle)" >&2; exit 1; }
+    printf "%s\n" "$lifecycle"
+    exit 0
+  fi
   if [[ "${OKS_NATIVE_CHAT_TEST:-0}" == 1 ]]; then
     chat="$(timeout 65s "$cli" eval "code=$(cat "$repo/scripts/obsidian-native-chat-smoke.js")")"
     [[ "$chat" == *"OBSIDIAN_NATIVE_CHAT_PASS:"* ]] ||
