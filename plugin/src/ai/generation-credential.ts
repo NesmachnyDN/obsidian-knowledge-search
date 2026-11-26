@@ -15,6 +15,7 @@ export class GenerationCredentialAuthority {
   readonly #hostId = randomUUID();
   #epoch = 0;
   #sealed = false;
+  #exclusive?:object;
   #active?: {attempt:Attempt;token?:string};
 
   private advance():void {
@@ -23,7 +24,21 @@ export class GenerationCredentialAuthority {
     try { this.#epoch=nextCredentialEpoch(this.#epoch); }
     catch(error) { this.#sealed=true;throw error; }
   }
+  /** A dense operation reserves the same physical credential slot until its
+   * policy/transport work drains, even after its secret has been revoked. */
+  get exclusiveBusy():boolean {return this.#exclusive!==undefined;}
+  beginExclusive(owner:object,configuration:string):Attempt {
+    if(this.#exclusive||this.#active||this.#sealed)throw new ProviderFailure('BUSY');
+    this.#exclusive=owner;
+    try{return this.begin(owner,configuration);}
+    catch(error){this.#exclusive=undefined;throw error;}
+  }
+  releaseExclusive(owner:object):void {
+    if(this.#exclusive!==owner)return;
+    this.revoke(owner);this.#exclusive=undefined;
+  }
   begin(owner:object,configuration:string):Attempt {
+    if(this.#exclusive&&this.#exclusive!==owner)throw new ProviderFailure('BUSY');
     this.advance();
     const attempt=Object.freeze({stamp:Object.freeze({hostId:this.#hostId,epoch:this.#epoch}),owner,configuration});
     this.#active={attempt};

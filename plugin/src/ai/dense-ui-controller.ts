@@ -9,7 +9,7 @@ type Result = DenseIndexResult | ApiRetrievalResult;
 type Classification = 'synthetic' | 'public';
 type State = {phase:'idle'|'preparing'|'running'|'error'; error?:ProviderFailureCode}
   | {phase:'preview'; preview:DensePreview} | {phase:'complete'; result:Result};
-type Host = Pick<ApiDenseHost,'prepare'|'confirm'|'invalidate'>;
+type Host = Pick<ApiDenseHost,'prepare'|'confirm'|'invalidate'>&Partial<Pick<ApiDenseHost,'policySelected'|'prepareWithCredential'|'isPreviewCurrent'|'isResultCurrent'|'isPolicyOperationCurrent'>>;
 type Port = {host():Host|undefined; revokeNavigation():void; captureNavigationRetirement?():()=>void; navigate(hit:EvidenceHit):Promise<void>; sharedFence?():boolean};
 const errorCode=(error:unknown):ProviderFailureCode=>error instanceof ProviderFailure?error.code:'NOT_READY';
 
@@ -22,6 +22,9 @@ export class DenseUiController {
   private state:State={phase:'idle'};
   private timer?:ReturnType<typeof setTimeout>;
   private disposed=false;
+  private policyResult=false;
+  private policyRunning=false;
+  private refreshingPolicy=false;
   // An unsuccessful trusted retirement is retried on the next shared revoke;
   // never admit a new host operation while its previous authority is uncertain.
   private retirement?: {host?:Host; navigation?:()=>void; running:boolean};
@@ -29,7 +32,7 @@ export class DenseUiController {
   private readonly listeners: ReturnType<DenseAuthority['channel']>;
   private machineChanged?: () => void;
   constructor(private readonly port:Port){
-    this.authority=new DenseAuthority(()=>!!this.retirement || (port.sharedFence?.() ?? false));this.listeners=this.authority.channel();
+    this.authority=new DenseAuthority(()=>!!this.retirement || (port.sharedFence?.() ?? false));this.listeners=this.authority.channel(()=>{this.refreshPolicy();});
   }
   /** The single machine ownership hook is authority, not a quarantinable observer. */
   bindMachine(changed:()=>void):()=>void {
@@ -41,13 +44,30 @@ export class DenseUiController {
     if(this.disposed)return ()=>{};
     return this.authority.subscribe(this.listeners,listener);
   }
+  policySelected():boolean{return this.port.host()?.policySelected?.()===true;}
+  private refreshPolicy():boolean{
+    if(this.refreshingPolicy)return false;
+    if(!this.owner)return true;
+    const host=this.host,state=this.state;
+    if(!host||!(state.phase==='preview'&&(state.preview.credentialStamp||host.policySelected?.())||state.phase==='complete'&&this.policyResult||state.phase==='running'&&this.policyRunning))return true;
+    this.refreshingPolicy=true;
+    try{
+      const current=this.port.host()===host&&(state.phase==='preview'
+        ?host.isPreviewCurrent?.(state.preview)===true:state.phase==='running'?host.isPolicyOperationCurrent?.()===true:state.phase==='complete'&&host.isResultCurrent?.(state.result)===true);
+      if(!current&&this.host===host&&this.state===state)this.invalidate();
+      return current&&this.host===host&&this.state===state;
+    }catch{
+      if(this.host===host&&this.state===state)this.invalidate();
+      return false;
+    }finally{this.refreshingPolicy=false;}
+  }
   snapshot(owner:symbol):State {
-    return this.owns(owner)?structuredClone(this.state):{phase:'idle'};
+    return this.refreshPolicy()&&this.owns(owner)?structuredClone(this.state):{phase:'idle'};
   }
   /** Only bounded metadata is copied for machine status polling. */
   metadata(owner:symbol):{phase:State['phase'];error?:ProviderFailureCode|null;
     executedMode?:ApiRetrievalResult['executedMode'];legs?:ApiRetrievalResult['legs']} {
-    if(!this.owns(owner))return {phase:'idle'};
+    if(!this.refreshPolicy()||!this.owns(owner))return {phase:'idle'};
     const state=this.state;
     if(state.phase==='complete'&&'hits' in state.result)return {phase:state.phase,error:state.result.error,
       executedMode:state.result.executedMode,legs:structuredClone(state.result.legs)};
@@ -56,7 +76,7 @@ export class DenseUiController {
   }
   /** Role-wide metadata only; owner-scoped evidence/preview access stays unchanged. */
   operationStatus():AiOperationStatus {
-    if(!this.occupied())return {phase:'idle',error:null};
+    if(!this.refreshPolicy()||!this.occupied())return {phase:'idle',error:null};
     const state=this.state;
     if(state.phase==='preview')return {phase:'permission-required',error:null};
     if(state.phase==='preparing'||state.phase==='running')return {phase:'busy',error:null};
@@ -69,7 +89,7 @@ export class DenseUiController {
   occupied():boolean {return !this.isDisposed()&&this.authority.ownershipVisible()&&this.owner!==undefined;}
   owns(owner:symbol):boolean {return this.occupied()&&this.owner===owner;}
   private emit():void {
-    this.authority.batch(()=>{try{this.machineChanged?.();}finally{this.authority.publish(this.listeners);}});
+    this.authority.batch(()=>{try{if(!this.refreshingPolicy)this.refreshPolicy();this.machineChanged?.();}finally{this.authority.publish(this.listeners);}});
   }
   private clearTimer():void {if(this.timer!==undefined)clearTimeout(this.timer);this.timer=undefined;}
   invalidate(witness?:RetirementWitness):void {
@@ -84,7 +104,7 @@ export class DenseUiController {
       const retiring=this.retirement??{host:this.host,navigation:
         this.port.captureNavigationRetirement?.()??(()=>this.port.revokeNavigation()),running:false};
       retiring.running=true;
-      this.clearTimer();this.host=undefined;this.owner=undefined;this.state={phase:'idle'};
+      this.clearTimer();this.host=undefined;this.owner=undefined;this.state={phase:'idle'};this.policyResult=false;this.policyRunning=false;
       this.retirement=retiring;
       try {
         try {
@@ -105,7 +125,7 @@ export class DenseUiController {
     return this.owns(owner)&&this.revision===revision
       &&this.host===host&&this.port.host()===host;
   }
-  async prepare(owner:symbol,request:DenseRequest,fence?:MachineFence):Promise<void> {
+  async prepare(owner:symbol,request:DenseRequest,fence?:MachineFence,credential?:{classification:Classification;token:string}):Promise<void> {
     if(this.disposed||this.authority.admissionClosed())return;
     const revision=this.revision+1;
     try {this.invalidate();} catch {console.warn('DENSE_AUTHORITY_REVOKE_FAILED');return;}
@@ -116,9 +136,12 @@ export class DenseUiController {
     this.host=host;this.state={phase:'preparing'};this.emit();
     try {
       if(!this.current(owner,revision,host))return;
-      const preview=await host.prepare(structuredClone(request),fence);
+      const selected=host.policySelected?.()===true;
+      if(selected&&(!credential||!host.prepareWithCredential||fence)||!selected&&credential)throw new ProviderFailure('DISCLOSURE_DENIED');
+      const preview=selected?await host.prepareWithCredential!(structuredClone(request),credential!.classification,credential!.token)
+        :await host.prepare(structuredClone(request),fence);
       if(!this.current(owner,revision,host))return;
-      if(preview.expiresUnixMs<=Date.now())throw new ProviderFailure('CANCELLED');
+      if(preview.expiresUnixMs<=Date.now()||selected&&(!preview.credentialStamp||host.isPreviewCurrent?.(preview)!==true))throw new ProviderFailure('CANCELLED');
       this.state={phase:'preview',preview:structuredClone(preview)};
       this.timer=setTimeout(()=>{
         if(this.current(owner,revision,host)){
@@ -133,15 +156,19 @@ export class DenseUiController {
   }
   async confirm(owner:symbol,nonce:string,classification:Classification,token:string):Promise<void> {
     const host=this.host,revision=this.revision;
-    if(this.authority.admissionClosed()||!host||!this.current(owner,revision,host)||this.state.phase!=='preview'
+    if(this.authority.admissionClosed()||!this.refreshPolicy()||!host||!this.current(owner,revision,host)||this.state.phase!=='preview'
       ||this.state.preview.nonce!==nonce||!['synthetic','public'].includes(classification))return;
     const preview=this.state.preview;
+    const policy=!!preview.credentialStamp;
+    if(policy&&(token!==''||classification!==preview.policyClassification))return;
     if(preview.expiresUnixMs<=Date.now()){try{this.invalidate();}catch{console.warn('DENSE_AUTHORITY_REVOKE_FAILED');}return;}
-    this.clearTimer();this.state={phase:'running'};this.emit();
+    this.clearTimer();this.policyRunning=policy;this.state={phase:'running'};this.emit();
     try {
       if(!this.current(owner,revision,host))return;
       const result=await host.confirm(structuredClone(preview),classification,token);
       if(this.current(owner,revision,host)){
+        if(policy&&result.status==='ok'&&host.isResultCurrent?.(result)!==true)throw new ProviderFailure('CANCELLED');
+        this.policyRunning=false;this.policyResult=policy&&result.status==='ok';
         this.state={phase:'complete',result:structuredClone(result)};this.emit();
       }
     }catch(error){
@@ -150,14 +177,14 @@ export class DenseUiController {
   }
   async open(owner:symbol,index:number,expected:EvidenceHit):Promise<boolean> {
     const host=this.host,revision=this.revision;
-    if(this.authority.admissionClosed()||!host||!this.current(owner,revision,host)||this.state.phase!=='complete')return false;
+    if(this.authority.admissionClosed()||!this.refreshPolicy()||!host||!this.current(owner,revision,host)||this.state.phase!=='complete')return false;
     const result=this.state.result;
     if(!('hits' in result)||result.status!=='ok'||!Number.isInteger(index))return false;
     const hit=result.hits[index]?.evidence;
     if(!hit||JSON.stringify(hit)!==JSON.stringify(expected))return false;
     try{
       await this.port.navigate(structuredClone(hit));
-      return this.current(owner,revision,host);
+      return this.refreshPolicy()&&this.current(owner,revision,host);
     }catch{
       if(this.current(owner,revision,host)){
         const expectedRevision=this.revision+1;

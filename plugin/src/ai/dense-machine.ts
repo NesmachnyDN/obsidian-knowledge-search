@@ -29,7 +29,7 @@ export class DenseMachine {
   private readonly listeners: ReturnType<DenseUiController['authority']['channel']>;
   private readonly unsubscribe:()=>void;
   constructor(private readonly ui:DenseUiController,private readonly port:Port,private readonly now=Date.now){
-    this.listeners=ui.authority.channel();
+    this.listeners=ui.authority.channel(()=>{ui.operationStatus();});
     this.unsubscribe=ui.bindMachine(()=>{
       const s=this.slot;
       if(ui.isDisposed()&&s)this.clear();

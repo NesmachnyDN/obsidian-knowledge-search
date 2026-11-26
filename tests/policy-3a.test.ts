@@ -253,6 +253,8 @@ test('POLICY.3a canonical worker remains reserved after logical original-read ca
       await started;abort.abort();await rejected;await flush();
       await assert.rejects(f.engine.previewPolicyMetadata('a.md',()=>true),{message:'PARSER_BUSY'});
       release();await f.engine.whenIdle();
+      // Engine idleness precedes settlement of the host gate wrapper.
+      await gate.drain();
       f.reader.read=original;
       const proof=await f.engine.previewPolicyMetadata('a.md',()=>true);
       assert.equal(proof.state,'absent');
@@ -437,6 +439,7 @@ test('POLICY.3b rerank pending canonical read cannot be replaced after logical c
       await started;c.cancelRerank();await rejected;
       await assert.rejects(c.prepareRerankWithPolicy('synthetic-token'),{message:'BUSY'});
       release();await f.engine.whenIdle();
+      await (f.controller as unknown as {generationPolicyGate:GenerationPolicyGate}).generationPolicyGate.drain();
       f.reader.read=original;
       const next=await c.prepareRerankWithPolicy('synthetic-token');
       await c.rerankConfirmedWithPolicy(next,'synthetic');

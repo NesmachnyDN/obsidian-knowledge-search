@@ -1,5 +1,6 @@
-import { GenerationPolicyHost, RerankPolicyHost, type GenerationPolicyHostState } from './ai/generation-policy-host';
-import { policyOriginals, type ProcessingPolicyInput } from './ai/generation-policy';
+import { GenerationPolicyHost, ProcessingPolicyHost, RerankPolicyHost, type GenerationPolicyHostState } from './ai/generation-policy-host';
+import { GenerationCredentialAuthority } from './ai/generation-credential';
+import { GenerationPolicyGate,policyOriginals, type ProcessingPolicyInput } from './ai/generation-policy';
 import { configDigest } from './ai/disclosure';
 import { NewMaterialTracker } from './ai/new-material-tracker';
 import { decideNewMaterialMarking, type NewMaterialRuleConfig, type NewMaterialDecision } from './ai/new-material-policy';
@@ -94,9 +95,13 @@ export default class SyntheticEvidencePlugin extends Plugin {
   });
   private readonly denseMachine = new DenseMachine(this.denseUi,{
     host:()=>this.unloaded||this.denseSettingsChanging||!this.settings.enabled||this.settings.paused
-      ||this.settings.ingestion.enabled?undefined:this.denseHost,
+      ||this.settings.ingestion.enabled||this.embeddingPolicyHost.selected()?undefined:this.denseHost,
     preference:()=>this.settings.ai.embedding,
   });
+  // All prospective AI roles share one transient credential authority.  The
+  // configured cloud target remains unadmitted; never fall back to pilot.
+  private readonly aiCredential=new GenerationCredentialAuthority();
+  private readonly aiPolicyGate=new GenerationPolicyGate();
   readonly denseApi=Object.freeze({apiVersion:1 as const,request:(input:unknown)=>this.denseMachine.request(input)});
   private rootId?: string;
   private initializing?: Promise<void>;
@@ -119,7 +124,10 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private readonly rerankPolicyHost=new RerankPolicyHost(
     ()=>this.settings.ai.reranking.state==='configured'&&this.settings.ai.reranking.transport==='cloud',
     ()=>this.standalone,input=>this.policyHostState(input));
-  private policyHostState(input:ProcessingPolicyInput):GenerationPolicyHostState|null {
+  private readonly embeddingPolicyHost=new ProcessingPolicyHost<'embedding'>(
+    ()=>this.settings.ai.embedding.state==='configured'&&this.settings.ai.embedding.transport==='cloud',
+    ()=>this.standalone,input=>this.policyHostState(input),'embedding',input=>this.denseHost?.resolvedPolicyScope(input)??null);
+  private policyHostState(input:ProcessingPolicyInput<'generation'|'reranking'|'embedding'>):GenerationPolicyHostState|null {
     const config=this.settings.ai[input.role],reader=this.sourceReader;
     if(this.unloaded||this.denseSettingsChanging||!reader||reader.rootId!==input.scopeId||config.state!=='configured')return null;
     const materials=policyOriginals(input).map(source=>{
@@ -141,7 +149,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     config: () => this.settings.ai.generation,
     scopeId: () => this.sourceReader?.rootId,
     verify: hit => this.verifyAiEvidence(hit),
-  }, () => this.revokeDenseAuthority(),undefined,this.generationPolicyHost,this.rerankPolicyHost);
+  }, () => this.revokeDenseAuthority(),undefined,this.generationPolicyHost,this.rerankPolicyHost,this.aiCredential,this.aiPolicyGate);
   private revokeDenseAuthority(): void {
     this.denseUi.authority.revoke(() => {
       // Lexical navigation has its own revision even when both dense owners
@@ -721,7 +729,8 @@ export default class SyntheticEvidencePlugin extends Plugin {
         const file = this.app.vault.getAbstractFileByPath(path);
         return file instanceof TFile && file.path === path;
       },
-    });
+    },Date.now,{selected:()=>this.embeddingPolicyHost.selected(),policy:this.embeddingPolicyHost,credentials:this.aiCredential,
+      gate:this.aiPolicyGate,admit:()=>this.searchController.embeddingAdmissionAvailable()});
   }
   private reserveDenseClose():{start:()=>void;drain:Promise<void>} {
     const host = this.denseHost;

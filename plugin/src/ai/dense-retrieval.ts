@@ -6,6 +6,7 @@ import { ProviderFailure, type CallContext, type ProviderFailureCode } from './c
 import { EvidenceEmbedder, type EmbeddingApproval } from './embedding-evidence';
 import { checkedVector, embeddingSpaceId, validateEmbeddingSpace } from './embedding-space';
 import { MAX_API_VECTORS, apiDenseEntryKey, apiDenseEvidenceKey, type ApiDenseGeneration } from './dense-generation';
+import type { GenerationPolicyBinding } from './generation-policy';
 
 type Mode='dense'|'hybrid';
 type Leg={status:'ready'|'unavailable'|'not-run'|'failed';candidateCount:number};
@@ -24,6 +25,8 @@ export type ApiRetrievalPort={
   lexical(request:SearchRequest):Promise<SearchResponse>;
   /** Trusted D4 corpus lease; required only for a metadata-filtered text query. */
   metadataPaths?(request:SearchRequest,lexicalGenerationId:string,selectedPaths:readonly string[]):readonly string[];
+  publicationFence?(current:()=>boolean):void;
+  policyCheck?(approval:EmbeddingApproval):()=>Promise<GenerationPolicyBinding>;
 };
 const fail=(code:ProviderFailureCode):never=>{throw new ProviderFailure(code);};
 const cmp=(a:string,b:string)=>a<b?-1:a>b?1:0;
@@ -131,7 +134,7 @@ export class ApiDenseSearch {
         &&(!metadata||metadata.has(h.sourceId))&&matches(h.properties,req.predicates??[])));
       const current=()=>port.current()&&this.store.isApiSnapshotCurrent(generation)
         &&value.evidence.every(hit=>port.allowed(hit));
-      const {batch}=await this.embedder.run(value.approval,token,context,async()=>{},current);
+      const {batch}=await this.embedder.run(value.approval,token,context,async()=>{},current,port.policyCheck?.(value.approval));
       check();
       if(!this.store.isApiSnapshotCurrent(generation))return fail('SOURCE_STALE');
       if(batch.spaceId!==spaceId||batch.purpose!=='query'||batch.vectors.length!==1)return fail('MODEL_MISMATCH');
@@ -166,6 +169,8 @@ export class ApiDenseSearch {
       if(!verified||verified.generationId!==generation.generationId
         ||!this.store.isApiSnapshotCurrent(generation)||!this.store.isApiSnapshotCurrent(verified))
         return fail('SOURCE_STALE');
+      port.publicationFence?.(()=>this.store.isApiSnapshotCurrent(generation)&&this.store.isApiSnapshotCurrent(verified));
+      check();
       return {version:1,requestedMode:mode,executedMode:mode,status:'ok',error:null,
         indexGenerationId:generation.generationId,lexicalGenerationId:value.lexicalGenerationId,hits,
         legs:{dense:leg('ready',dense.length),lexical:leg(mode==='hybrid'?'ready':'unavailable',lexical.size)}};

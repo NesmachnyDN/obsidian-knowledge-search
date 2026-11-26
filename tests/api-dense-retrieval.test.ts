@@ -1,4 +1,9 @@
 import {ApiDenseHost} from '../plugin/src/ai/dense-host';
+import {GenerationCredentialAuthority} from '../plugin/src/ai/generation-credential';
+import {GenerationPolicyGate} from '../plugin/src/ai/generation-policy';
+import {ProcessingPolicyHost} from '../plugin/src/ai/generation-policy-host';
+import {SearchController,uiRequest} from '../plugin/src/search/controller';
+import {DenseUiController} from '../plugin/src/ai/dense-ui-controller';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
@@ -604,5 +609,108 @@ test('D6 storage admission refuses failed prior writer shutdown and cancellation
       waiting.host.invalidate();release();
       await assert.rejects(pending,/CANCELLED/);assert.equal(f.calls(),before);
     }finally{await waiting.host.close();}
+  });
+});
+
+
+test('POLICY.3c2 dense host exact preflight, one-shot credential, shared role slot and revocation',async()=>{
+  await fixture(async f=>{
+    const config={...f.config,limits:{...f.config.limits,maxCandidates:1}};
+    const rootId=f.input('common','hybrid').approval.scopeId;
+    const credential=new GenerationCredentialAuthority(),gate=new GenerationPolicyGate();
+    let revision='p1',selected=true,admitted=true;
+    let holdPolicy:Promise<void>|undefined,enteredPolicy:(()=>void)|undefined;
+    let host!:ApiDenseHost;
+    const policy=new ProcessingPolicyHost<'embedding'>(()=>selected,()=>f.engine,()=>({
+      config,profile:admitted?{profileId:'synthetic-embedding',admissionId:'fixture',role:'embedding',
+        configDigest:configDigest('embedding',config),adapter:'synthetic-adapter',classification:'external'}:null,
+      adapter:'synthetic-adapter',policyRevision:revision,configRevision:'c1',restrictions:[],materials:[],complete:true
+    }),'embedding',input=>host.resolvedPolicyScope(input));
+    const wrapped={current:policy.current.bind(policy),evaluate:async(...args:Parameters<typeof policy.evaluate>)=>{
+      if(holdPolicy){enteredPolicy?.();await holdPolicy;}
+      return policy.evaluate(...args);
+    }};
+    const policyPort={selected:()=>selected,policy:wrapped,credentials:credential,gate,admit:()=>search.embeddingAdmissionAvailable()};
+    const evidencePort={config:()=>config,scopeId:()=>rootId,
+      verify:async(hit:EvidenceHit)=>{verifySpan(hit,await readFile(join(f.vault,hit.sourceId)));}};
+    const search=new SearchController(async()=>{},undefined,undefined,evidencePort,evidencePort,undefined,undefined,
+      undefined,undefined,credential,gate);
+    search.attach(f.engine);
+    host=new ApiDenseHost(f.engine,f.vault,rootId,'oks-synthetic-evidence',
+      {config:()=>config,enabled:()=>true,allowedPath:()=>true,admitStorage:async()=>{}},Date.now,
+      policyPort);
+    const ui=new DenseUiController({host:()=>host,revokeNavigation:()=>{},navigate:async()=>{}});
+    const owner=Symbol(),rebuild={kind:'rebuild' as const,paths:['a.md','b.md'],space};
+    const query={kind:'search' as const,paths:['a.md','b.md'],space,request:request('common','hybrid')};
+    const prepare=(op:typeof rebuild|typeof query=rebuild)=>host.prepareWithCredential(op,'synthetic',token);
+    try{
+      assert.equal((await search.search(uiRequest('common',1))).ok,true);
+      const before=f.calls();
+      await assert.rejects(host.prepare(rebuild),{message:'NOT_READY'});
+      admitted=false;await assert.rejects(prepare(),{message:'DISCLOSURE_DENIED'});admitted=true;
+      assert.equal(credential.exclusiveBusy,false);assert.equal(f.calls(),before);
+      const g=search.prepareGeneration(token);
+      await assert.rejects(prepare(),{message:'BUSY'});search.cancelGeneration();
+      assert.equal(f.calls(),before);assert.ok(g.credentialStamp);
+      let p=await prepare();
+      assert.equal(p.policyBindings?.length,2);assert.equal(credential.exclusiveBusy,true);
+      assert.equal(f.calls(),before);assert.ok(!JSON.stringify(p).includes(token));
+      assert.throws(()=>search.prepareGeneration(token),{message:'BUSY'});
+      assert.throws(()=>search.prepareRerank(),{message:'BUSY'});
+      const session=search.openRetainedChatSession();
+      const scoped=search.startRetainedChatTurn(session,{mode:'selected',kind:'files',sourceIds:['a.md']},
+        {requestId:'scope',query:'common',limit:5,matchMode:'terms'});
+      assert.deepEqual(await scoped.result,{apiVersion:1,ok:false,error:'BUSY'});
+      search.closeRetainedChatSession(session);
+      await assert.rejects(host.confirm(p,'synthetic','replacement-token'),{message:'DISCLOSURE_DENIED'});
+      assert.equal(credential.exclusiveBusy,false);
+      p=await prepare();revision='p2';
+      assert.equal(host.isPreviewCurrent(p),false);assert.equal(credential.exclusiveBusy,false);
+      await assert.rejects(host.confirm(p,'synthetic',''),{message:'DISCLOSURE_DENIED'});assert.equal(f.calls(),before);
+      await ui.prepare(owner,rebuild,undefined,{classification:'synthetic',token});
+      const state=ui.snapshot(owner);assert.equal(state.phase,'preview');
+      revision='p3';assert.equal(ui.snapshot(owner).phase,'idle');assert.equal(credential.exclusiveBusy,false);
+      let entered!:()=>void,release!:()=>void;
+      holdPolicy=new Promise<void>(resolve=>release=resolve);
+      const started=new Promise<void>(resolve=>entered=resolve);enteredPolicy=entered;
+      const pending=prepare();const cancelled=assert.rejects(pending,{message:'CANCELLED'});
+      await started;host.invalidate();await cancelled;
+      assert.equal(credential.exclusiveBusy,true);assert.equal(gate.busy,true);
+      assert.throws(()=>search.prepareGeneration(token),{message:'BUSY'});
+      assert.throws(()=>search.prepareRerank(),{message:'BUSY'});
+      await assert.rejects(prepare(),{message:'BUSY'});
+      release();await gate.drain();holdPolicy=undefined;enteredPolicy=undefined;
+      assert.equal(credential.exclusiveBusy,false);assert.equal(f.calls(),before);
+      p=await prepare();policyPort.policy={...wrapped};
+      assert.equal(host.isPreviewCurrent(p),false);assert.equal(credential.exclusiveBusy,false);
+      policyPort.policy=wrapped;
+      let changed=false,seen=false,staleObserved=false;
+      const unsubscribe1=ui.subscribe(()=>{
+        if(!changed&&ui.snapshot(owner).phase==='preview'){changed=true;revision='observer-revocation';}
+      });
+      const unsubscribe2=ui.subscribe(()=>{if(changed){seen=true;staleObserved ||= credential.exclusiveBusy;}});
+      await ui.prepare(owner,rebuild,undefined,{classification:'synthetic',token});
+      unsubscribe1();unsubscribe2();assert.equal(changed,true);assert.equal(seen,true);assert.equal(staleObserved,false);
+      assert.equal(ui.snapshot(owner).phase,'idle');assert.equal(f.calls(),before);
+      p=await prepare();const built=await host.confirm(p,'synthetic','');
+      assert.equal(built.status,'ok');assert.equal(f.calls(),before+2);assert.equal(credential.exclusiveBusy,false);
+      assert.equal(host.isResultCurrent(built),true);
+      assert.deepEqual(f.wireRequests().slice(-2).map(x=>x.texts),[['common alpha storage'],['common beta archive']]);
+      p=await prepare(query);const retrieved=await host.confirm(p,'synthetic','');
+      assert.equal(retrieved.status,'ok');assert.deepEqual(f.wireRequests().at(-1)?.texts,['common']);
+      const prior=f.calls();
+      p=await prepare();f.onRequest(()=>{revision='p4';});
+      const failed=await host.confirm(p,'synthetic','');
+      assert.equal(failed.status,'failed');assert.equal(f.calls(),prior+1);f.onRequest(()=>{});
+      assert.equal(credential.exclusiveBusy,false);
+      p=await prepare();selected=false;assert.equal(host.isPreviewCurrent(p),false);selected=true;
+      assert.equal(credential.exclusiveBusy,false);
+      await writeFile(join(f.vault,'b.md'),'---\nllm_processing: private\n---\ncommon beta archive\n');
+      f.engine.reconcile();await f.engine.whenIdle();
+      const noWire=f.calls();
+      await assert.rejects(prepare(),{message:'DISCLOSURE_DENIED'});
+      await assert.rejects(prepare(query),{message:'DISCLOSURE_DENIED'});
+      assert.equal(f.calls(),noWire);assert.equal(credential.exclusiveBusy,false);
+    }finally{ui.dispose();await host.close();search.dispose();}
   });
 });

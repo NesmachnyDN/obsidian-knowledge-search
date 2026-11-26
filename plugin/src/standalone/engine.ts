@@ -198,6 +198,7 @@ export class StandaloneEngine {
       return envelope;
     });
   }
+  processingPolicyDrain():Promise<void>{return (this.policyRead??Promise.resolve()).then(()=>{},()=>{});}
   private async run(): Promise<void> {
     const revision = this.revision;
     const full = this.all || !this.generation;

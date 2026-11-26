@@ -10,6 +10,7 @@ import { POLICY_VERSION, type PolicySnapshot, type TrustedProfile, type Restrict
 import { decideNewMaterialMarking, validNewMaterialRuleConfig, type MaterialLifecycle, type TrustedImportProvenance,
   type NewMaterialRuleConfig } from './new-material-policy';
 
+type PolicyEngine=Pick<StandaloneEngine,'evaluateProcessingPolicy'>&Partial<Pick<StandaloneEngine,'processingPolicyDrain'>>;
 export type PolicyMaterial=Readonly<{lifecycle:MaterialLifecycle;provenance:TrustedImportProvenance|null}>;
 export type GenerationPolicyHostState=Readonly<{
   config:ProviderConfig;profile:TrustedProfile|null;adapter:string;policyRevision:string;configRevision:string;
@@ -20,13 +21,13 @@ export type GenerationPolicyHostState=Readonly<{
  * endpoint convention, UI label, or this module. */
 export class ProcessingPolicyHost<R extends AiRole> implements ProcessingPolicyPort<R>{
   constructor(readonly selected:()=>boolean,
-    private readonly engine:()=>Pick<StandaloneEngine,'evaluateProcessingPolicy'>|undefined,
+    private readonly engine:()=>PolicyEngine|undefined,
     private readonly state:(input:ProcessingPolicyInput<R>)=>GenerationPolicyHostState|null,
     private readonly role:R,
-    private readonly resolvedEmbeddingScope?:()=>EmbeddingPolicyScope|null){}
+    private readonly resolvedEmbeddingScope?:(input:ProcessingPolicyInput<'embedding'>)=>EmbeddingPolicyScope|null){}
   private readState(input:ProcessingPolicyInput<R>):GenerationPolicyHostState|null{
     if(input.role!==this.role)return null;
-    if(this.role==='embedding'&&!matchesEmbeddingPolicyScope(input as ProcessingPolicyInput<'embedding'>,this.resolvedEmbeddingScope?.()??null))return null;
+    if(this.role==='embedding'&&!matchesEmbeddingPolicyScope(input as ProcessingPolicyInput<'embedding'>,this.resolvedEmbeddingScope?.(input as ProcessingPolicyInput<'embedding'>)??null))return null;
     const originals=policyOriginals(input),value=this.state(input);
     if(!value||!value.complete||configDigest(this.role,value.config)!==configDigest(this.role,input.config)
       ||!Array.isArray(value.materials)||value.materials.length>originals.length
@@ -35,7 +36,7 @@ export class ProcessingPolicyHost<R extends AiRole> implements ProcessingPolicyP
       const m=value.materials[i]?.lifecycle;
       return !m||m.sourceId!==x.sourceId||m.sha256!==x.sourceSha256||m.rootId!==input.scopeId;
     })))return null;
-    if(this.role==='embedding'&&!matchesEmbeddingPolicyScope(input as ProcessingPolicyInput<'embedding'>,this.resolvedEmbeddingScope?.()??null))return null;
+    if(this.role==='embedding'&&!matchesEmbeddingPolicyScope(input as ProcessingPolicyInput<'embedding'>,this.resolvedEmbeddingScope?.(input as ProcessingPolicyInput<'embedding'>)??null))return null;
     return structuredClone(value);
   }
   private snapshot(input:ProcessingPolicyInput<R>,value:GenerationPolicyHostState):PolicySnapshot{
@@ -70,20 +71,24 @@ export class ProcessingPolicyHost<R extends AiRole> implements ProcessingPolicyP
         proof,lifecycle:material.lifecycle,provenance:material.provenance});
       return result.complete&&!result.externalBlocked;
     };
-    const envelope=await engine.evaluateProcessingPolicy({snapshot,current:live,marking},context);
+    const evaluation=engine.evaluateProcessingPolicy({snapshot,current:live,marking},context);
+    const physical=engine.processingPolicyDrain?.();
+    try{
+    const envelope=await evaluation;
     if(envelope.allowed){
       const value=snapshot();
       if(!value||!live()||hash(JSON.stringify([POLICY_VERSION,input.scopeId,value]))!==envelope.bindingDigest)
         throw new ProviderFailure('CANCELLED');
     }
     return envelope;
+    }finally{await physical;}
   }
 }
 export class GenerationPolicyHost extends ProcessingPolicyHost<'generation'> implements GenerationPolicyPort {
-  constructor(selected:()=>boolean,engine:()=>Pick<StandaloneEngine,'evaluateProcessingPolicy'>|undefined,
+  constructor(selected:()=>boolean,engine:()=>PolicyEngine|undefined,
     state:(input:GenerationPolicyInput)=>GenerationPolicyHostState|null){super(selected,engine,state,'generation');}
 }
 export class RerankPolicyHost extends ProcessingPolicyHost<'reranking'> implements RerankPolicyPort {
-  constructor(selected:()=>boolean,engine:()=>Pick<StandaloneEngine,'evaluateProcessingPolicy'>|undefined,
+  constructor(selected:()=>boolean,engine:()=>PolicyEngine|undefined,
     state:(input:RerankPolicyInput)=>GenerationPolicyHostState|null){super(selected,engine,state,'reranking');}
 }
