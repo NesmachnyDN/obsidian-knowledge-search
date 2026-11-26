@@ -1,0 +1,156 @@
+import { BOUNDS, hash, isDigest, validPath } from '../standalone/contracts';
+import type { SourceProvider } from '../standalone/source';
+import type { PolicyMetadataParser } from '../standalone/worker';
+import type { PolicyMetadataState } from '../standalone/shared';
+import { AI_ROLES, type AiRole, type ProviderConfig } from './contracts';
+import { configDigest } from './disclosure';
+
+/** Prospective eligibility only. This module cannot mint consent or perform I/O to a provider. */
+export const POLICY_VERSION = 'oks-policy-1b';
+export type ProfileClass = 'external' | 'trusted-internal';
+export type PolicyReason = 'eligible' | 'private' | 'invalid-property' | 'metadata-unresolved'
+  | 'source-stale' | 'source-unresolved' | 'cancelled' | 'profile-unadmitted'
+  | 'profile-mismatch' | 'restricted' | 'ownership-unresolved' | 'lineage-unresolved' | 'authority-changed';
+export type TrustedProfile = Readonly<{
+  profileId: string; admissionId: string; role: AiRole; configDigest: string;
+  adapter: string; classification: ProfileClass;
+}>;
+export type PolicySubject = Readonly<{
+  sourceId: string; expectedSha256: string; kind: 'original' | 'attachment' | 'derivative';
+  ownerIds: readonly string[]; parentSourceIds?: readonly string[];
+}>;
+export type Restriction = Readonly<{ scope: 'all' | 'external' | 'internal'; sourceId?: string; ownerId?: string }>;
+/** All fields are supplied by a trusted host port, not UI, Properties, or machine input.
+ * The port must resolve current admission, rule evaluation, scope and lineage independently. */
+export type PolicySnapshot = Readonly<{
+  subjects: readonly PolicySubject[]; profile: TrustedProfile | null; role: AiRole;
+  config: ProviderConfig; adapter: string; ownerId: string; hostId: string; scopeId: string;
+  policyRevision: string; configRevision: string; credentialEpoch: number; deadlineUnixMs: number;
+  payloadDigest: string; restrictions: readonly Restriction[]; evaluationComplete: boolean;
+}>;
+export type PolicyHost = Readonly<{ snapshot(): PolicySnapshot | null; current(): boolean }>;
+export type PolicyEnvelope = Readonly<{
+  policyVersion: typeof POLICY_VERSION; allowed: boolean; reason: PolicyReason;
+  bindingDigest: string | null; rootId: string;
+  sourceVersions: readonly Readonly<{sourceId:string;sha256:string;metadataState:PolicyMetadataState;reason:PolicyReason}>[];
+}>;
+const identifier = (v: unknown): v is string => typeof v === 'string' && v.length > 0
+  && Buffer.byteLength(v) <= 256 && Buffer.from(v,'utf8').toString('utf8')===v && !/[\0\r\n]/.test(v);
+const unique = (xs: readonly unknown[]): boolean => new Set(xs).size === xs.length;
+function freeze<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const item of Object.values(value as Record<string, unknown>)) freeze(item);
+    Object.freeze(value);
+  }
+  return value;
+}
+const exact=(v:object,required:readonly string[],optional:readonly string[]=[]):boolean=>
+  required.every(k=>Object.hasOwn(v,k))&&Object.keys(v).every(k=>required.includes(k)||optional.includes(k));
+function validSnapshot(s: PolicySnapshot): boolean {
+  return exact(s,['subjects','profile','role','config','adapter','ownerId','hostId','scopeId','policyRevision','configRevision','credentialEpoch','deadlineUnixMs','payloadDigest','restrictions','evaluationComplete'])
+    && (s.profile===null||exact(s.profile,['profileId','admissionId','role','configDigest','adapter','classification']))
+    && AI_ROLES.includes(s.role) && identifier(s.adapter) && identifier(s.ownerId)
+    && identifier(s.hostId) && isDigest(s.scopeId) && identifier(s.policyRevision)
+    && identifier(s.configRevision) && isDigest(s.payloadDigest)
+    && Number.isSafeInteger(s.credentialEpoch) && s.credentialEpoch > 0
+    && Number.isSafeInteger(s.deadlineUnixMs) && s.deadlineUnixMs > Date.now()
+    && s.evaluationComplete === true && Array.isArray(s.subjects) && s.subjects.length > 0
+    && s.subjects.length <= BOUNDS.limit && unique(s.subjects.map(x=>x.sourceId))
+    && s.subjects.every(x=>exact(x,['sourceId','expectedSha256','kind','ownerIds'],['parentSourceIds'])&&identifier(x.sourceId) && isDigest(x.expectedSha256)
+      && ['original','attachment','derivative'].includes(x.kind) && Array.isArray(x.ownerIds)
+      && x.ownerIds.length > 0 && x.ownerIds.length <= BOUNDS.limit && x.ownerIds.every(validPath)
+      && unique(x.ownerIds) && (x.parentSourceIds === undefined || (Array.isArray(x.parentSourceIds)
+        && x.parentSourceIds.length <= BOUNDS.limit && x.parentSourceIds.every(validPath) && unique(x.parentSourceIds))))
+    && Array.isArray(s.restrictions) && s.restrictions.length <= BOUNDS.sources
+    && s.restrictions.every(r=>exact(r,['scope'],['sourceId','ownerId'])&&['all','external','internal'].includes(r.scope)
+      && (r.sourceId===undefined || identifier(r.sourceId)) && (r.ownerId===undefined || validPath(r.ownerId)));
+}
+function profileReason(s: PolicySnapshot): PolicyReason | null {
+  const p=s.profile;
+  if (!p || !identifier(p.profileId) || !identifier(p.admissionId)
+    || !['external','trusted-internal'].includes(p.classification)) return 'profile-unadmitted';
+  if (p.role!==s.role || p.adapter!==s.adapter || p.configDigest!==configDigest(s.role,s.config)) return 'profile-mismatch';
+  return null;
+}
+function restricts(s: PolicySnapshot, x: PolicySubject): boolean {
+  const internal=s.profile?.classification==='trusted-internal';
+  return s.restrictions.some(r=>(r.scope==='all'||r.scope===(internal?'internal':'external'))
+    && (r.sourceId===undefined||r.sourceId===x.sourceId)
+    && (r.ownerId===undefined||x.ownerIds.includes(r.ownerId)));
+}
+/** Existing host supplies the live authority port. No production callers or
+ * profile registry are introduced in POLICY.1b. Results are not capabilities. */
+export class EligibilityEvaluator {
+  constructor(private readonly reader: SourceProvider, private readonly parser: PolicyMetadataParser,
+    private readonly host: PolicyHost) {}
+  async evaluate(signal:AbortSignal):Promise<PolicyEnvelope> {
+    const versions:{sourceId:string;sha256:string;metadataState:PolicyMetadataState;reason:PolicyReason}[]=[];
+    const rootId=this.reader.rootId;
+    let bindingDigest:string|null=null;
+    const done=(reason:PolicyReason):PolicyEnvelope=>freeze({policyVersion:POLICY_VERSION,
+      allowed:reason==='eligible',reason,bindingDigest,rootId,sourceVersions:versions.map(x=>({...x}))});
+    const failure=():PolicyReason=>signal.aborted?'cancelled':'authority-changed';
+    let s:PolicySnapshot;
+    try {
+      if(signal.aborted||!this.host.current())return done(failure());
+      const value=this.host.snapshot();
+      if(!value||!isDigest(rootId)||!validSnapshot(value))return done('source-unresolved');
+      s=structuredClone(value);
+      if(!validSnapshot(s))return done('source-unresolved');
+      const p=profileReason(s); if(p)return done(p);
+      bindingDigest=hash(JSON.stringify([POLICY_VERSION,rootId,s]));
+    }catch{return done('source-unresolved');}
+    const current=():boolean=>{
+      if(signal.aborted||Date.now()>=s.deadlineUnixMs||this.reader.rootId!==rootId)return false;
+      try {
+        if(!this.host.current())return false;
+        const value=this.host.snapshot();
+        return !!value&&validSnapshot(value)&&hash(JSON.stringify([POLICY_VERSION,rootId,value]))===bindingDigest
+          &&this.host.current()&&!signal.aborted&&Date.now()<s.deadlineUnixMs;
+      }catch{return false;}
+    };
+    if(!current())return done(failure());
+    const notes=s.subjects.filter(x=>x.kind==='original');
+    const known=new Set(notes.map(x=>x.sourceId));
+    for(const x of s.subjects){
+      if(!current())return done(failure());
+      if(restricts(s,x))return done('restricted');
+      // Attachment bytes/extraction and verified ownership have no admitted path
+      // in this slice. Never use a caller-provided label or owner as a substitute.
+      if(x.kind==='attachment')return done('ownership-unresolved');
+      if(x.kind==='derivative'){
+        if(!x.parentSourceIds?.length||!x.parentSourceIds.every(id=>known.has(id))
+          ||!x.ownerIds.every(id=>known.has(id))||x.parentSourceIds.length!==x.ownerIds.length||!x.parentSourceIds.every(id=>x.ownerIds.includes(id)))
+          return done('lineage-unresolved');
+      }else if(!validPath(x.sourceId)||x.ownerIds.length!==1||x.ownerIds[0]!==x.sourceId||x.parentSourceIds?.length)
+        return done('ownership-unresolved');
+    }
+    if(!notes.length)return done('lineage-unresolved');
+    for(const x of notes){
+      try{
+        if(!current())return done(failure());
+        const bytes=await this.reader.read(x.sourceId);
+        if(!current())return done(failure());
+        if(bytes.byteLength>BOUNDS.fileBytes||hash(bytes)!==x.expectedSha256)return done('source-stale');
+        const doc=await this.parser.policyMetadata(x.sourceId,bytes,rootId);
+        if(!current())return done(failure());
+        if(doc.sha256!==x.expectedSha256||doc.sourceId!==x.sourceId||doc.scopeId!==rootId)return done('source-stale');
+        const reason:PolicyReason=doc.state==='absent'||doc.state==='external'?'eligible':doc.state==='private'?'private':doc.state==='invalid'?'invalid-property':'metadata-unresolved';
+        versions.push({sourceId:x.sourceId,sha256:x.expectedSha256,metadataState:doc.state,reason});
+        if(reason==='metadata-unresolved'||(s.profile!.classification==='external'&&reason!=='eligible'))return done(reason);
+      }catch{return done(current()?'source-unresolved':failure());}
+    }
+    // Repeat every original read after all parsing; an earlier note may have
+    // changed while a later one was being parsed. Existing host retirement is
+    // still required to cover events after this check and before use.
+    for(const x of notes){
+      try{
+        if(!current())return done(failure());
+        const bytes=await this.reader.read(x.sourceId);
+        if(!current())return done(failure());
+        if(bytes.byteLength>BOUNDS.fileBytes||hash(bytes)!==x.expectedSha256)return done('source-stale');
+      }catch{return done(current()?'source-unresolved':failure());}
+    }
+    return done(current()?'eligible':failure());
+  }
+}
