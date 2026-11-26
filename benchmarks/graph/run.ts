@@ -98,6 +98,7 @@ try{
   try{
     const projectionMs:number[]=[];let projectionBytes=0,edgeReport:ReturnType<typeof countMatches>|undefined;
     const expected=corpus.expectedEdges.slice(0,count===128?corpus.baseEdgeCount:undefined).map(edgeKey);
+    const expectedSet=new Set(expected);
     for(let i=0;i<5;i++){
       now=performance.now();const p=await deriveGraphProjection(gen,corpus.mapping);projectionMs.push(performance.now()-now);
       assert.ok(!('code' in p),JSON.stringify(p));projectionBytes=Buffer.byteLength(JSON.stringify(p));
@@ -116,16 +117,22 @@ try{
         const t=performance.now(),r=await engine!.search({protocolVersion:PROTOCOL,requestId:q.id,query:q.query,requestedMode:'lexical',matchMode:'literal',limit:10});
         const ms=performance.now()-t;assert.equal(r.status,'ok');assert.equal(r.executedMode,'lexical');assert.equal(r.staleSourceCount,0);
         for(const h of r.hits)original(h.sourceId,h.sourceSha256,h.sourceLocators[0]!,h.originalExcerpt);
-        return {ranked:unique(r.hits.map(h=>h.sourceId)),ms};
+        return {ranked:unique(r.hits.map(h=>h.sourceId)),rawRanks:r.hits.map(h=>({source:h.sourceId,rank:h.rank,line:h.sourceLocators[0]!.lineStart})),ms};
       };
       const graph=async()=>{
         const t=performance.now(),r=await engine!.retrieveLocalGraph(graphRequest(q),signal),ms=performance.now()-t;
         assert.equal(r.executedMode,'graph');assert.equal(r.omittedByTopK,0);
         for(const c of r.candidates){original(c.sourceId,c.sourceSha256,c.locator,c.excerpt);
-          for(const p of c.path)for(const a of p.anchorEvidence)original(a.sourceId,a.sourceSha256,a.locator,a.excerpt);}
+          for(const p of c.path){
+            const label=edgeLabel(p.edge);assert.ok(expectedSet.has(edgeKey(label)),'PATH_EDGE_NOT_IN_FROZEN_ORACLE');
+            assert.deepEqual(p.anchorEvidence.map(a=>a.excerpt),label.anchors);
+            assert.deepEqual(p.anchorEvidence.map(a=>[a.sourceId,a.sourceSha256,a.blockId,a.locator]),
+              p.edge.anchors.map(a=>[a.sourceId,a.sourceSha256,a.blockId,a.locator]));
+            for(const a of p.anchorEvidence)original(a.sourceId,a.sourceSha256,a.locator,a.excerpt);
+          }}
         const actual=r.candidates.filter(c=>c.kind==='expanded').map(c=>pathKey({source:c.sourceId,
           steps:c.path.map(s=>({author:s.edge.author,from:s.edge.from,to:s.edge.to,relationId:s.edge.relationId,traversal:s.traversal}))}));
-        return {ranked:r.candidates.map(c=>c.sourceId),ms,paths:countMatches(actual,q.expectedPaths.map(pathKey))};
+        return {ranked:r.candidates.map(c=>c.sourceId),rawRanks:r.candidates.map(c=>({source:c.sourceId,rank:c.rank,lexicalRank:c.lexicalRank,seedLexicalRank:c.seedLexicalRank,line:c.locator.lineStart})),ms,paths:countMatches(actual,q.expectedPaths.map(pathKey)),actualPaths:actual};
       };
       const a=i%2?await graph():await lexical(),b=i%2?await lexical():await graph();
       const l=i%2?b:a,g=(i%2?a:b) as Awaited<ReturnType<typeof graph>>;
@@ -142,8 +149,9 @@ try{
     const required=summarize('graph-required'),ordinary=summarize('ordinary');
     const addedP95Ms=percentile(rows.map(r=>r.addedMs),.95);
     const projectionP95Ms=percentile(projectionMs,.95);
-    const rssPeakDelta=Math.max(0,sampledPeak-beforeRss,process.resourceUsage().maxRSS*1024-beforePeak);
-    const cpu=process.cpuUsage(cpuStart);
+    sample();const querySampledPeak=sampledPeak,queryHighWater=process.resourceUsage().maxRSS*1024;
+    const rssPeakDelta=Math.max(0,querySampledPeak-beforeRss,queryHighWater-beforePeak);
+    const cpu=process.cpuUsage(cpuStart),queryIo={...io};
     const graphDiskBytes=(await stat(join(store.dir,'gen-'+gen.generationId+'.json'))).size-indexBytes;
     const eventLoopP95Ms=lag.percentile(95)/1e6;
     const allExact=rows.every(r=>r.lexical.exact&&r.graph.exact);
@@ -183,6 +191,7 @@ try{
     await engine.close();engine=makeEngine();now=performance.now();await engine.start();await engine.whenIdle();const restartMs=performance.now()-now;
     engine.configureGraph(corpus.mapping);const restarted=await engine.retrieveLocalGraph(graphRequest(q0),signal);
     lifecycle.restart=restarted.candidates.map(c=>c.sourceId).join()===cold.candidates.map(c=>c.sourceId).join();
+    sample();const lifecycleHighWater=process.resourceUsage().maxRSS*1024;
     const gates={requiredRecall:required.delta.recall>=.10,requiredNdcg:required.delta.ndcg>=0,
       ordinaryNdcg:ordinary.delta.ndcg>=-.02,ordinaryMrr:ordinary.delta.mrr>=-.02,exactId:allExact,
       paths:pathsExact,edges:edgeReport?.precision===1&&edgeReport?.recall===1,locators:invalidLocators===0,
@@ -193,8 +202,11 @@ try{
       required,ordinary,rows,edgeReport,locatorCount,invalidLocators,lifecycle,gates,
       resources:{buildMs,coldMs,restartMs,projectionMs,projectionP95Ms,projectionBytes,addedP95Ms,
         lexicalP95Ms:percentile(rows.map(r=>r.lexical.ms),.95),graphP95Ms:percentile(rows.map(r=>r.graph.ms),.95),
-        rssPeakDelta,beforeRss,sampledPeak,beforePeak,cpuUserMs:cpu.user/1000,cpuSystemMs:cpu.system/1000,indexBytes,graphDiskBytes,
-        eventLoopP95Ms,io:Object.fromEntries(Object.entries(io).map(([k,v])=>[k,v-ioStart[k as keyof typeof ioStart]]))},
+        rssPeakDelta,beforeRss,beforePeak,querySampledPeak,queryHighWater,lifecycleSampledPeak:sampledPeak,lifecycleHighWater,
+        lifecyclePeakDeltaFromInitial:Math.max(0,sampledPeak-beforeRss,lifecycleHighWater-beforePeak),
+        cpuUserMs:cpu.user/1000,cpuSystemMs:cpu.system/1000,indexBytes,graphDiskBytes,
+        eventLoopP95Ms,io:Object.fromEntries(Object.entries(queryIo).map(([k,v])=>[k,v-ioStart[k as keyof typeof ioStart]])),
+        lifecycleIo:Object.fromEntries(Object.entries(io).map(([k,v])=>[k,v-queryIo[k as keyof typeof queryIo]]))},
       providerProfiles:'NOT RUN: no provider admitted; deterministic local graph only',providerRequests:0,
       limitations:['Node worker-backed filesystem integration, not actual UI responsiveness','Exact identifier synthetic corpus; not semantic quality or production representativeness','No independent graph-to-AI profile admitted']};
   }finally{clearInterval(timer);}

@@ -41,8 +41,15 @@ if [[ "${OKS_06B_GRAPH_TEST:-0}" == 1 ]]; then
      "${OKS_06UX_L10N_RU_TEST:-0}" == 0 ]] ||
     { echo "HOST_SMOKE_FAILURE: graph requires isolated verified package and separate mode" >&2; exit 2; }
 fi
+if [[ "${OKS_06B4_HOST_TEST:-0}" == 1 && "${OKS_06B_GRAPH_TEST:-0}" != 1 ]]; then
+  echo "HOST_SMOKE_FAILURE: graph stress requires isolated graph mode" >&2; exit 2
+fi
 tmp="$(mktemp -d /tmp/oks-native-host-XXXXXXXX)"
 trap 'rm -rf -- "$tmp"' EXIT
+if [[ "${OKS_06B4_HOST_TEST:-0}" == 1 ]]; then
+  cp "$repo/benchmarks/graph/v1/corpus.json" "$tmp/graph-corpus.json"
+  cp "$repo/benchmarks/graph/v1/manifest.json" "$tmp/graph-manifest.json"
+fi
 ulimit -c 0
 export XDG_CONFIG_HOME="$tmp/home/.config" XDG_DATA_HOME="$tmp/home/.local/share" XDG_CACHE_HOME="$tmp/home/.cache"
 mkdir -p "$XDG_CONFIG_HOME/obsidian" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$tmp/electron" "$tmp/vault/.obsidian/plugins/oks-synthetic-evidence"
@@ -331,6 +338,12 @@ env HOME="$tmp/home" timeout "${OKS_HOST_TIMEOUT_SECONDS:-180}"s "${host_isolati
     [[ "$graph" == *"OBSIDIAN_GRAPH_HOST_PASS:"* ]] ||
       { echo "HOST_SMOKE_FAILURE: graph after reload ($graph)" >&2; exit 1; }
     printf "%s\n" "$graph"
+  fi
+  if [[ "${OKS_06B4_HOST_TEST:-0}" == 1 ]]; then
+    stress="$(timeout 120s "$cli" eval "code=$(cat "$repo/scripts/obsidian-graph-stress-smoke.js")")"
+    [[ "$stress" == *"OBSIDIAN_GRAPH_STRESS_PASS:"* ]] ||
+      { echo "HOST_SMOKE_FAILURE: graph stress ($stress)" >&2; exit 1; }
+    printf "%s\n" "$stress"
   fi
   if [[ "${OKS_06UX_TEST:-0}" == 1 ]]; then
     settings_ux="$(timeout 45s "$cli" eval "code=$(cat "$repo/scripts/obsidian-settings-ux-smoke.js")")"
