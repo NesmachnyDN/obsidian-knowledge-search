@@ -8,7 +8,8 @@ import { containsLocator, verifyOriginalRange } from './selection-range';
 import { freezeScope, parseScopeSelector, resolveScope, type ScopedSearch, type ScopeSnapshot } from './chat-scope';
 import { metadataAnchor } from './metadata';
 import { verifySpan } from '../search/navigation';
-import type { MarkdownParser } from './worker';
+import type { MarkdownParser, PolicyMetadataParser } from './worker';
+import type { PolicyMetadataProof } from './shared';
 import type { SourceProvider } from './source';
 import type { GenerationStore } from './storage';
 
@@ -42,6 +43,7 @@ export class StandaloneEngine {
   private state: EngineState = { status: 'unavailable', generationId: null, sources: 0, records: 0,
     error: null, maintenanceWarning: null, busy: false };
   private work: Promise<void> | null = null;
+  private policyRead: Promise<PolicyMetadataProof> | null = null;
   private pending = new Set<string>();
   private all = false;
   private revision = 0;
@@ -130,7 +132,7 @@ export class StandaloneEngine {
     this.reconcile();
   }
   private schedule(): void {
-    if (!this.initialized || this.stopped || this.paused || this.work) return;
+    if (!this.initialized || this.stopped || this.paused || this.work || this.policyRead) return;
     this.work = this.run().catch(error => {
       this.recordState(this.generation ? 'degraded' : 'failed', code(error));
     }).finally(() => {
@@ -141,7 +143,36 @@ export class StandaloneEngine {
     this.state.busy = true;
   }
   async whenIdle(): Promise<void> {
-    while (this.work) await this.work;
+    while (this.work||this.policyRead) {
+      if(this.work)await this.work;else await this.policyRead?.catch(()=>{});
+    }
+  }
+  /** Local preview only. Share the existing worker and hold the physical slot
+   * through late read/parser completion; a timeout never publishes a proof. */
+  previewPolicyMetadata(path:string,current:()=>boolean):Promise<PolicyMetadataProof> {
+    const parser=this.parser as MarkdownParser & Partial<PolicyMetadataParser>;
+    if(this.stopped||!this.initialized||this.paused||this.work||this.policyRead||!validPath(path)||!parser.policyMetadata)
+      return Promise.reject(new StandaloneError('PARSER_BUSY'));
+    const revision=this.revision,root=this.provider.rootId;
+    let expired=false;
+    const live=()=>!expired&&!this.stopped&&!this.paused&&this.revision===revision;
+    const check=()=>{if(!live()||!current()||!live())throw new StandaloneError('SOURCE_CHANGED');};
+    const physical=Promise.resolve().then(async()=>{
+      check();const bytes=await this.provider.read(path);check();
+      if(bytes.byteLength>BOUNDS.fileBytes)throw new StandaloneError('SOURCE_LIMIT');
+      const sha=hash(bytes),proof=await parser.policyMetadata!(path,bytes,root);check();
+      if(proof.sourceId!==path||proof.sha256!==sha||proof.scopeId!==root||hash(await this.provider.read(path))!==sha)
+        throw new StandaloneError('SOURCE_CHANGED');
+      check();return proof;
+    });
+    this.policyRead=physical;
+    const drain=()=>{if(this.policyRead===physical){this.policyRead=null;
+      if(!this.stopped&&!this.paused&&(this.all||this.pending.size))this.schedule();}};
+    void physical.then(drain,drain);
+    return new Promise((resolve,reject)=>{
+      const timer=setTimeout(()=>{expired=true;reject(new StandaloneError('PARSER_TIMEOUT'));},5000);
+      physical.then(value=>{clearTimeout(timer);if(!expired){try{check();resolve(value);}catch(error){reject(error);}}},error=>{clearTimeout(timer);reject(error);});
+    });
   }
   private async run(): Promise<void> {
     const revision = this.revision;
@@ -551,6 +582,7 @@ export class StandaloneEngine {
     this.pending.clear(); this.all = false;
     await this.parser.close(); // Interrupt CPU-bound parse immediately on unload.
     if (this.work) await this.work;
+    if(this.policyRead)await this.policyRead.catch(()=>{});
     this.recordState('unavailable', 'LIFECYCLE_INVALID');
   }
 }

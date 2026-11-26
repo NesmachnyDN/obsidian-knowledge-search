@@ -1,6 +1,7 @@
 import { isAbsolute } from 'node:path';
 import { BOUNDS, isRecord, StandaloneError } from '../standalone/contracts';
 import { defaultProviderPreferences, parseProviderPreferences } from '../ai/config';
+import { validNewMaterialRuleConfig, type NewMaterialRuleConfig } from '../ai/new-material-policy';
 import type { ProviderPreferences } from '../ai/contracts';
 import type { ProbeConfig } from '../controller';
 import type { AdvancedConfig } from '../advanced/health';
@@ -11,7 +12,7 @@ export type IngestionConfig = {
 };
 export type SearchSettings = {
   version: 6; presentationMode: 'basic' | 'expert'; ai: ProviderPreferences; enabled: boolean; paused: boolean; topK: number; propertiesEnabled: boolean;
-  advanced: AdvancedConfig; ingestion: IngestionConfig; probe: ProbeConfig;
+  advanced: AdvancedConfig; ingestion: IngestionConfig; probe: ProbeConfig; markingRules?: NewMaterialRuleConfig;
 };
 export const defaultSettings = (): SearchSettings => ({
   version: 6, presentationMode: 'basic', ai: defaultProviderPreferences(), enabled: true, paused: false, topK: 10, propertiesEnabled: false,
@@ -63,7 +64,8 @@ export function parseSettings(v: unknown): SearchSettings {
     return { ...defaultSettings(), probe: { ...old } };
   }
   if (!isRecord(v) || ![2,3,4,5,6].includes(v.version as number)
-      || !keys(v, ['version','presentationMode','enabled','paused','topK','propertiesEnabled','advanced','ingestion','probe','ai'])
+      || !keys(v, ['version','presentationMode','enabled','paused','topK','propertiesEnabled','advanced','ingestion','probe','ai','markingRules'])
+      || (Object.hasOwn(v,'markingRules') && (v.version!==6 || !validNewMaterialRuleConfig(v.markingRules)))
       || (v.version === 6 && v.presentationMode !== 'basic' && v.presentationMode !== 'expert')
       || (v.version !== 6 && v.presentationMode !== undefined)
       || typeof v.enabled !== 'boolean' || typeof v.paused !== 'boolean' || typeof v.propertiesEnabled !== 'boolean'
@@ -85,5 +87,6 @@ export function parseSettings(v: unknown): SearchSettings {
   return { version:6, presentationMode:v.version === 6 && v.presentationMode === 'expert' ? 'expert' : 'basic',
     ai: (v.version as number) >= 5 ? parseProviderPreferences(v.ai) : defaultProviderPreferences(), enabled:v.enabled, paused:v.paused, topK:v.topK as number,
     propertiesEnabled:v.propertiesEnabled, advanced:active,
-    ingestion: { ...ingest }, probe: { ...v.probe } };
+    ingestion: { ...ingest }, probe: { ...v.probe },
+    ...(v.markingRules===undefined?{}:{markingRules:structuredClone(v.markingRules as NewMaterialRuleConfig)}) };
 }

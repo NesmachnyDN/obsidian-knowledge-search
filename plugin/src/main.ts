@@ -1,3 +1,5 @@
+import { NewMaterialTracker } from './ai/new-material-tracker';
+import { decideNewMaterialMarking, type NewMaterialRuleConfig, type NewMaterialDecision } from './ai/new-material-policy';
 import { DenseMachine } from './ai/dense-machine';
 import { DenseUiController } from './ai/dense-ui-controller';
 import { ApiDenseHost } from './ai/dense-host';
@@ -67,6 +69,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private navigator?: SourceNavigator<TFile>;
   private retiringNavigator?: SourceNavigator<TFile>;
   private sourceReader?: BoundedVaultReader;
+  private readonly markingTracker=new NewMaterialTracker<TFile>();
   private denseHost?: ApiDenseHost;
   private denseSettingsChanging = false;
   // Retain the last completely applied runtime configuration until a
@@ -190,7 +193,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
       () => this.searchController.snapshot().response ?? undefined,
       role => role === 'embedding' ? this.denseMachine.pending() ?
         {phase:'permission-required',error:null} : this.denseUi.operationStatus() :
-        this.searchController.evidenceOperationStatus(role)));
+        this.searchController.evidenceOperationStatus(role), config=>this.previewNewMaterial(config)));
     this.addCommand({ id:'ingest-active-advanced-source', name:'Ingest active Vault document (Advanced opt-in)',
       callback: () => { void this.ingestAdvancedActiveFile().catch(error =>
         new Notice('OKS Advanced: '+(error instanceof IngestError?error.code:'ADVANCED_UNAVAILABLE'))); } });
@@ -227,10 +230,13 @@ export default class SyntheticEvidencePlugin extends Plugin {
       }
       this.searchController.invalidateSource(obligations);
     };
-    this.registerEvent(this.app.vault.on('create', file => nativeChange(file)));
+    this.registerEvent(this.app.vault.on('create', file => {
+      if(!this.unloaded&&this.layoutReady&&file instanceof TFile)this.markingTracker.created(file.path,file);
+      nativeChange(file);
+    }));
     this.registerEvent(this.app.vault.on('modify', file => nativeChange(file, undefined, true)));
-    this.registerEvent(this.app.vault.on('delete', file => nativeChange(file, undefined, true)));
-    this.registerEvent(this.app.vault.on('rename', (file, oldPath) => nativeChange(file, oldPath, true)));
+    this.registerEvent(this.app.vault.on('delete', file => {this.markingTracker.invalidate(file.path);nativeChange(file, undefined, true);}));
+    this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {this.markingTracker.invalidate(oldPath);this.markingTracker.invalidate(file.path);nativeChange(file, oldPath, true);}));
     this.registerEvent(this.app.metadataCache.on('changed', file => nativeChange(file)));
     // The renderer remains responsive during Obsidian's initial layout/mount.
     // A full reconciliation covers all source changes before layout readiness.
@@ -238,6 +244,22 @@ export default class SyntheticEvidencePlugin extends Plugin {
       this.layoutReady = true;
       if (!this.unloaded) { void this.initializeStandalone(); void this.initializeAdvanced(); }
     });
+  }
+  /** Explicit, read-only active-note preview, never an admission or a writer. */
+  private async previewNewMaterial(config:NewMaterialRuleConfig):Promise<NewMaterialDecision> {
+    const engine=this.standalone,reader=this.sourceReader,file=this.app.workspace.getActiveFile();
+    if(!engine||!reader||!(file instanceof TFile)||this.unloaded||this.denseSettingsChanging)
+      throw new StandaloneError('SOURCE_REJECTED');
+    const path=file.path,revision=this.searchController.sourceAuthorityRevision();
+    const lifecycle=this.markingTracker.state(path,file);
+    const current=()=>!this.unloaded&&!this.denseSettingsChanging&&this.standalone===engine&&this.sourceReader===reader
+      &&this.searchController.sourceAuthorityCurrent(revision)&&this.app.workspace.getActiveFile()===file
+      &&file.path===path&&this.app.vault.getAbstractFileByPath(path)===file&&this.markingTracker.state(path,file)===lifecycle;
+    if(!current())throw new StandaloneError('SOURCE_CHANGED');
+    const proof=await engine.previewPolicyMetadata(path,current);
+    if(!current())throw new StandaloneError('SOURCE_CHANGED');
+    return decideNewMaterialMarking(config,{sourceId:path,sha256:proof.sha256,rootId:reader.rootId,proof,
+      lifecycle:{state:lifecycle,sourceId:path,sha256:proof.sha256,rootId:reader.rootId},provenance:null});
   }
   async openSearch(): Promise<void> {
     if (this.unloaded) return;
@@ -744,6 +766,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     // Commit one irreversible terminal boundary across all search authorities
     // before any host, abort, view or observer callback is allowed to run.
     this.unloaded = true;
+    this.markingTracker.clear();
     this.lifecycleRevision++;
     this.denseUi.authority.sealTerminal();
     this.searchController.sealTerminal();

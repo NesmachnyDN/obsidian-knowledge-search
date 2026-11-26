@@ -10,6 +10,8 @@ import type { IngestResponse } from '../plugin/src/advanced/protocol';
 import type { ModelReply } from '../plugin/src/advanced/model-protocol';
 import { join, resolve } from 'node:path';
 import { parseMarkdown } from '../plugin/src/standalone/markdown';
+import { parsePolicyMetadata } from '../plugin/src/standalone/markdown-parse';
+import { defaultMarkingRules, type NewMaterialRuleConfig, type NewMaterialDecision } from '../plugin/src/ai/new-material-policy';
 import { SourceNavigator } from '../plugin/src/search/navigation';
 import { uiRequest } from '../plugin/src/search/controller';
 import { hash, type EvidenceHit, type SearchRequest, type SearchResponse } from '../plugin/src/standalone/contracts';
@@ -39,9 +41,9 @@ class SyntheticWorker {
   onmessage?: (event: { data: unknown }) => void; onerror?: () => void; onmessageerror?: () => void;
   terminated = false;
   constructor() { SyntheticWorker.instances.push(this); }
-  postMessage(v: { id: number; path: string; bytes: Uint8Array; rootId: string }): void {
+  postMessage(v: { id: number; path: string; bytes: Uint8Array; rootId: string; kind?: string }): void {
     queueMicrotask(() => { if (!this.terminated) this.onmessage?.({ data: {
-      id: v.id, doc: parseMarkdown(v.path, v.bytes, v.rootId),
+      id: v.id, ...(v.kind==='policy-metadata'?{proof:parsePolicyMetadata(v.path,v.bytes,v.rootId,hash(v.bytes))}:{doc:parseMarkdown(v.path, v.bytes, v.rootId)}),
     } }); });
   }
   terminate(): void { this.terminated = true; }
@@ -2056,4 +2058,29 @@ test('systemic source ledger overflow is terminal-only and Basic reload reconcil
     assert.equal(result.value.hits[0]!.originalExcerpt,'REQ-LIFE-NEW: changed source.');
     assert.equal(c.sharedAuthorityTransition(),true);
   }finally{replacement?.onunload();await f.cleanup();}
+});
+
+test('POLICY.2b native create identity, saved rules, rename and unload guard read-only preview',async()=>{
+  const f=await fixture();
+  const file=Object.assign(new Empty(),{path:'fixture.md'});
+  const events=new Map<string,(file:unknown,oldPath?:string)=>void>();
+  Object.assign(f.plugin.app.vault,{on:(name:string,fn:(file:unknown,oldPath?:string)=>void)=>{events.set(name,fn);return {};},getAbstractFileByPath:()=>file});
+  Object.assign(f.plugin.app.workspace,{getActiveFile:()=>file});
+  const preview=(f.plugin as unknown as {previewNewMaterial(c:NewMaterialRuleConfig):Promise<NewMaterialDecision>}).previewNewMaterial.bind(f.plugin);
+  const rules:NewMaterialRuleConfig={...defaultMarkingRules(),defaultAction:'set-private'};
+  try{
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    const original=await readFile(join(f.vault,file.path));
+    assert.equal((await preview(rules)).reason,'lifecycle-unresolved');
+    await f.plugin.patchSettings(s=>{s.markingRules=rules;});
+    await f.plugin.standalone!.whenIdle();
+    assert.deepEqual(f.plugin.settings.markingRules,rules);
+    events.get('create')!(file);await f.plugin.standalone!.whenIdle();
+    const decision=await preview(rules);
+    assert.equal(decision.action,'set-private');assert.equal(decision.externalBlocked,true);
+    events.get('rename')!(file,'old.md');await f.plugin.standalone!.whenIdle();
+    assert.equal((await preview(rules)).reason,'lifecycle-unresolved');
+    assert.deepEqual(await readFile(join(f.vault,file.path)),original);
+    f.plugin.onunload();await assert.rejects(preview(rules),/SOURCE_REJECTED/);
+  }finally{await f.cleanup();}
 });

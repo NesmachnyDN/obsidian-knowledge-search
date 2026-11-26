@@ -1770,3 +1770,38 @@ test('06H.2-A2a: direct ranged search rejects a readable source removed from cur
     assert.equal(response.status,'failed');assert.equal(response.error,'SOURCE_STALE');assert.deepEqual(response.hits,[]);
   }finally{reader.read=read;await cleanup();}
 });
+
+test('POLICY.2b local preview shares the existing worker, original-byte proof and source revision fence',async()=>{
+  const f=await setup({'note.md':'---\nllm_processing: private\n---\n# synthetic'});
+  try{
+    const path='note.md',before=await readFile(join(f.root,path));
+    const proof=await f.engine.previewPolicyMetadata(path,()=>true);
+    assert.equal(proof.sha256,hash(before));assert.equal(proof.state,'private');
+    await assert.rejects(f.engine.previewPolicyMetadata(path,()=>false),/SOURCE_CHANGED/);
+    let calls=0;
+    await assert.rejects(f.engine.previewPolicyMetadata(path,()=>{if(++calls===2)f.engine.changed(path);return true;}),/SOURCE_CHANGED/);
+    await f.engine.whenIdle();
+    assert.deepEqual(await readFile(join(f.root,path)),before);
+    const response=await f.engine.search(search('synthetic'));
+    assert.equal(response.hits.length>0,true);
+  }finally{await f.cleanup();}
+});
+
+test('POLICY.2b expired preview retains physical slot and cannot publish late proof',async t=>{
+  const f=await setup({'note.md':'# synthetic'});
+  const original=f.reader.read.bind(f.reader);
+  let release!:()=>void,entered!:()=>void;
+  const started=new Promise<void>(r=>entered=r),gate=new Promise<void>(r=>release=r);
+  try{
+    f.reader.read=async path=>{entered();await gate;return original(path);};
+    t.mock.timers.enable({apis:['setTimeout']});
+    const pending=f.engine.previewPolicyMetadata('note.md',()=>true);
+    const expired=assert.rejects(pending,/PARSER_TIMEOUT/);
+    await started;t.mock.timers.tick(5000);await expired;
+    await assert.rejects(f.engine.previewPolicyMetadata('note.md',()=>true),/PARSER_BUSY/);
+    t.mock.timers.reset();release();f.reader.read=original;
+    await f.engine.whenIdle();
+    const proof=await f.engine.previewPolicyMetadata('note.md',()=>true);
+    assert.equal(proof.sha256,hash(Buffer.from('# synthetic')));
+  }finally{t.mock.timers.reset();release();f.reader.read=original;await f.cleanup();}
+});

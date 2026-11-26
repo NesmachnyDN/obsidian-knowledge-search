@@ -1,3 +1,4 @@
+import { defaultMarkingRules, validNewMaterialRuleConfig, MAX_RULE_CONFIG_BYTES, type NewMaterialRuleConfig, type MarkAction, type NewMaterialDecision } from '../ai/new-material-policy';
 import type { AdvancedHealth, AdvancedConfig } from '../advanced/health';
 import type { IngestionStatus } from '../advanced/manager';
 import type { RetrievalStatus } from '../advanced/retrieval-manager';
@@ -33,6 +34,8 @@ const alert = (root: HTMLElement): HTMLElement => {
 /** A task-based view over the one authoritative versioned SearchSettings model. */
 export class SearchSettingsTab extends PluginSettingTab {
   private topKInput?: string;
+  private markingDraft?: {defaultAction:MarkAction;rules:string};
+  private markingViewEpoch=0;
   private advancedInput?: AdvancedConfig;
   private ingestionInput?: IngestionConfig;
   private probeInput?: ProbeConfig;
@@ -53,12 +56,14 @@ export class SearchSettingsTab extends PluginSettingTab {
     private readonly rebuildActive?: () => Promise<void>,
     private readonly searchStatus?: () => SearchStatus,
     private readonly lastBasic?: () => BasicResponse | undefined,
-    private readonly aiOperationStatus?: OperationStatusReader) {
+    private readonly aiOperationStatus?: OperationStatusReader,
+    private readonly previewMarking?: (config:NewMaterialRuleConfig)=>Promise<NewMaterialDecision>) {
     super(app, plugin);
     plugin.register(() => this.hide());
   }
 
   hide(): void {
+    this.markingViewEpoch++;
     this.releaseProviderChecks?.();
     this.releaseProviderChecks = undefined;
   }
@@ -416,6 +421,56 @@ export class SearchSettingsTab extends PluginSettingTab {
     if (restoreRefresh) restoreSettingsFocus(root, 'refresh');
   }
 
+  private showMarkingRules(root:HTMLElement):void {
+    const section=heading(root,'New-material processing rules');
+    section.createEl('p',{text:t('Local dry run only. No note writes or provider authorization. Unknown lifecycle or provenance blocks external processing.')});
+    const saved=this.current().markingRules??defaultMarkingRules();
+    const draft=this.markingDraft??={defaultAction:saved.defaultAction,rules:JSON.stringify(saved.rules,null,2)};
+    const error=alert(section),result=section.createEl('p');
+    result.setAttribute('aria-live','polite');
+    const epoch=this.markingViewEpoch;
+    let draftRevision=0;
+    const changed=()=>{draftRevision++;result.textContent='';};
+    const parsed=():NewMaterialRuleConfig|null=>{
+      try {
+        if(Buffer.byteLength(draft.rules)>MAX_RULE_CONFIG_BYTES)return null;
+        const value={...defaultMarkingRules(),defaultAction:draft.defaultAction,rules:JSON.parse(draft.rules)};
+        return validNewMaterialRuleConfig(value)?value:null;
+      }catch{return null;}
+    };
+    new Setting(section).setName(t('Default marking action')).addDropdown(dropdown=>{
+      dropdown.selectEl.setAttribute('aria-label',t('Default marking action'));
+      return dropdown.addOption('leave-absent',t('Leave absent')).addOption('set-external',t('Set external'))
+        .addOption('set-private',t('Set private')).setValue(draft.defaultAction).onChange(value=>{draft.defaultAction=value as MarkAction;changed();});
+    });
+    new Setting(section).setName(t('Ordered rules (JSON)')).setDesc(t('Conditions: folderSegments, importChannel, type, template, tags, properties. Private overrides external.'))
+      .addTextArea(text=>{
+        text.inputEl.setAttribute('aria-label',t('Ordered rules (JSON)'));
+        text.inputEl.rows=8;text.inputEl.maxLength=MAX_RULE_CONFIG_BYTES;
+        return text.setValue(draft.rules).onChange(value=>{draft.rules=value;changed();});
+      });
+    new Setting(section).setName(t('Local rule actions'))
+      .addButton(button=>button.setButtonText(t('Preview active note')).onClick(async()=>{
+        const config=parsed();if(!config||!this.previewMarking){error.textContent=t('Invalid or unavailable marking rules.');return;}
+        const revision=++draftRevision;error.textContent='';result.textContent=t('Checking local original…');
+        try{
+          const decision=await this.previewMarking(config);
+          if(this.markingViewEpoch!==epoch||draftRevision!==revision)return;
+          result.textContent=f('Action: {action}; reason: {reason}; marking gate blocked: {blocked}.',{
+            action:t(decision.action==='set-private'?'Set private':decision.action==='set-external'?'Set external':'Leave absent'),
+            reason:getLanguage().toLowerCase().startsWith('ru')?t('marking-reason-'+decision.reason):decision.reason,blocked:t(decision.externalBlocked?'yes':'no')});
+        }catch{if(this.markingViewEpoch===epoch&&draftRevision===revision)result.textContent=t('Local preview unavailable.');}
+      }))
+      .addButton(button=>button.setButtonText(t('Save')).onClick(async()=>{
+        const config=parsed();if(!config){error.textContent=t('Invalid or unavailable marking rules.');return;}
+        if(this.markingViewEpoch!==epoch)return;
+        const revision=++draftRevision;result.textContent='';
+        if(await this.commit(settings=>{settings.markingRules=structuredClone(config);},error)
+          &&this.markingViewEpoch===epoch&&draftRevision===revision){this.markingDraft=undefined;this.display();}
+      }))
+      .addButton(button=>button.setButtonText(t('Cancel')).onClick(()=>{if(this.markingViewEpoch!==epoch)return;this.markingDraft=undefined;this.display();}));
+  }
+
   display(focusKey?: string): void {
     this.hide();
     const root = this.containerEl;
@@ -441,6 +496,7 @@ export class SearchSettingsTab extends PluginSettingTab {
     this.releaseProviderChecks = renderProviderSettings(ai, this.app, this.current().ai, this.aiInputs, this.openEditors, expert,
       (role, preference) => this.patchSettings(settings => { settings.ai[role] = preference; }),
       focusKey => this.display(focusKey), this.aiOperationStatus);
+    this.showMarkingRules(root);
     this.showDocuments(root);
     this.showIndex(root);
     if (expert) this.showExpert(root);
