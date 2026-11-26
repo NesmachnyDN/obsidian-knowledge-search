@@ -38,8 +38,12 @@ export function validateLedgerSnapshot(value:unknown,rootId:string):asserts valu
       :!isDigest(value.previous))
     ||!Array.isArray(value.entries)||value.entries.length>BOUNDS.sources)return bad();
   let prior='';
+  // A descriptor identity denotes one regular filesystem object.  A durable
+  // snapshot cannot safely attribute that object to two admitted paths.
+  const identities=new Set<string>();
   for(const entry of value.entries){
     if(!validEntry(entry,rootId,value.baselineAdmitted)||entry.sourceId<=prior)return bad();
+    if('proof' in entry&&(identities.has(entry.proof.stableIdentity)||!identities.add(entry.proof.stableIdentity)))return bad();
     prior=entry.sourceId;
   }
 }

@@ -1,19 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rename, rm, unlink, chmod, symlink, link } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rename, rm, unlink, chmod, symlink, link, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { BoundedVaultReader, privateIndexPath } from '../plugin/src/standalone/source';
 import { BOUNDS, hash } from '../plugin/src/standalone/contracts';
-import { DurableLifecycleLedger } from '../plugin/src/ai/lifecycle-ledger';
+import { DurableLifecycleLedger, LiveTransitionPublicationError, type LiveTransitionDelta } from '../plugin/src/ai/lifecycle-ledger';
 import { canonical } from '../plugin/src/advanced/protocol';
 import type { LedgerEntry } from '../plugin/src/ai/lifecycle-ledger-schema';
 
 const pluginId='oks-ledger-test',error={code:'LIFECYCLE_LEDGER_UNAVAILABLE'};
 async function fixture(action:(f:{root:{path:string;rootId:string};anchor:string;data:string;
-    open:()=>Promise<DurableLifecycleLedger>;entry:(name?:string)=>Promise<LedgerEntry>})=>Promise<void>){
+    open:()=>Promise<DurableLifecycleLedger>;proof:(name?:string)=>Promise<import('../plugin/src/standalone/source').DescriptorLifecycleProof>;
+    entry:(name?:string)=>Promise<LedgerEntry>})=>Promise<void>){
   const base=await mkdtemp(join(tmpdir(),'oks-ledger-')),prior=process.env.XDG_DATA_HOME;
   const path=join(base,'vault'),xdg=join(base,'xdg');
   const stores:DurableLifecycleLedger[]=[];
@@ -24,6 +25,7 @@ async function fixture(action:(f:{root:{path:string;rootId:string};anchor:string
     const root={path,rootId:reader.rootId},parent=dirname(privateIndexPath(path,root.rootId,pluginId));
     await action({root,anchor:join(parent,'lifecycle-authority'),data:join(parent,'lifecycle-ledger'),
       open:async()=>{const store=await DurableLifecycleLedger.open(root,pluginId);stores.push(store);return store;},
+      proof:(name='a.md')=>reader.readLifecycleProof(name),
       entry:async(name='a.md')=>{
         const proof=await reader.readLifecycleProof(name);
         return {sourceId:name,state:'verified-new',origin:'native-create',originVersionId:proof.version.versionId,proof};
@@ -337,4 +339,206 @@ test('guarded baseline interrupted at anchor switch recovers only trusted curren
       }else assert.deepEqual(recovered,first);
     });
   }
+});
+
+type LiveFixture={open:()=>Promise<DurableLifecycleLedger>;entry:(name?:string)=>Promise<LedgerEntry>;
+  proof:(name?:string)=>Promise<import('../plugin/src/standalone/source').DescriptorLifecycleProof>};
+async function admittedBaseline(f:LiveFixture,entries?:readonly LedgerEntry[]){
+  const ledger=await f.open(),empty=await ledger.initializeEmptyEpoch(),records=entries??[baseline(await f.entry())];
+  const loaded=await ledger.commitInitialBaseline(empty.anchor.snapshotSha256,records,baselineGuard());
+  return {ledger,loaded,entry:records[0]!};
+}
+function transitionGuard(signal=new AbortController().signal,revalidate:()=>Promise<boolean>=async()=>true){
+  return {signal,current:()=>true,revalidate};
+}
+async function deniedAndReopened(f:LiveFixture,ledger:DurableLifecycleLedger,loaded:Awaited<ReturnType<DurableLifecycleLedger['read']>>,
+  operation:()=>Promise<unknown>):Promise<DurableLifecycleLedger>{
+  await assert.rejects(operation(),error);
+  await ledger.close();const reopened=await f.open();assert.deepEqual(await reopened.read(),loaded);
+  return reopened;
+}
+test('guarded live transition derives only one strict legal delta from an admitted anchor',async()=>{
+  await fixture(async f=>{
+    const {ledger,loaded,entry}=await admittedBaseline(f);
+    if(!('proof' in entry))throw Error('proof');
+    await writeFile(join(f.root.path,'a.md'),'changed synthetic');const changed=await f.proof();
+    const delta={kind:'modify' as const,prior:{...entry.proof,version:{...entry.proof.version}},
+      next:{...changed,version:{...changed.version}}};
+    const pending=ledger.commitLiveTransition(loaded.anchor,delta,transitionGuard());
+    delta.next.version.versionId=hash('mutated after invocation');
+    const next=await pending;
+    assert.equal(next.snapshot.revision,2);assert.equal(next.snapshot.entries.length,1);
+    const record=next.snapshot.entries[0]!;assert.ok('proof' in record);
+    if(!('proof' in record))throw Error('proof');
+    assert.equal(record.origin,'baseline');assert.equal(record.originVersionId,entry.originVersionId);
+    assert.deepEqual(record.proof,changed);
+    await rename(join(f.root.path,'a.md'),join(f.root.path,'b.md'));
+    await writeFile(join(f.root.path,'b.md'),'renamed and changed');const renamed=await f.proof('b.md');
+    const moved=await ledger.commitLiveTransition(next.anchor,{kind:'rename',prior:changed,next:renamed},transitionGuard());
+    assert.deepEqual(moved.snapshot.entries.map(value=>value.sourceId),['a.md','b.md']);
+    await writeFile(join(f.root.path,'a.md'),'separate verified create');const createdProof=await f.proof('a.md');
+    const created:LedgerEntry={sourceId:'a.md',state:'verified-new',origin:'native-create',
+      originVersionId:createdProof.version.versionId,proof:createdProof};
+    const withCreate=await ledger.commitLiveTransition(moved.anchor,{kind:'create',entry:created},transitionGuard());
+    const deleted=await ledger.commitLiveTransition(withCreate.anchor,{kind:'delete',prior:createdProof},transitionGuard());
+    assert.equal(deleted.snapshot.entries.find(value=>value.sourceId==='a.md')?.state,'deleted');
+    await assert.rejects(ledger.commitLiveTransition(loaded.anchor,{kind:'modify',prior:entry.proof,next:changed},transitionGuard()),error);
+    await ledger.close();const reopened=await f.open();assert.deepEqual(await reopened.read(),deleted);
+  });
+});
+test('live delta rejection poisons only its instance and preserves the durable admitted anchor',async()=>{
+  await fixture(async f=>{
+    let {ledger,loaded,entry}=await admittedBaseline(f);
+    if(!('proof' in entry))throw Error('proof');
+    const unchanged=await f.proof();
+    ledger=await deniedAndReopened(f,ledger,loaded,()=>ledger.commitLiveTransition(loaded.anchor,
+      {kind:'modify',prior:entry.proof,next:unchanged},transitionGuard()));
+    // A true same-byte replacement changes descriptor identity but remains an
+    // illegal modify: stable identity is continuity evidence, never a bypass.
+    await unlink(join(f.root.path,'a.md'));await writeFile(join(f.root.path,'a.md'),'synthetic');
+    const replacement=await f.proof();assert.notEqual(replacement.stableIdentity,entry.proof.stableIdentity);
+    assert.equal(replacement.version.sha256,entry.proof.version.sha256);
+    ledger=await deniedAndReopened(f,ledger,loaded,()=>ledger.commitLiveTransition(loaded.anchor,
+      {kind:'modify',prior:entry.proof,next:replacement},transitionGuard()));
+    const malformed={kind:'modify',prior:entry.proof,next:{...entry.proof,stableIdentity:'not-a-digest'}} as unknown as LiveTransitionDelta;
+    ledger=await deniedAndReopened(f,ledger,loaded,()=>ledger.commitLiveTransition(loaded.anchor,malformed,transitionGuard()));
+    await ledger.close();
+  });
+});
+test('rename rejects occupied, ambiguous and tombstoned targets; unrelated records survive a legal delta',async()=>{
+  await fixture(async f=>{
+    await writeFile(join(f.root.path,'b.md'),'occupied');
+    const a=baseline(await f.entry()),b=baseline(await f.entry('b.md'));
+    let {ledger,loaded,entry}=await admittedBaseline(f,[a,b]);if(!('proof' in entry))throw Error('proof');
+    await writeFile(join(f.root.path,'a.md'),'changed');const changed=await f.proof();
+    const target={...changed,version:{...changed.version,sourceId:'b.md',versionId:hash('rename-b')}};
+    ledger=await deniedAndReopened(f,ledger,loaded,()=>ledger.commitLiveTransition(loaded.anchor,
+      {kind:'rename',prior:entry.proof,next:target},transitionGuard()));
+    // The unguarded substrate is used only to construct persisted adversarial
+    // targets; the guarded transition still must reject each independently.
+    const ambiguous=await ledger.commit(loaded.anchor.snapshotSha256,true,[a,{sourceId:'b.md',state:'ambiguous'}]);
+    await ledger.close();ledger=await f.open();loaded=ambiguous;
+    ledger=await deniedAndReopened(f,ledger,loaded,()=>ledger.commitLiveTransition(loaded.anchor,
+      {kind:'rename',prior:entry.proof,next:target},transitionGuard()));
+    const tombstone=await ledger.commit(loaded.anchor.snapshotSha256,true,[a,{sourceId:'b.md',state:'deleted'}]);
+    await ledger.close();ledger=await f.open();loaded=tombstone;
+    ledger=await deniedAndReopened(f,ledger,loaded,()=>ledger.commitLiveTransition(loaded.anchor,
+      {kind:'rename',prior:entry.proof,next:target},transitionGuard()));
+    await ledger.close();
+  });
+  await fixture(async f=>{
+    await writeFile(join(f.root.path,'b.md'),'unrelated');
+    const a=baseline(await f.entry()),b=baseline(await f.entry('b.md'));
+    const legal=await admittedBaseline(f,[a,b]);if(!('proof' in a))throw Error('proof');
+    await writeFile(join(f.root.path,'a.md'),'changed again');const next=await f.proof();
+    const committed=await legal.ledger.commitLiveTransition(legal.loaded.anchor,
+      {kind:'modify',prior:a.proof,next},transitionGuard());
+    assert.deepEqual(committed.snapshot.entries.find(value=>value.sourceId==='b.md'),b);
+    await legal.ledger.close();
+  });
+});
+test('fresh same-byte versions and ordinary rename preserve admitted state and provenance',async()=>{
+  await fixture(async f=>{
+    const {ledger,loaded,entry}=await admittedBaseline(f);if(!('proof' in entry))throw Error('proof');
+    // A real descriptor change without a content change must be distinct from replay.
+    await utimes(join(f.root.path,'a.md'),new Date(1000000000000),new Date(1000000000000));
+    const updated=await f.proof();
+    assert.equal(updated.stableIdentity,entry.proof.stableIdentity);
+    assert.equal(updated.version.sha256,entry.proof.version.sha256);
+    assert.notEqual(updated.version.versionId,entry.proof.version.versionId);
+    const modified=await ledger.commitLiveTransition(loaded.anchor,
+      {kind:'modify',prior:entry.proof,next:updated},transitionGuard());
+    assert.deepEqual(modified.snapshot.entries,[{...entry,proof:updated}]);
+    await rename(join(f.root.path,'a.md'),join(f.root.path,'b.md'));const moved=await f.proof('b.md');
+    assert.equal(moved.stableIdentity,updated.stableIdentity);
+    assert.equal(moved.version.sha256,updated.version.sha256);
+    assert.notEqual(moved.version.versionId,updated.version.versionId);
+    const renamed=await ledger.commitLiveTransition(modified.anchor,
+      {kind:'rename',prior:updated,next:moved},transitionGuard());
+    assert.deepEqual(renamed.snapshot.entries,[{sourceId:'a.md',state:'deleted'},
+      {...entry,sourceId:'b.md',proof:moved}]);
+    await ledger.close();const reopened=await f.open();assert.deepEqual(await reopened.read(),renamed);
+    await reopened.close();
+  });
+});
+test('same-byte rename of verified-new material preserves its pending native origin',async()=>{
+  await fixture(async f=>{
+    const {ledger,loaded}=await admittedBaseline(f);
+    await writeFile(join(f.root.path,'b.md'),'new synthetic');
+    const entry=await f.entry('b.md');if(!('proof' in entry))throw Error('proof');
+    const created=await ledger.commitLiveTransition(loaded.anchor,{kind:'create',entry},transitionGuard());
+    await rename(join(f.root.path,'b.md'),join(f.root.path,'c.md'));const moved=await f.proof('c.md');
+    assert.equal(moved.stableIdentity,entry.proof.stableIdentity);
+    assert.equal(moved.version.sha256,entry.proof.version.sha256);
+    const renamed=await ledger.commitLiveTransition(created.anchor,
+      {kind:'rename',prior:entry.proof,next:moved},transitionGuard());
+    assert.deepEqual(renamed.snapshot.entries.find(value=>value.sourceId==='c.md'),{...entry,sourceId:'c.md',proof:moved});
+    assert.deepEqual(renamed.snapshot.entries.find(value=>value.sourceId==='b.md'),{sourceId:'b.md',state:'deleted'});
+    await ledger.close();
+  });
+});
+test('stale anchor, replay and proof-identity collision are independently denied',async()=>{
+  await fixture(async f=>{
+    const {ledger,loaded,entry}=await admittedBaseline(f);if(!('proof' in entry))throw Error('proof');
+    await writeFile(join(f.root.path,'a.md'),'changed');const changed=await f.proof();
+    const committed=await ledger.commitLiveTransition(loaded.anchor,{kind:'modify',prior:entry.proof,next:changed},transitionGuard());
+    let reopened=await deniedAndReopened(f,ledger,committed,()=>ledger.commitLiveTransition(loaded.anchor,
+      {kind:'modify',prior:entry.proof,next:changed},transitionGuard()));
+    reopened=await deniedAndReopened(f,reopened,committed,()=>reopened.commitLiveTransition(committed.anchor,
+      {kind:'modify',prior:entry.proof,next:changed},transitionGuard()));
+    const collisionProof={...changed,version:{...changed.version,sourceId:'b.md',versionId:hash('collision-version')}};
+    const collision:LedgerEntry={sourceId:'b.md',state:'verified-new',origin:'native-create',
+      originVersionId:collisionProof.version.versionId,proof:collisionProof};
+    reopened=await deniedAndReopened(f,reopened,committed,()=>reopened.commitLiveTransition(committed.anchor,
+      {kind:'create',entry:collision},transitionGuard()));
+    await reopened.close();
+  });
+});
+test('live transition close drains revalidation before releasing the physical lock',async()=>{
+  await fixture(async f=>{
+    const {ledger,loaded,entry}=await admittedBaseline(f);if(!('proof' in entry))throw Error('proof');
+    await writeFile(join(f.root.path,'a.md'),'changed synthetic');const changed=await f.proof();
+    let ready!:()=>void,release!:(ok:boolean)=>void;
+    const entered=new Promise<void>(r=>{ready=r;});
+    const suspended=new Promise<boolean>(r=>{release=r;});
+    const pending=ledger.commitLiveTransition(loaded.anchor,{kind:'modify',prior:entry.proof,next:changed},
+      transitionGuard(new AbortController().signal,()=>{ready();return suspended;}));
+    try{
+      await entered;
+      const closing=ledger.close();
+      await assert.rejects(f.open(),error);
+      await assert.rejects(ledger.read(),error);
+      release(true);
+      await assert.rejects(pending,(e:unknown)=>e instanceof LiveTransitionPublicationError&&e.outcome==='denied');
+      await closing;
+      const reopened=await f.open();assert.deepEqual(await reopened.read(),loaded);
+      await reopened.close();
+    }finally{release(false);await pending.catch(()=>{});}
+  });
+});
+test('live guarded publication fences current, revalidation and abort before CURRENT; post-switch abort commits',async t=>{
+  const fs=require('node:fs') as typeof import('node:fs');
+  for(const phase of ['current','revalidate','abort','after-switch-abort','uncertain-before','uncertain'] as const)await fixture(async f=>{
+    const {ledger,loaded,entry}=await admittedBaseline(f);if(!('proof' in entry))throw Error('proof');
+    await writeFile(join(f.root.path,'a.md'),'changed synthetic');const changed=await f.proof(),abort=new AbortController();
+    let revalidated=false;
+    const guard={signal:abort.signal,current:()=>phase!=='current'||!revalidated,revalidate:async()=>{
+      revalidated=true;if(phase==='abort')abort.abort();return phase!=='revalidate';}};
+    let mock:ReturnType<typeof t.mock.method>|undefined;
+    if(phase==='uncertain'||phase==='uncertain-before'||phase==='after-switch-abort'){
+      const original=fs.renameSync;
+      mock=t.mock.method(fs,'renameSync',((from:import('node:fs').PathLike,to:import('node:fs').PathLike)=>{
+        if(phase==='uncertain-before')throw Error('synthetic interruption before rename');
+        original(from,to);if(phase==='after-switch-abort')abort.abort();else throw Error('synthetic interruption after CURRENT');
+      }) as typeof fs.renameSync);
+    }
+    try {
+      const pending=ledger.commitLiveTransition(loaded.anchor,{kind:'modify',prior:entry.proof,next:changed},guard);
+      if(phase==='after-switch-abort')assert.equal((await pending).snapshot.revision,2);
+      else await assert.rejects(pending,(phase==='uncertain'||phase==='uncertain-before')?(e:unknown)=>e instanceof LiveTransitionPublicationError&&e.outcome==='uncertain-publication':error);
+    } finally {mock?.mock.restore();}
+    if(phase==='uncertain'||phase==='uncertain-before'||phase==='current'||phase==='revalidate'||phase==='abort')await assert.rejects(ledger.read(),error);
+    await ledger.close();const reopened=await f.open(),recovered=await reopened.read();
+    assert.equal(recovered?.snapshot.revision,phase==='uncertain'||phase==='after-switch-abort'?2:1);
+  });
 });
