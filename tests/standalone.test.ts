@@ -1871,6 +1871,150 @@ const graphMapping = {
   rules:[{relationId:'depends-on',propertyKey:'depends',direction:'author-to-target',targetEncoding:'business-id'}],
 };
 const graphCard = (id:string, rest='') => '---\nid: '+id+'\n'+rest+'---\nA synthetic card.\n';
+test('06B.3b local graph retrieval is distinct, scoped, ranked and reauthenticates originals',async()=>{
+  const {root,engine,cleanup}=await setup({'a.md':graphCard('A','depends: B\n')+'REQ-RU-1 запись.\n',
+    'b.md':graphCard('B')+'English expanded body.\n','foreign.md':graphCard('C')+'REQ-RU-1 foreign.\n'});
+  try {
+    engine.configureGraph(graphMapping);
+    const query={requestId:'graph-1',query:'REQ-RU-1',limit:2,matchMode:'terms',scope:{mode:'selected',kind:'files',sourceIds:['a.md','b.md']},
+      expansion:{depth:1,direction:'outgoing',fanOut:4,maxExpanded:4,relationIds:['depends-on']}};
+    const result=await engine.retrieveLocalGraph(query,new AbortController().signal);
+    assert.equal(result.executedMode,'graph');assert.ok(!('hits' in result));
+    assert.deepEqual(result.candidates.map(c=>[c.sourceId,c.lexicalRank,c.path.length]),[['a.md',1,0],['b.md',null,1]]);
+    assert.equal(result.candidates[0]!.excerpt,'REQ-RU-1 запись.');
+    assert.equal(result.candidates[1]!.seedLexicalRank,1);
+    assert.equal(result.candidates[1]!.path[0]!.anchorEvidence[0]!.excerpt,'depends: B');
+    assert.equal(result.candidates[1]!.path[0]!.edge.status.truth,'unverified');
+    const texts=result.candidates.flatMap(c=>[c.excerpt,...c.path.flatMap(step=>step.anchorEvidence.map(a=>a.excerpt))]);
+    assert.equal(result.contextBytes,texts.reduce((n,v)=>n+Buffer.byteLength(v),0));
+    assert.ok(Object.isFrozen(result.candidates[1]!.path[0]!.anchorEvidence[0]!.locator));
+    assert.ok(!JSON.stringify(result).includes('foreign.md'));
+    await writeFile(join(root,'foreign.md'),graphCard('B'));
+    await assert.rejects(engine.retrieveLocalGraph(query,new AbortController().signal),error('GRAPH_SOURCE_STALE'));
+  } finally {await cleanup();}
+});
+const localGraphRequest=(query='REQ-LOCAL-1',limit=10,scope:unknown={mode:'vault-wide'},expansion:Record<string,unknown>={})=>({
+  requestId:'graph-local',query,limit,scope,matchMode:'terms',
+  expansion:{depth:2,direction:'outgoing',fanOut:16,maxExpanded:32,...expansion},
+});
+test('06B.3b lexical ranking and duplicate seeds, explicit Top-K, depth zero and empty graph result',async()=>{
+  const {engine,cleanup}=await setup({'a.md':graphCard('A','depends: B\n')+'REQ-LOCAL-1 first.\nREQ-LOCAL-1 second.\n',
+    'b.md':graphCard('B','depends: C\n'),'c.md':graphCard('C')});
+  try{
+    const signal=new AbortController().signal,q=localGraphRequest();
+    await assert.rejects(engine.retrieveLocalGraph(q,signal),error('GRAPH_DISABLED'));
+    engine.configureGraph(graphMapping);
+    const p=await engine.retrieveLocalGraph(localGraphRequest('REQ-LOCAL-1',2),signal);
+    assert.equal(p.lexicalHitCount,2);assert.equal(p.lexicalCount,1);assert.equal(p.uniqueCandidateCount,3);assert.equal(p.omittedByTopK,1);
+    assert.deepEqual(p.candidates.map(c=>[c.sourceId,c.rank,c.lexicalRank,c.seedLexicalRank]),[['a.md',1,1,1],['b.md',2,null,1]]);
+    const zero=await engine.retrieveLocalGraph(localGraphRequest('REQ-LOCAL-1',10,undefined,{depth:0}),signal);
+    assert.equal(zero.candidates.length,1);assert.equal(zero.executedMode,'graph');
+    const empty=await engine.retrieveLocalGraph(localGraphRequest('MISSING-999'),signal);
+    assert.deepEqual(empty.candidates,[]);assert.equal(empty.uniqueCandidateCount,0);
+    const baseline=await engine.search(search('REQ-LOCAL-1'));
+    assert.equal(baseline.executedMode,'lexical');assert.equal(baseline.hits.length,2);
+  }finally{await cleanup();}
+});
+test('06B.3b property scope, incoming paths and exact multi-line authored anchors',async()=>{
+  const {engine,cleanup}=await setup({'a.md':graphCard('A','team: alpha\n')+'REQ-LOCAL-1 selected.\n',
+    'b.md':graphCard('B','team: alpha\ndepends:\n  - A\n'),
+    'c.md':graphCard('C','team: beta\ndepends: A\n')});
+  try{
+    engine.configureGraph(graphMapping);
+    const scope={mode:'selected',kind:'properties',predicates:[{key:'team',valueType:'string',operator:'eq',value:'alpha'}]};
+    const r=await engine.retrieveLocalGraph(localGraphRequest('REQ-LOCAL-1',10,scope,{direction:'incoming'}),new AbortController().signal);
+    assert.deepEqual(r.candidates.map(c=>c.sourceId),['a.md','b.md']);assert.ok(!JSON.stringify(r).includes('c.md'));
+    const step=r.candidates[1]!.path[0]!;
+    assert.equal(step.traversal,'reverse');assert.deepEqual(step.anchorEvidence.map(a=>a.excerpt),['depends:','  - A']);
+    assert.deepEqual(step.anchorEvidence.map(a=>a.sourceId),['b.md','b.md']);
+  }finally{await cleanup();}
+});
+test('06B.3b typed limits include repeated authored context; no partial fallback',async()=>{
+  const long='z'.repeat(17000);
+  const {engine,cleanup}=await setup({'a.md':graphCard('A','depends: ["B","C"]\n')+'REQ-LOCAL-1 selected.\n',
+    'b.md':'---\nid: B\n---\n'+long+'\n','c.md':graphCard('C')});
+  try{
+    engine.configureGraph(graphMapping);const signal=new AbortController().signal;
+    await assert.rejects(engine.retrieveLocalGraph(localGraphRequest('REQ-LOCAL-1',10,undefined,{fanOut:1}),signal),error('GRAPH_LIMIT'));
+    await assert.rejects(engine.retrieveLocalGraph(localGraphRequest(),signal),error('GRAPH_LIMIT'));
+    assert.equal((await engine.search(search('REQ-LOCAL-1'))).status,'ok');
+  }finally{await cleanup();}
+});
+test('06B.3b authored anchor text participates in the exact combined UTF-8 budget',async()=>{
+  const seed='REQ-LOCAL-1 selected.',body='z'.repeat(16360);
+  assert.ok(Buffer.byteLength(seed+body)<=16384&&Buffer.byteLength(seed+body+'depends: B')>16384);
+  const {engine,cleanup}=await setup({'a.md':graphCard('A','depends: B\n')+seed+'\n',
+    'b.md':'---\nid: B\n---\n'+body+'\n'});
+  try{
+    engine.configureGraph(graphMapping);
+    await assert.rejects(engine.retrieveLocalGraph(localGraphRequest(),new AbortController().signal),error('GRAPH_LIMIT'));
+    const zero=await engine.retrieveLocalGraph(localGraphRequest('REQ-LOCAL-1',10,undefined,{depth:0}),new AbortController().signal);
+    assert.equal(zero.contextBytes,Buffer.byteLength(seed));
+  }finally{await cleanup();}
+});
+test('06B.3b final catalog reauthentication catches silent identity change after lexical retrieval',async()=>{
+  const {engine,root,cleanup}=await setup({'a.md':graphCard('A','depends: B\n')+'REQ-LOCAL-1 selected.\n',
+    'b.md':graphCard('B'),'excluded.md':graphCard('C')});
+  const actual=engine.search.bind(engine);
+  try{
+    engine.configureGraph(graphMapping);
+    engine.search=async req=>{const r=await actual(req);await writeFile(join(root,'excluded.md'),graphCard('B'));return r;};
+    const scope={mode:'selected',kind:'files',sourceIds:['a.md','b.md']};
+    await assert.rejects(engine.retrieveLocalGraph(localGraphRequest('REQ-LOCAL-1',10,scope),new AbortController().signal),error('GRAPH_SOURCE_STALE'));
+    engine.search=actual;await engine.whenIdle();
+    const updated=await engine.retrieveLocalGraph(localGraphRequest('REQ-LOCAL-1',10,scope),new AbortController().signal);
+    assert.equal(updated.candidates.length,1);assert.equal(updated.projectionCoverage,'not-disclosed');
+  }finally{engine.search=actual;await cleanup();}
+});
+test('06B.3b expanded metadata-only source fails explicitly rather than inventing an excerpt',async()=>{
+  const {engine,cleanup}=await setup({'a.md':graphCard('A','depends: B\n')+'REQ-LOCAL-1 selected.\n','b.md':'---\nid: B\n---\n'});
+  try{
+    engine.configureGraph(graphMapping);
+    await assert.rejects(engine.retrieveLocalGraph(localGraphRequest(),new AbortController().signal),error('GRAPH_EVIDENCE_MISSING'));
+  }finally{await cleanup();}
+});
+test('06B.3b abort rejects promptly while physical source read retains shared slot until drain',async()=>{
+  const {engine,reader,cleanup}=await setup({'a.md':graphCard('A')+'REQ-LOCAL-1 selected.\n'});
+  const actual=reader.read.bind(reader),gate=asynchronousGate(),abort=new AbortController();
+  try{
+    engine.configureGraph(graphMapping);
+    reader.read=async path=>{gate.enter();await gate.held;return actual(path);};
+    const pending=engine.retrieveLocalGraph(localGraphRequest(),abort.signal);
+    const rejected=assert.rejects(pending,error('GRAPH_CANCELLED'));
+    await gate.entered;abort.abort();await rejected;
+    await assert.rejects(engine.retrieveLocalGraph(localGraphRequest(),new AbortController().signal),error('GRAPH_BUSY'));
+    await assert.rejects(engine.previewPolicyMetadata('a.md',()=>true),error('PARSER_BUSY'));
+    gate.release();reader.read=actual;await engine.whenIdle();
+    assert.equal((await engine.retrieveLocalGraph(localGraphRequest(),new AbortController().signal)).candidates.length,1);
+    abort.abort();await assert.rejects(engine.retrieveLocalGraph(localGraphRequest(),abort.signal),error('GRAPH_CANCELLED'));
+  }finally{gate.release();reader.read=actual;await cleanup();}
+});
+test('06B.3b bounded deadline rejects while blocked, late result drains and cannot revive the lease',async(t)=>{
+  const {engine,reader,cleanup}=await setup({'a.md':graphCard('A')+'REQ-LOCAL-1 selected.\n'});
+  const actual=reader.read.bind(reader),gate=asynchronousGate();
+  try{
+    engine.configureGraph(graphMapping);
+    reader.read=async path=>{gate.enter();await gate.held;return actual(path);};
+    t.mock.timers.enable({apis:['setTimeout']});
+    const p=engine.retrieveLocalGraph(localGraphRequest(),new AbortController().signal);
+    const rejected=assert.rejects(p,error('GRAPH_TIMEOUT'));
+    await gate.entered;t.mock.timers.tick(30001);await rejected;
+    await assert.rejects(engine.retrieveLocalGraph(localGraphRequest(),new AbortController().signal),error('GRAPH_BUSY'));
+    t.mock.timers.reset();gate.release();reader.read=actual;await engine.whenIdle();
+    assert.equal((await engine.retrieveLocalGraph(localGraphRequest(),new AbortController().signal)).candidates.length,1);
+  }finally{t.mock.timers.reset();gate.release();reader.read=actual;await cleanup();}
+});
+test('06B.3b mapping revocation during physical read vetoes any late publication',async()=>{
+  const {engine,reader,cleanup}=await setup({'a.md':graphCard('A')+'REQ-LOCAL-1 selected.\n'});
+  const actual=reader.read.bind(reader),gate=asynchronousGate();
+  try{
+    engine.configureGraph(graphMapping);reader.read=async path=>{gate.enter();await gate.held;return actual(path);};
+    const p=engine.retrieveLocalGraph(localGraphRequest(),new AbortController().signal),rejected=assert.rejects(p,error('GRAPH_SOURCE_STALE'));
+    await gate.entered;engine.configureGraph(null);gate.release();await rejected;
+    reader.read=actual;await engine.whenIdle();
+    await assert.rejects(engine.retrieveLocalGraph(localGraphRequest(),new AbortController().signal),error('GRAPH_DISABLED'));
+  }finally{gate.release();reader.read=actual;await cleanup();}
+});
 test('06B.2b disabled default, explicit mapping and scoped graph exclude foreign identities and edges', async()=>{
   const {engine,cleanup}=await setup({'a.md':graphCard('A','depends: B\n'),'b.md':graphCard('B'),
     'c.md':graphCard('C','depends: A\n')});

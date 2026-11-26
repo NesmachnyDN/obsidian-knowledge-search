@@ -18,6 +18,8 @@ import { validateGraphMapping, type GraphMapping } from './graph-mapping';
 import type { GraphProjection } from './graph-projection';
 import { authenticateGraphCatalog, buildAuthenticatedGraph, scopeGraph, type GraphScopeLease,
   type ScopedGraphSnapshot } from './graph-lifecycle';
+import { parseGraphQuery } from './graph-expansion';
+import { graphDeadline, materializeGraph, type GraphDeadline, type LocalGraphResult } from './graph-retrieval';
 
 export type EngineState = {
   status: 'initializing' | 'ready' | 'degraded' | 'failed' | 'unavailable';
@@ -230,6 +232,11 @@ export class StandaloneEngine {
     this.graphMapping = mapping;
   }
   captureGraphScope(input: unknown, signal: AbortSignal): GraphScopeLease {
+    return this.captureGraphOperation(input,signal,async snapshot=>snapshot);
+  }
+  private captureGraphOperation<T>(input:unknown,signal:AbortSignal,
+    consume:(snapshot:ScopedGraphSnapshot,gen:IndexGeneration,mapping:GraphMapping,check:()=>void)=>Promise<T>,
+    deadline?:GraphDeadline):Readonly<{current():boolean;read():Promise<T>}> {
     const selector = parseScopeSelector(input);
     if (selector.mode==='selected' && selector.kind==='editor-selection')
       throw new StandaloneError('GRAPH_SCOPE_UNSUPPORTED');
@@ -246,10 +253,11 @@ export class StandaloneEngine {
       return !retired;
     };
     const check = (): void => {
+      deadline?.check();
       if (!current()) throw new StandaloneError(signal.aborted?'GRAPH_CANCELLED':'GRAPH_SOURCE_STALE');
     };
     check();
-    const read = async (): Promise<ScopedGraphSnapshot> => {
+    const read = async (): Promise<T> => {
       check();
       if (this.localRead) throw new StandaloneError('GRAPH_BUSY');
       // Reserve synchronously before starting any asynchronous source read.
@@ -262,7 +270,7 @@ export class StandaloneEngine {
             await authenticateGraphCatalog(gen,this.provider,this.parser,false,check,this.yieldJob);
             graph = cached;
           } else {
-            graph = await buildAuthenticatedGraph(gen,mapping,this.provider,this.parser,current,check,this.yieldJob);
+            graph = await buildAuthenticatedGraph(gen,mapping,this.provider,this.parser,()=>{check();return true;},check,this.yieldJob);
           }
           check();
           // Graph reuse must never trust a mutated in-memory parsed record.
@@ -270,8 +278,9 @@ export class StandaloneEngine {
             throw new StandaloneError('GRAPH_INDEX_UNAUTHENTICATED');
           const snapshot = scopeGraph(gen,mapping,graph,selector);
           check();
-          this.graphCache = graph;
-          return snapshot;
+          const result=await consume(snapshot,gen,mapping,check);
+          check(); this.graphCache = graph;
+          return result;
         } catch (error) {
           retired = true;
           if (this.graphRevision===revision) {
@@ -290,10 +299,30 @@ export class StandaloneEngine {
         }
       };
       void physical.then(release,release);
-      const snapshot = await physical;
-      check(); return snapshot;
+      const result = await (deadline?deadline.wait(physical):physical);
+      check(); return result;
     };
     return Object.freeze({current,read});
+  }
+  /** Internal graph-only retrieval uses the same scope/generation/physical
+   * authority as projection reads. No AI evidence or implicit mode fallback. */
+  async retrieveLocalGraph(input:unknown,signal:AbortSignal):Promise<LocalGraphResult> {
+    const query=parseGraphQuery(input), deadline=graphDeadline(signal);
+    const lease=this.captureGraphOperation(query.scope,signal,async(snapshot,gen,mapping,check)=>{
+      const properties=query.scope.mode==='selected'&&query.scope.kind==='properties'?query.scope:undefined;
+      const lexical=await this.search({protocolVersion:PROTOCOL,requestId:query.requestId,query:query.query,
+        requestedMode:'lexical',limit:query.limit,matchMode:query.matchMode,scope:snapshot.scope.sources.map(s=>s.sourceId),
+        ...(properties?{predicates:properties.predicates,metadata:properties.metadata}:{})});
+      check();
+      if(lexical.status!=='ok'||lexical.executedMode!=='lexical'||lexical.indexGenerationId!==gen.generationId)
+        throw new StandaloneError('GRAPH_SOURCE_STALE');
+      const result=await materializeGraph(gen,snapshot,mapping,query,lexical.hits,this.provider,check);
+      await authenticateGraphCatalog(gen,this.provider,this.parser,false,check,this.yieldJob);
+      check();
+      if(generationId(gen.rootId,gen.documents)!==gen.generationId)throw new StandaloneError('GRAPH_INDEX_UNAUTHENTICATED');
+      return result;
+    },deadline);
+    return lease.read();
   }
   private async run(): Promise<void> {
     const revision = this.revision;
