@@ -883,3 +883,62 @@ test('POLICY.3d2 history read cancellation settles logically and preserves one p
     assert.deepEqual(await c.readVerifiedRetainedChatHistory(session),{apiVersion:1,ok:true,value:[]});
   }finally{held.resolve();c.dispose();}
 });
+
+test('POLICY.3d3 retained citations resolve by host-owned identity and guard native open and selection',async()=>{
+  const cfg:ProviderConfig={state:'configured',transport:'local',origin:'http://127.0.0.1:1',
+    identity:{model:'synthetic',revision:'v1'},limits:{timeoutMs:1000,maxInputBytes:4096,maxCandidates:3,maxOutputTokens:32,maxConcurrent:1}};
+  let stale=false,opens=0,selections=0,holdOpen=false,driftOnOpen=false;
+  const held=deferred<void>(),entered=deferred<void>();
+  const {SourceNavigator}=await import('../plugin/src/search/navigation');
+  const file={path:hit.sourceId};
+  const navigator=new SourceNavigator({read:async()=>Buffer.from('synthetic evidence\n')},{
+    exact:path=>path===file.path?file:null,
+    open:async(_file,guard)=>{
+      guard();opens++;
+      if(driftOnOpen)stale=true;
+      if(holdOpen){entered.resolve();await held.promise;}
+      guard();
+      return {text:()=> 'synthetic evidence\n',select:(_from,_to,check)=>{check();selections++;}};
+    }
+  });
+  const c=new SearchController((citation,authority)=>navigator.open(citation,authority),undefined,undefined,undefined,
+    {config:()=>cfg,scopeId:()=>root,verify:async()=>{}});
+  try{
+    c.attach(engine(async()=>lease({verify:async()=>{if(stale)throw Error('STALE');}})));
+    (c as unknown as {generator:{run:()=>Promise<readonly {kind:'quotation';text:string;citations:readonly EvidenceHit[]}[]>}}).generator={
+      run:async()=>[{kind:'quotation',text:hit.originalExcerpt,citations:[hit]}]};
+    const session=c.openRetainedChatSession(),other=c.openRetainedChatSession();
+    const complete=async()=>{
+      const turn=c.startRetainedChatTurn(session,selector,request);
+      assert.equal((await turn.result).ok,true);
+      const stamp=await c.bindRetainedGenerationCredential(session,turn.owner,'synthetic');
+      let draft=c.createRetainedChatClassificationDraft(session,turn.owner,stamp);
+      for(const item of [draft.question,...draft.evidence])draft=c.attestRetainedChatClassification(session,turn.owner,draft,item.id,'synthetic');
+      assert.equal((await c.confirmRetainedChatGeneration(session,turn.owner,await c.prepareRetainedChatGeneration(session,turn.owner,draft))).ok,true);
+      return c.readRetainedChatHistory(session).at(-1)!.id;
+    };
+    const id=await complete();
+    for(const result of [c.openRetainedChatCitation(other,id,0,0),c.openRetainedChatCitation(session,'foreign',0,0),
+      c.openRetainedChatCitation(session,id,-1,0),c.openRetainedChatCitation(session,id,0,1),
+      c.openRetainedChatCitation(session,id,0,0.5)]) assert.deepEqual(await result,error('NAVIGATION_REJECTED'));
+    assert.equal(opens,0);
+    assert.deepEqual(await c.openRetainedChatCitation(session,id,0,0),{apiVersion:1,ok:true,value:null});
+    assert.equal(opens,1);assert.equal(selections,1);
+    stale=true;
+    assert.deepEqual(await c.openRetainedChatCitation(session,id,0,0),error('SOURCE_STALE'));
+    assert.equal(opens,1);assert.deepEqual(c.readRetainedChatHistory(session),[]);
+    stale=false;const drift=await complete();driftOnOpen=true;
+    assert.deepEqual(await c.openRetainedChatCitation(session,drift,0,0),error('SOURCE_STALE'));
+    assert.equal(opens,2);assert.equal(selections,1);assert.deepEqual(c.readRetainedChatHistory(session),[]);
+    stale=false;driftOnOpen=false;const next=await complete();
+    holdOpen=true;
+    const navigation=c.openRetainedChatCitation(session,next,0,0);await entered.promise;
+    assert.deepEqual(await c.readVerifiedRetainedChatHistory(session),error('BUSY'));
+    c.closeRetainedChatSession(session);
+    assert.deepEqual(await navigation,error('CANCELLED'));
+    assert.deepEqual(await c.startScopedChatRetrieval(selector,request).result,error('BUSY'));
+    held.resolve();await flush();
+    assert.equal(opens,3);assert.equal(selections,1);
+    assert.equal((await c.startScopedChatRetrieval(selector,request).result).ok,true);
+  }finally{held.resolve();c.dispose();navigator.dispose();}
+});
