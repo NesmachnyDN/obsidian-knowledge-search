@@ -15,7 +15,9 @@ import type { IngestionStatus } from '../advanced/manager';
 import { isRecord, StandaloneError, validateRequest, validProperty, BOUNDS,
   type SearchRequest, type SearchResponse, type Predicate, type EvidenceHit, type SearchMetadata } from '../standalone/contracts';
 import type { StandaloneEngine, ChatScopeLease } from '../standalone/engine';
-import { parseScopeSelector, type ScopeSelector, type ScopedSearch, type ScopeSnapshot } from '../standalone/chat-scope';
+import type { GraphExcerpt, LocalGraphLease, LocalGraphResult } from '../standalone/graph-retrieval';
+import { parseGraphQuery } from '../standalone/graph-expansion';
+import { freezeScope, parseScopeSelector, type ScopeSelector, type ScopedSearch, type ScopeSnapshot } from '../standalone/chat-scope';
 import type { NavigationAuthority } from './navigation';
 import { diagnostics, safeCode, statusSnapshot, type SearchStatus } from './status';
 
@@ -62,7 +64,7 @@ export function propertyInput(key: string, valueType: string, operator: string, 
   return predicate as Predicate;
 }
 type Engine = Pick<StandaloneEngine, 'search' | 'status' | 'cancel' | 'resume' | 'rebuild'>
-  & Partial<Pick<StandaloneEngine, 'captureChatScope'>>;
+  & Partial<Pick<StandaloneEngine, 'captureChatScope' | 'captureLocalGraph'>>;
 // The concrete trusted owner is retained, not a callback resolving a mutable host.
 type RetirementTarget = { invalidate(): void };
 type RetirementObligation = {
@@ -128,6 +130,11 @@ type ActiveScopedRetrieval = { readonly abort: AbortController; readonly context
   readonly revision: number; readonly sourceRevision: number; readonly finish: (value: ApiResult<SearchResponse>) => void;
   readonly retained?: RetainedScopedTurn;
   timer?: ReturnType<typeof setTimeout>; retired: boolean; inFlight: boolean; physicalReads?:number };
+type ActiveGraphOperation = {
+  readonly abort: AbortController; readonly engine: Engine; lease?:LocalGraphLease;
+  revision: number; sourceRevision: number; retired: boolean; inFlight: boolean;
+  result?: LocalGraphResult; finish: (value: ApiResult<LocalGraphResult>) => void;
+};
 export type RerankState = { phase: 'running' | 'results' | 'error'; error: ProviderFailureCode | null; hits: readonly RerankedHit[] };
 export type RerankPort = {
   config(): ProviderPreference; scopeId(): string | undefined; verify(hit: EvidenceHit): Promise<void>;
@@ -150,6 +157,9 @@ export class SearchController {
   // This is deliberately not a caller-visible handle. Only this host can cancel,
   // retire, or publish a scoped retrieval turn.
   private scopedRetrieval?: ActiveScopedRetrieval;
+  /** Graph presentation is a separate, host-owned result channel. It never
+   * becomes lexical UI state or AI evidence. */
+  private graphOperation?: ActiveGraphOperation;
   // Object identity is host-local: a cloned or foreign session never matches.
   private readonly retainedSessions = new Map<RetainedChatSessionOwner,RetainedChatSession>();
   private generationAdmissionDepth = 0;
@@ -449,7 +459,7 @@ export class SearchController {
   embeddingAdmissionAvailable():boolean {
     return !this.sharedAuthorityTransition()&&!this.generationAdmissionDepth&&!this.generationTransition
       &&!this.generationPreviewReading&&!this.generationPolicyPreparation&&!this.generationPolicyGate.busy
-      &&!this.generationCredential.exclusiveBusy&&!this.scopedRetrieval
+      &&!this.generationCredential.exclusiveBusy&&!this.scopedRetrieval&&!this.graphOperation?.inFlight
       &&!this.prepared.generation&&!this.prepared.reranking&&!this.activeEvidence.generation&&!this.activeEvidence.reranking;
   }
   sharedAuthorityTransition(): boolean {
@@ -550,6 +560,7 @@ export class SearchController {
       if (invalidateHistory) this.clearAllRetainedHistory();
       this.pending?.resolve(failure('SUPERSEDED')); this.pending = undefined;
       this.state = state;
+      this.revokeGraphOperation();
       reserve?.(revision);
       this.revokeScopedRetrieval();
       this.revokeEvidence();
@@ -600,6 +611,114 @@ export class SearchController {
     });
     if (this.ownsRevision(revision)) this.emit();
     return result;
+  }
+  /** Explicit local graph retrieval. The result is held only as the current
+   * presentation authority and is deliberately excluded from lexical state. */
+  graphSearch(input:unknown):Promise<ApiResult<LocalGraphResult>> {
+    let request:ReturnType<typeof parseGraphQuery>;
+    try { request=parseGraphQuery(input); }
+    catch(error){return Promise.resolve(failure(error instanceof StandaloneError?error.code:'GRAPH_REQUEST_INVALID'));}
+    if(this.disposed||!this.enabled)return Promise.resolve(failure('DISABLED'));
+    if(this.paused)return Promise.resolve(failure('PAUSED'));
+    if(this.explicitRetirementPending)return Promise.resolve(failure('INTERNAL_FAILURE'));
+    if(this.sharedAuthorityTransition()||this.notifying||this.retirement.running)return Promise.resolve(failure('SUPERSEDED'));
+    const engine=this.engine;
+    if(!engine?.captureLocalGraph)return Promise.resolve(failure(this.error??'GRAPH_UNAVAILABLE'));
+    if(this.active||this.pending||this.scopedRetrieval)return Promise.resolve(failure('BUSY'));
+    let finish!:(value:ApiResult<LocalGraphResult>)=>void;
+    const result=new Promise<ApiResult<LocalGraphResult>>(resolve=>{finish=resolve;});
+    const operation:ActiveGraphOperation={abort:new AbortController(),engine,revision:0,
+      sourceRevision:this.sourceRevision,retired:false,inFlight:true,finish};
+    const revision=this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null},owned=>{
+      operation.revision=owned;this.graphOperation=operation;
+    });
+    if(this.ownsRevision(revision))this.emit();
+    void (async()=>{
+      let value:ApiResult<LocalGraphResult>;
+      try{
+        if(!this.graphCurrent(operation)||this.sharedAuthorityTransition())throw new StandaloneError('SUPERSEDED');
+        const lease=engine.captureLocalGraph!(request,operation.abort.signal);
+        operation.lease=lease;
+        if(!this.graphCurrent(operation))throw new StandaloneError('SUPERSEDED');
+        const graph=await lease.read();
+        if(!this.graphCurrent(operation)||graph.requestId!==request.requestId
+          ||JSON.stringify(graph.scope.selector)!==JSON.stringify(request.scope))
+          throw new StandaloneError('GRAPH_SOURCE_STALE');
+        // Exact graph read ends with full-catalog authentication. No async work
+        // between that verified completion and graph-only publication.
+        operation.result=freezeScope(structuredClone(graph));
+        operation.inFlight=false;
+        this.emit();
+        if(!this.graphCurrent(operation)||this.sharedAuthorityTransition())throw new StandaloneError('SUPERSEDED');
+        value={apiVersion:1,ok:true,value:operation.result};
+      }catch(error){
+        value=failure(operation.retired||this.graphOperation!==operation?'SUPERSEDED':
+          error instanceof StandaloneError?error.code:'INTERNAL_FAILURE');
+        if(this.graphOperation===operation){this.revokeGraphOperation(operation,value.error);this.drainRetirements();}
+      }
+      operation.inFlight=false;
+      operation.finish(value);
+    })();
+    return result;
+  }
+  /** Detached immutable current view, not a source/disclosure authority. */
+  graphSnapshot():LocalGraphResult|null {
+    const operation=this.graphOperation;
+    return operation?.result&&this.graphCurrent(operation)?operation.result:null;
+  }
+  graphResultCurrent(expected:LocalGraphResult):boolean {
+    return this.graphSnapshot()===expected;
+  }
+  /** Only exact current result identity and bounded indexes select evidence.
+   * A cloned/foreign/previous view cannot open a newer result by index. */
+  async openGraphEvidence(expected:LocalGraphResult,index:number,step?:number,anchor?:number):Promise<ApiResult<null>> {
+    const operation=this.graphOperation;
+    if(!operation||operation.result!==expected||!this.graphCurrent(operation)||this.sharedAuthorityTransition()
+      ||!Number.isSafeInteger(index)||index<0||operation.inFlight)return failure('NAVIGATION_REJECTED');
+    const candidate=operation.result.candidates[index];
+    if(!candidate)return failure('NAVIGATION_REJECTED');
+    let excerpt:GraphExcerpt=candidate;
+    if(step!==undefined||anchor!==undefined){
+      if(!Number.isSafeInteger(step)||!Number.isSafeInteger(anchor)||step!<0||anchor!<0)return failure('NAVIGATION_REJECTED');
+      const item=candidate.path[step!]?.anchorEvidence[anchor!];
+      if(!item)return failure('NAVIGATION_REJECTED');
+      excerpt=item;
+    }
+    const authority:NavigationAuthority={
+      current:()=>{if(!this.graphCurrent(operation)||this.sharedAuthorityTransition())throw new StandaloneError('NAVIGATION_REJECTED');},
+      verify:async()=>{authority.current();await operation.lease!.verify();authority.current();},
+    };
+    operation.inFlight=true;
+    try{
+      authority.current();
+      await this.navigate(this.graphExcerptHit(excerpt,expected.generationId),authority);
+      authority.current();
+      return {apiVersion:1,ok:true,value:null};
+    }catch{
+      if(this.graphOperation===operation){this.revokeGraphOperation(operation,'NAVIGATION_REJECTED');this.drainRetirements();this.emit();}
+      return failure('NAVIGATION_REJECTED');
+    }finally{operation.inFlight=false;}
+  }
+  private graphCurrent(operation:ActiveGraphOperation):boolean {
+    return !this.disposed&&!operation.retired&&!operation.abort.signal.aborted&&this.graphOperation===operation
+      &&this.revision===operation.revision&&this.sourceRevision===operation.sourceRevision&&this.engine===operation.engine
+      &&!this.runtimeSettingsChanging&&!this.sharedResetDepth&&!this.revokingSharedAuthority&&!this.sharedAuthorityFault
+      &&this.enabled&&!this.paused&&(operation.lease?.current()??true);
+  }
+  private graphExcerptHit(excerpt:GraphExcerpt,generationId:string):EvidenceHit {
+    return {sourceId:excerpt.sourceId,sourceSha256:excerpt.sourceSha256,originalExcerpt:excerpt.excerpt,
+      sourceLocators:[structuredClone(excerpt.locator)],rank:1,lexicalRank:1,retrievalMode:'lexical',indexGenerationId:generationId,
+      score:0,headings:[],wikiLinks:[],properties:[]};
+  }
+  private revokeGraphOperation(operation=this.graphOperation,code='SUPERSEDED'):void {
+    if(!operation||this.graphOperation!==operation||operation.retired)return;
+    operation.retired=true;
+    this.graphOperation=undefined;
+    operation.result=undefined;operation.lease=undefined;
+    operation.finish(failure(code));
+    // Seal logical authority before abort listeners can reenter.
+    this.enqueueRetirement({kind:'evidence',revision:operation.revision,owner:operation.abort,
+      attempted:false,run:()=>operation.abort.abort()});
   }
   /**
    * Host-only retrieval capability. Cancellation is tied to this exact turn;
@@ -1240,7 +1359,7 @@ export class SearchController {
     if (!engine?.captureChatScope) return rejected('CAPABILITY_UNAVAILABLE');
     if (this.generationCredential.exclusiveBusy || this.generationAdmissionDepth || this.generationPolicyPreparation || this.generationPolicyGate.busy || this.prepared.generation || this.activeEvidence.generation
       || this.prepared.reranking?.credential || this.activeEvidence.reranking?.credential
-      || this.scopedRetrieval || this.active || this.pending) return rejected('BUSY');
+      || this.scopedRetrieval || this.graphOperation?.inFlight || this.active || this.pending) return rejected('BUSY');
     const abort = new AbortController();
     let context: CallContext;
     try {
@@ -1965,6 +2084,7 @@ export class SearchController {
     this.disposed = true;
     this.retainedSessions.clear();
     this.generationCredential.seal();
+    this.revokeGraphOperation();
     this.revokeScopedRetrieval();
     this.engine = undefined;
     this.revision++;
@@ -1995,14 +2115,15 @@ export class SearchController {
 export class StandaloneApi {
   readonly apiVersion = 1;
   constructor(private readonly controller: SearchController) {}
-  async request(input: unknown): Promise<ApiResult<SearchStatus | SearchResponse | string>> {
+  async request(input: unknown): Promise<ApiResult<SearchStatus | SearchResponse | LocalGraphResult | string>> {
     try {
       if (!isRecord(input)) return failure('INVALID_REQUEST');
       if (input.apiVersion !== 1) return failure('API_VERSION_UNSUPPORTED');
-      if (typeof input.operation !== 'string' || !['status','search','diagnostics'].includes(input.operation)) return failure('INVALID_REQUEST');
-      const allowed = input.operation === 'search' ? ['apiVersion','operation','request'] : ['apiVersion','operation'];
+      if (typeof input.operation !== 'string' || !['status','search','graph-search','diagnostics'].includes(input.operation)) return failure('INVALID_REQUEST');
+      const allowed = input.operation === 'search' || input.operation === 'graph-search' ? ['apiVersion','operation','request'] : ['apiVersion','operation'];
       if (Object.keys(input).some(k => !allowed.includes(k))) return failure('INVALID_REQUEST');
       if (input.operation === 'search') return await this.controller.search(input.request);
+      if (input.operation === 'graph-search') return await this.controller.graphSearch(input.request);
       const status = this.controller.status();
       return { apiVersion: 1, ok: true, value: input.operation === 'status' ? status : diagnostics(status) };
     } catch { return failure('INVALID_REQUEST'); }

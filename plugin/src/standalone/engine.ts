@@ -19,7 +19,7 @@ import type { GraphProjection } from './graph-projection';
 import { authenticateGraphCatalog, buildAuthenticatedGraph, scopeGraph, type GraphScopeLease,
   type ScopedGraphSnapshot } from './graph-lifecycle';
 import { parseGraphQuery } from './graph-expansion';
-import { graphDeadline, materializeGraph, type GraphDeadline, type LocalGraphResult } from './graph-retrieval';
+import { graphDeadline, materializeGraph, verifyRetainedGraph, type GraphDeadline, type LocalGraphLease, type LocalGraphResult } from './graph-retrieval';
 
 export type EngineState = {
   status: 'initializing' | 'ready' | 'degraded' | 'failed' | 'unavailable';
@@ -307,6 +307,9 @@ export class StandaloneEngine {
   /** Internal graph-only retrieval uses the same scope/generation/physical
    * authority as projection reads. No AI evidence or implicit mode fallback. */
   async retrieveLocalGraph(input:unknown,signal:AbortSignal):Promise<LocalGraphResult> {
+    return this.captureLocalGraph(input,signal).read();
+  }
+  captureLocalGraph(input:unknown,signal:AbortSignal):LocalGraphLease {
     const query=parseGraphQuery(input), deadline=graphDeadline(signal);
     const lease=this.captureGraphOperation(query.scope,signal,async(snapshot,gen,mapping,check)=>{
       const properties=query.scope.mode==='selected'&&query.scope.kind==='properties'?query.scope:undefined;
@@ -322,7 +325,27 @@ export class StandaloneEngine {
       if(generationId(gen.rootId,gen.documents)!==gen.generationId)throw new StandaloneError('GRAPH_INDEX_UNAUTHENTICATED');
       return result;
     },deadline);
-    return lease.read();
+    let result:LocalGraphResult|undefined, started=false, retired=false;
+    const current=()=>!retired&&lease.current();
+    const read=async():Promise<LocalGraphResult>=>{
+      if(started||!current())throw new StandaloneError('GRAPH_SOURCE_STALE');
+      started=true;
+      try { result=await lease.read(); if(!current())throw new StandaloneError('GRAPH_SOURCE_STALE'); return result; }
+      catch(error){retired=true;throw error;}
+    };
+    const verify=async():Promise<void>=>{
+      if(!result||!current())throw new StandaloneError('GRAPH_SOURCE_STALE');
+      const retained=result;
+      try {
+        const fresh=this.captureGraphOperation(query.scope,signal,async(snapshot,gen,_mapping,check)=>{
+          check();if(!current())throw new StandaloneError('GRAPH_SOURCE_STALE');
+          verifyRetainedGraph(gen,snapshot,retained);check();
+        },graphDeadline(signal));
+        await fresh.read();
+        if(!current())throw new StandaloneError('GRAPH_SOURCE_STALE');
+      }catch(error){retired=true;throw error;}
+    };
+    return Object.freeze({current,read,verify});
   }
   private async run(): Promise<void> {
     const revision = this.revision;
