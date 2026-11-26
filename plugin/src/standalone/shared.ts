@@ -11,3 +11,7 @@ export const BOUNDS = Object.freeze({
 export class StandaloneError extends Error {
   constructor(public readonly code: string) { super(code); this.name = 'StandaloneError'; }
 }
+
+/** A current-original metadata proof, not a disclosure permission. */
+export type PolicyMetadataState = 'absent' | 'external' | 'private' | 'invalid' | 'unresolved';
+export type PolicyMetadataProof = Readonly<{sourceId:string;sha256:string;scopeId:string;state:PolicyMetadataState}>;
