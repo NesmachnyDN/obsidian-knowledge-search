@@ -19,7 +19,7 @@ import {NEW_MATERIAL_RULE_CONFIG_VERSION,type NewMaterialRuleConfig} from '../pl
 import type {ProviderConfig,EmbeddingSpace} from '../plugin/src/ai/contracts';
 import {RerankRuntimeProfiles} from '../plugin/src/ai/rerank-profile';
 import type {PolicyEnvelope} from '../plugin/src/ai/processing-policy';
-import {embeddingPolicyPayload,type EmbeddingPolicyInput} from '../plugin/src/ai/embedding-policy';
+import {embeddingPolicyPayload,resolveEmbeddingPolicyScope,type EmbeddingPolicyInput,type EmbeddingPolicyScope} from '../plugin/src/ai/embedding-policy';
 import {embeddingSpaceId} from '../plugin/src/ai/embedding-space';
 import {EvidenceEmbedder,type EmbeddingApproval} from '../plugin/src/ai/embedding-evidence';
 import type {EvidenceHit} from '../plugin/src/standalone/contracts';
@@ -470,7 +470,7 @@ test('POLICY.3b changed original, missing role admission and configured marking 
 
 
 test('POLICY.3c1 shared policy gate binds embedding purpose, space, complete originals and free text',async()=>{
-  const notes:Record<string,string>={'a.md':raw(),'b.md':raw('external'),'private.md':raw('private'),
+  const notes:Record<string,string>={'a.md':raw(undefined,'REQ-42: first synthetic paragraph.\n\nREQ-42: second synthetic paragraph.'),'b.md':raw('external'),'private.md':raw('private'),
     'invalid.md':raw('null'),'ambiguous.md':raw('external\nllm_processing: private')};
   await fixture(notes,async f=>{
     const space:EmbeddingSpace={...f.config.identity,dimension:3,normalization:'unit-l2',
@@ -478,30 +478,42 @@ test('POLICY.3c1 shared policy gate binds embedding purpose, space, complete ori
     const spaceId=embeddingSpaceId(f.config,space),scopeId=f.reader.rootId;
     const profile={profileId:'synthetic-embedding',admissionId:'synthetic-review',role:'embedding' as const,
       configDigest:configDigest('embedding',f.config),adapter:'synthetic-adapter',classification:'external' as const};
-    let admitted=true,policyRevision='p1';
+    let admitted=true,policyRevision='p1',resolved:EmbeddingPolicyScope|null=null;
     const host=new ProcessingPolicyHost<'embedding'>(()=>true,()=>f.engine,()=>({config:f.config,
       profile:admitted?profile:null,adapter:'synthetic-adapter',policyRevision,configRevision:'c1',
-      restrictions:[],materials:[],complete:true}),'embedding');
+      restrictions:[],materials:[],complete:true}),'embedding',()=>resolved);
     const gate=new GenerationPolicyGate(),abort=new AbortController();
     const corpus=await f.engine.captureDenseCorpus(['a.md','b.md'],8,abort.signal);
     const makeInput=(purpose:'query'|'document',paths:string[],hits:readonly EvidenceHit[]):EmbeddingPolicyInput=>{
       const sources=hits.map(hit=>({sourceId:hit.sourceId,sourceSha256:hit.sourceSha256,excerptDigest:hash(hit.originalExcerpt)}));
       const query=purpose==='query'?'synthetic query':'synthetic batch';
       return {role:'embedding',config:f.config,scopeId,ownerId:'fixture-owner',hostId:'fixture-host',credentialEpoch:1,
-        deadlineUnixMs:Date.now()+5000,scopeBinding:hash(JSON.stringify(paths)),
+        deadlineUnixMs:Date.now()+5000,scopeBinding:resolved!.scopeBinding,
         scopeSources:paths.map(sourceId=>({sourceId,sourceSha256:hash(notes[sourceId]!)})),sources,
         embedding:{purpose,space,spaceId,query,queryClassification:'synthetic'},
         payloadDigest:embeddingPolicyPayload(purpose,spaceId,query,'synthetic',sources)};
     };
     const evaluate=(i:EmbeddingPolicyInput,signal=abort.signal)=>gate.evaluate(host,i,{signal,deadlineUnixMs:i.deadlineUnixMs},()=>true);
-    const document=makeInput('document',['a.md','b.md'],corpus.evidence);
-    const query=makeInput('query',['a.md','b.md'],[]);
-    const docBinding=await evaluate(document),queryBinding=await evaluate(query);
+    assert.equal(corpus.evidence.filter(h=>h.sourceId==='a.md').length,2);
+    const docScope=resolveEmbeddingPolicyScope(corpus,'document',corpus.evidence);
+    const queryScope=resolveEmbeddingPolicyScope(corpus,'query',[]);
+    resolved=docScope;const document=makeInput('document',['a.md','b.md'],corpus.evidence);
+    const docBinding=await evaluate(document);
+    resolved=queryScope;const query=makeInput('query',['a.md','b.md'],[]);
+    const queryBinding=await evaluate(query);
     assert.notEqual(docBinding.bindingDigest,queryBinding.bindingDigest);
-    for(const path of ['private.md','invalid.md','ambiguous.md']){
-      await assert.rejects(evaluate(makeInput('document',['a.md',path],corpus.evidence.filter(h=>h.sourceId==='a.md'))),{message:'DISCLOSURE_DENIED'});
+    await assert.rejects(f.engine.captureDenseCorpus(['a.md','ambiguous.md'],8,abort.signal),{message:'EVIDENCE_INCOMPLETE'});
+    for(const path of ['private.md','invalid.md']){
+      const mixed=await f.engine.captureDenseCorpus(['a.md',path],8,abort.signal);
+      const planned=mixed.evidence.filter(h=>h.sourceId==='a.md');
+      resolved=resolveEmbeddingPolicyScope(mixed,'document',planned);
+      await assert.rejects(evaluate(makeInput('document',['a.md',path],planned)),{message:'DISCLOSURE_DENIED'});
+      await assert.rejects(evaluate(makeInput('document',['a.md'],planned)),{message:'DISCLOSURE_DENIED'});
+      resolved=resolveEmbeddingPolicyScope(mixed,'query',[]);
       await assert.rejects(evaluate(makeInput('query',['a.md',path],[])),{message:'DISCLOSURE_DENIED'});
+      await assert.rejects(evaluate(makeInput('query',['a.md'],[])),{message:'DISCLOSURE_DENIED'});
     }
+    resolved=queryScope;
     admitted=false;await assert.rejects(evaluate(query),{message:'DISCLOSURE_DENIED'});admitted=true;
     await assert.rejects(evaluate({...query,embedding:{...query.embedding,spaceId:hash('foreign')}}),{message:'DISCLOSURE_DENIED'});
     await assert.rejects(evaluate({...query,embedding:{...query.embedding,purpose:'document'}}),{message:'DISCLOSURE_DENIED'});
@@ -519,14 +531,21 @@ test('POLICY.3c1 shared policy gate binds embedding purpose, space, complete ori
     const embedder=new EvidenceEmbedder();
     const run=(i:EmbeddingPolicyInput,value:EmbeddingApproval,check=()=>evaluate(i),signal=abort.signal)=>
       embedder.run(value,'synthetic-token',{signal,deadlineUnixMs:i.deadlineUnixMs},corpus.verify,corpus.current,check);
+    resolved=docScope;
+    await assert.rejects(evaluate(makeInput('document',['a.md','b.md'],corpus.evidence.filter(h=>h.sourceId==='a.md'))),{message:'DISCLOSURE_DENIED'});
     let value=await approve(document,corpus.evidence);
     await assert.rejects(run(document,value,()=>evaluate({...document,credentialEpoch:2})),{message:'DISCLOSURE_DENIED'});
-    await assert.rejects(run(document,value,()=>evaluate(query)),{message:'DISCLOSURE_DENIED'});
+    for(const patch of [{ownerId:'foreign-owner'},{hostId:'foreign-host'}])
+      await assert.rejects(run(document,value,()=>evaluate({...document,...patch})),{message:'DISCLOSURE_DENIED'});
+    await assert.rejects(run(document,value,()=>Promise.resolve(queryBinding)),{message:'DISCLOSURE_DENIED'});
     assert.equal(f.requests.length,0);
     const result=await run(document,value);
     assert.equal(result.batch.vectors.length,corpus.evidence.length);
     assert.deepEqual(f.requests[0],{model:'synthetic-generator@fixture-v1',input:corpus.evidence.map(h=>h.originalExcerpt),encoding_format:'float'});
-    value=await approve(query,[]);
+    resolved=queryScope;value=await approve(query,[]);
+    const during=new AbortController();
+    await assert.rejects(run(query,value,async()=>{const binding=await evaluate(query);during.abort();return binding;},during.signal),{message:'CANCELLED'});
+    assert.equal(f.requests.length,1);
     await run(query,value);
     assert.deepEqual(f.requests[1],{model:'synthetic-generator@fixture-v1',input:['synthetic query'],encoding_format:'float'});
     assert.deepEqual(f.authorization,['Bearer synthetic-token','Bearer synthetic-token']);
