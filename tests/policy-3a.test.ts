@@ -566,3 +566,53 @@ test('POLICY.3c1 shared policy gate binds embedding purpose, space, complete ori
     assert.equal(f.requests.length,3);
   });
 });
+
+test('POLICY.3d2 completed local-only lineage is not a grant; fresh history rejects policy drift and missed source edits',async()=>{
+  await fixture({'a.md':raw('external'),'b.md':raw('external','Unrelated synthetic material.')},async f=>{
+    const c=f.controller,session=c.openRetainedChatSession();
+    const complete=async()=>{
+      const turn=c.startRetainedChatTurn(session,{mode:'vault-wide'},request);
+      assert.equal((await turn.result).ok,true);
+      const stamp=await c.bindRetainedGenerationCredential(session,turn.owner,'synthetic-token');
+      let draft=c.createRetainedChatClassificationDraft(session,turn.owner,stamp);
+      draft=c.attestRetainedChatClassification(session,turn.owner,draft,draft.question.id,'synthetic');
+      const preview=await c.prepareRetainedChatGeneration(session,turn.owner,draft);
+      assert.equal((await c.confirmRetainedChatGeneration(session,turn.owner,preview)).ok,true);
+      const verified=await c.readVerifiedRetainedChatHistory(session);
+      assert.equal(verified.ok,true);
+      if(!verified.ok)throw Error('fixture');
+      const completed=verified.value.at(-1)!;
+      assert.equal(completed.lineage.use,'local-only');
+      assert.equal(completed.lineage.policyBindingDigest,preview.policy!.bindingDigest);
+      assert.equal(completed.lineage.payloadDigest,preview.policy!.payloadDigest);
+      assert.equal(completed.lineage.sourceDigest,preview.policy!.sourceDigest);
+      assert.equal(completed.lineage.questions[0]!.digest,hash(request.query));
+      assert.equal(completed.lineage.questions[0]!.classification,'synthetic');
+      assert.deepEqual(completed.lineage.selector,{mode:'vault-wide'});
+      assert.equal('question' in c.readRetainedChatHistory(session)[0]!,false);
+      const serialized=JSON.stringify(completed);
+      assert.equal(serialized.includes('synthetic-token'),false);
+      for(const field of ['credentialStamp','credentialEpoch','deadlineUnixMs','expiresUnixMs','grant'])
+        assert.equal(serialized.includes('"'+field+'"'),false);
+      return completed.id;
+    };
+    const first=await complete();
+    assert.equal(f.requests.length,1);
+    f.state({policyRevision:'p2'});
+    const stale=c.startRetainedChatTurn(session,{mode:'vault-wide'},request,[first]);
+    assert.equal((await stale.result).ok,false);
+    assert.deepEqual(c.readRetainedChatHistory(session),[]);
+    assert.equal(f.requests.length,1);
+    await complete();
+    f.state({policyRevision:'p3'});
+    assert.deepEqual(await c.readVerifiedRetainedChatHistory(session),{apiVersion:1,ok:false,error:'SOURCE_STALE'});
+    assert.deepEqual(c.readRetainedChatHistory(session),[]);
+    assert.equal(f.requests.length,2);
+    await complete();
+    // Change a non-cited member without a source event or rebuilt index.
+    await writeFile(join(f.root,'b.md'),raw('private','Unrelated synthetic material.'));
+    assert.equal((await c.readVerifiedRetainedChatHistory(session)).ok,false);
+    assert.deepEqual(c.readRetainedChatHistory(session),[]);
+    assert.equal(f.requests.length,3);
+  });
+});

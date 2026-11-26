@@ -7,7 +7,7 @@ import { bindActiveDeadline, remainingOperationMs, deadlineFailure, cancelActive
 import { RerankRuntimeProfiles, type RerankAdmission } from '../ai/rerank-profile';
 import { configDigest, type Classification, type DisclosureGrant } from '../ai/disclosure';
 import { GenerationCredentialAuthority, type GenerationCredentialStamp } from '../ai/generation-credential';
-import { GenerationPolicyGate, generationPolicyPayload, generationPolicySourceDigest, uniquePolicySources, type GenerationPolicyBinding, type GenerationPolicyInput, type GenerationPolicyPort, type RerankPolicyPort, type ProcessingPolicyInput } from '../ai/generation-policy';
+import { GenerationPolicyGate, generationPolicyPayload, generationPolicySourceDigest, uniquePolicySources, type GenerationPolicyBinding, type GenerationPolicyInput, type GenerationHistoryScope, type GenerationPolicyPort, type RerankPolicyPort, type ProcessingPolicyInput } from '../ai/generation-policy';
 import { ProviderFailure, type ProviderConfig, type ProviderPreference, type ProviderFailureCode, type AiOperationStatus, type CallContext, type CredentialResolver } from '../ai/contracts';
 import { hash, isDigest } from '../standalone/contracts';
 import type { AdvancedHealth } from '../advanced/health';
@@ -105,9 +105,15 @@ const MAX_COMPLETED_TURNS = 12;
 const MAX_STORED_QUESTION_BYTES = 2048;
 const MAX_SESSION_HISTORY_BYTES = 64 * 1024;
 const MAX_HISTORY_BYTES = 256 * 1024;
-type CompletedChatTurn = Readonly<{id:string; question:string; questionDigest:string; claims:readonly GeneratedEvidenceClaim[];
-  scopeDigest:string; configuration:string; generationId:string; sourceRevision:number; completedAt:number}>;
-type RetainedChatSession = {readonly owner:RetainedChatSessionOwner; history:CompletedChatTurn[]; lastUsed:number};
+type ChatHistoryLineage = Readonly<{
+  version:1; use:'local-only'; selector:ScopeSelector;
+  policyRevision:string|null; policyBindingDigest:string|null;
+  payloadDigest:string; sourceDigest:string;
+  questions:readonly Readonly<{id:string;digest:string;classification:Classification}>[];
+}>;
+export type CompletedChatTurn = Readonly<{id:string; question:string; questionDigest:string; claims:readonly GeneratedEvidenceClaim[];
+  scopeDigest:string; configuration:string; generationId:string; sourceRevision:number; completedAt:number; lineage:ChatHistoryLineage}>;
+type RetainedChatSession = {readonly owner:RetainedChatSessionOwner; history:CompletedChatTurn[]; lastUsed:number; policyPort?:GenerationPolicyPort};
 type RetainedScopedTurn = { readonly session: RetainedChatSessionOwner; readonly owner: RetainedChatTurnOwner;
   lease?: ChatScopeLease; response?: SearchResponse; check?: () => void;
   finishRead?: (value: ApiResult<RetainedScopedView>) => void;
@@ -116,7 +122,7 @@ type RetainedScopedTurn = { readonly session: RetainedChatSessionOwner; readonly
   credentialBound?:boolean; };
 type RetainedDraft = { readonly view: RetainedChatClassificationDraft; readonly configuration:string;
   readonly stamp:GenerationCredentialStamp; readonly labels:Map<string,Classification>; };
-type RetainedPreview = { readonly view:RetainedChatGenerationPreview; readonly draft:RetainedDraft; readonly policyPort?:GenerationPolicyPort };
+type RetainedPreview = { readonly view:RetainedChatGenerationPreview; readonly draft:RetainedDraft; readonly policyPort?:GenerationPolicyPort; readonly historyRevision:string|null };
 type ActiveScopedRetrieval = { readonly abort: AbortController; readonly context: CallContext;
   readonly revision: number; readonly sourceRevision: number; readonly finish: (value: ApiResult<SearchResponse>) => void;
   readonly retained?: RetainedScopedTurn;
@@ -638,12 +644,93 @@ export class SearchController {
     const operation = this.ownedRetainedTurn(session,owner);
     if (operation) this.retireScopedRetrieval(operation,'CANCELLED');
   }
-  /** Detached host-only transcript view. It is intentionally absent from StandaloneApi. */
-  readRetainedChatHistory(session:RetainedChatSessionOwner):readonly CompletedChatTurn[] {
+  /** Metadata only. Content requires the fresh, local verified read below. */
+  readRetainedChatHistory(session:RetainedChatSessionOwner):readonly Pick<CompletedChatTurn,'id'|'questionDigest'|'completedAt'>[] {
     const entry=this.retainedSessions.get(session);
     if (!entry || this.disposed) throw new ProviderFailure('CANCELLED');
     entry.lastUsed=Date.now();
-    return structuredClone(entry.history);
+    return entry.history.map(({id,questionDigest,completedAt})=>({id,questionDigest,completedAt}));
+  }
+  private historyPolicyScope(scope:ScopeSnapshot,config:ProviderConfig):GenerationHistoryScope {
+    return {role:'generation',config,scopeId:scope.rootId,scopeBinding:hash(JSON.stringify(scope)),
+      scopeSources:scope.sources,sources:[]};
+  }
+  private historyPolicyRevision(scope:ScopeSnapshot,config:ProviderConfig,port:GenerationPolicyPort|undefined):string|null {
+    if(this.selectedGenerationPolicy()!==port)throw new ProviderFailure('CANCELLED');
+    if(!port)return null;
+    const revision=port.historyRevision?.(this.historyPolicyScope(scope,config));
+    if(!isDigest(revision)||this.selectedGenerationPolicy()!==port)throw new ProviderFailure('CANCELLED');
+    return revision;
+  }
+  private historyCompatible(entry:RetainedChatSession,scope:ScopeSnapshot,config:ProviderConfig):boolean {
+    if(!entry.history.length)return true;
+    try{
+      const policy=this.selectedGenerationPolicy(),scopeDigest=hash(JSON.stringify(scope));
+      const configuration=JSON.stringify([configDigest('generation',config),scope.rootId]);
+      if(entry.policyPort!==policy||!entry.history.every(turn=>turn.scopeDigest===scopeDigest
+        &&turn.sourceRevision===this.sourceRevision&&turn.generationId===scope.generationId&&turn.configuration===configuration))return false;
+      const revision=this.historyPolicyRevision(scope,config,policy);
+      return entry.history.every(turn=>turn.lineage.policyRevision===revision);
+    }catch{return false;}
+  }
+  /** Same physical slot as retained retrieval. A historical proof is not a
+   * grant; local display reauthenticates exact membership, originals and spans. */
+  readVerifiedRetainedChatHistory(session:RetainedChatSessionOwner):Promise<ApiResult<readonly CompletedChatTurn[]>> {
+    const entry=this.retainedSessions.get(session),engine=this.engine,port=this.generationPort;
+    if(!entry||this.disposed||!this.enabled||this.paused||this.sharedAuthorityTransition())return Promise.resolve(chatFailure('CANCELLED'));
+    if(!entry.history.length)return Promise.resolve({apiVersion:1,ok:true,value:[]});
+    if(!engine?.captureChatScope||!port)return Promise.resolve(chatFailure('NOT_READY'));
+    if(!this.embeddingAdmissionAvailable()||this.active||this.pending)return Promise.resolve(chatFailure('BUSY'));
+    const abort=new AbortController(),history=entry.history;
+    let context:CallContext;
+    try{context=bindActiveDeadline({signal:abort.signal,deadlineUnixMs:Date.now()+SCOPED_RETRIEVAL_TIMEOUT_MS},SCOPED_RETRIEVAL_TIMEOUT_MS);}
+    catch{return Promise.resolve(chatFailure('TIMEOUT'));}
+    let finish!:(result:ApiResult<readonly CompletedChatTurn[]>)=>void;
+    const result=new Promise<ApiResult<readonly CompletedChatTurn[]>>(resolve=>{finish=resolve;});
+    const operation:ActiveScopedRetrieval={abort,context,revision:this.revision,sourceRevision:this.sourceRevision,
+      finish:result=>{if(!result.ok)finish(result);},retained:{session,owner:Object.freeze({})},retired:false,inFlight:true};
+    this.scopedRetrieval=operation;
+    const check=():void=>{
+      remainingOperationMs(context);
+      if(this.scopedRetrieval!==operation||operation.retired||this.sharedAuthorityTransition()||!this.enabled||this.paused
+        ||this.engine!==engine||this.generationPort!==port||this.revision!==operation.revision||this.sourceRevision!==operation.sourceRevision
+        ||this.retainedSessions.get(session)!==entry||entry.history!==history)throw new ProviderFailure('CANCELLED');
+    };
+    const clear=():void=>{if(this.retainedSessions.get(session)===entry&&entry.history===history)this.clearRetainedHistory(session);};
+    operation.timer=setTimeout(()=>{clear();this.retireScopedRetrieval(operation,'TIMEOUT');},SCOPED_RETRIEVAL_TIMEOUT_MS);
+    void(async()=>{
+      try{
+        check();
+        const scope=await engine.captureChatScope!(structuredClone(history[0]!.lineage.selector),abort.signal);check();
+        const compatible=():void=>{
+          check();
+          const pref=port.config();
+          if(pref.state!=='configured'||port.scopeId()!==scope.snapshot.rootId||!scope.current()
+            ||!this.historyCompatible(entry,scope.snapshot,pref))throw new ProviderFailure('SOURCE_STALE');
+          check();
+        };
+        compatible();await scope.verify();compatible();
+        const versions=new Map(scope.snapshot.sources.map(source=>[source.sourceId,source.sourceSha256]));
+        for(const turn of history)for(const claim of turn.claims)for(const citation of claim.citations){
+          if(versions.get(citation.sourceId)!==citation.sourceSha256||citation.indexGenerationId!==turn.generationId)
+            throw new ProviderFailure('SOURCE_STALE');
+          await port.verify(structuredClone(citation));compatible();
+        }
+        await scope.verify();compatible();
+        const detached=structuredClone(history);compatible();
+        entry.lastUsed=Date.now();
+        clearTimeout(operation.timer);
+        operation.inFlight=false;this.scopedRetrieval=undefined;
+        finish({apiVersion:1,ok:true,value:detached});
+      }catch(error){
+        if(!operation.retired){
+          clear();
+          const reason=deadlineFailure(context)?.code??(error instanceof ProviderFailure?error.code:'SOURCE_STALE');
+          this.retireScopedRetrieval(operation,reason);
+        }
+      }finally{operation.inFlight=false;this.releaseRetiredScopedRetrieval();}
+    })();
+    return result;
   }
   private selectedPriorIds(session:RetainedChatSessionOwner,value:unknown):readonly string[] {
     if (!Array.isArray(value) || value.length>2 || value.some(id=>typeof id!=='string')) throw new ProviderFailure('DISCLOSURE_DENIED');
@@ -653,9 +740,9 @@ export class SearchController {
     return Object.freeze([...value]);
   }
   private clearRetainedHistory(session:RetainedChatSessionOwner|undefined):void {
-    const entry=session&&this.retainedSessions.get(session); if (entry) entry.history=[];
+    const entry=session&&this.retainedSessions.get(session); if (entry) {entry.history=[];entry.policyPort=undefined;}
   }
-  private clearAllRetainedHistory():void { for(const entry of this.retainedSessions.values()) entry.history=[]; }
+  private clearAllRetainedHistory():void { for(const entry of this.retainedSessions.values()) {entry.history=[];entry.policyPort=undefined;} }
   private clearRetainedGeneration(retained: RetainedScopedTurn): void {
     retained.draft=undefined;
     retained.preview=undefined;
@@ -676,7 +763,10 @@ export class SearchController {
       if (this.ownedRetainedTurn(retained.session,retained.owner)!==operation || retained.check!==check
         || retained.lease!==lease || retained.configuration!==pinned
         || !this.generationCredential.current(retained.owner,binding,stamp)) throw new ProviderFailure('CANCELLED');
-      const history=this.retainedSessions.get(retained.session)?.history;
+      const entry=this.retainedSessions.get(retained.session),history=entry?.history;
+      if(retained.prior?.length&&(!entry||!this.historyCompatible(entry,lease.snapshot,config)||entry.history!==history))
+        throw new ProviderFailure('CANCELLED');
+      check();
       if (retained.prior?.some(item=>!history?.some(turn=>turn.id===item.id && turn.questionDigest===item.questionDigest && turn.question===item.question)))
         throw new ProviderFailure('CANCELLED');
       return {config,binding,scopeId,port};
@@ -738,25 +828,52 @@ export class SearchController {
     return Buffer.byteLength(JSON.stringify({history,lastUsed}),'utf8');
   }
   private prepareCompletedTurn(session:RetainedChatSessionOwner,retained:RetainedScopedTurn,
-    preview:RetainedChatGenerationPreview,claims:readonly GeneratedEvidenceClaim[]):()=>boolean {
+    preview:RetainedChatGenerationPreview,claims:readonly GeneratedEvidenceClaim[],policyPort:GenerationPolicyPort|undefined,historyRevision:string|null):()=>boolean {
     const entry=this.retainedSessions.get(session);
     if (!entry || !retained.question || !retained.lease || Buffer.byteLength(retained.question,'utf8')>MAX_STORED_QUESTION_BYTES)
       throw new ProviderFailure('LIMIT_EXCEEDED');
+    const scope=retained.lease.snapshot,engine=this.engine,port=this.generationPort,revision=this.revision;
+    if(!this.historyCompatible(entry,scope,preview.config)){
+      if(retained.prior?.length)throw new ProviderFailure('CANCELLED');
+      this.clearRetainedHistory(session);
+    }
     const previous=entry.history, completedAt=Date.now();
+    const hits=retained.response!.hits;
+    const sources=hits.map(hit=>({sourceId:hit.sourceId,sourceSha256:hit.sourceSha256,excerptDigest:hash(hit.originalExcerpt)}));
+    const lineage:ChatHistoryLineage={version:1,use:'local-only',selector:structuredClone(scope.selector),
+      policyRevision:historyRevision,policyBindingDigest:preview.policy?.bindingDigest??null,
+      payloadDigest:generationPolicyPayload(preview.composedQuestion.text,hits.map(hit=>({sourceId:hit.sourceId,sourceSha256:hit.sourceSha256,text:hit.originalExcerpt}))),
+      sourceDigest:generationPolicySourceDigest({role:'generation',sources}),
+      questions:[...preview.priorQuestions,preview.question].map(({id,digest,classification})=>({id,digest,classification}))};
     const turn=Object.freeze({id:randomUUID(),
       question:retained.question,questionDigest:hash(retained.question),claims:structuredClone(claims),scopeDigest:preview.scopeDigest,
-      configuration:retained.configuration!,generationId:retained.lease.snapshot.generationId,sourceRevision:this.sourceRevision,completedAt});
+      configuration:retained.configuration!,generationId:retained.lease.snapshot.generationId,sourceRevision:this.sourceRevision,completedAt,lineage});
     const candidate=[...previous,turn];
     while(candidate.length>MAX_COMPLETED_TURNS || this.serializedHistoryBytes(candidate,completedAt)>MAX_SESSION_HISTORY_BYTES) candidate.shift();
     if (!candidate.includes(turn)) throw new ProviderFailure('LIMIT_EXCEEDED');
     // The four per-session envelopes imply the aggregate bound. Do not mutate
     // any transcript until logical retirement and publication checks succeed.
     const publish=():boolean=>{
-      if (this.retainedSessions.get(session)!==entry || entry.history!==previous) return false;
+      const owns=()=>!this.disposed&&this.revision===revision&&this.engine===engine&&this.generationPort===port
+        &&this.retainedSessions.get(session)===entry&&entry.history===previous&&this.sourceRevision===turn.sourceRevision;
+      if(!owns())return false;
+      try {
+        const pref=port?.config();
+        if(pref?.state!=='configured'||port?.scopeId()!==scope.rootId||this.engine?.status().generationId!==scope.generationId
+          ||JSON.stringify([configDigest('generation',pref),scope.rootId])!==turn.configuration
+          ||this.selectedGenerationPolicy()!==policyPort||this.historyPolicyRevision(scope,pref,policyPort)!==historyRevision
+          ||!owns()){
+          if(owns())this.clearRetainedHistory(session);
+          return false;
+        }
+      }catch{
+        if(owns())this.clearRetainedHistory(session);
+        return false;
+      }
       const total=[...this.retainedSessions.values()].reduce((size,item)=>size+
         this.serializedHistoryBytes(item===entry?candidate:item.history,item===entry?completedAt:item.lastUsed),0);
       if(total>MAX_HISTORY_BYTES) return false;
-      entry.history=candidate;entry.lastUsed=completedAt;return true;
+      entry.history=candidate;entry.policyPort=policyPort;entry.lastUsed=completedAt;return true;
     };
     return publish;
   }
@@ -848,11 +965,14 @@ export class SearchController {
           const bare={...draft,config,scopeId,scopeDigest,composedQuestion:Object.freeze(composed),
             expiresUnixMs:operation.context.deadlineUnixMs,inputBytes};
           const policyPort=this.selectedGenerationPolicy();
+          const historyRevision=this.historyPolicyRevision(lease.snapshot,config,policyPort);current();
           const policy=policyPort?await this.evaluateRetainedGenerationPolicy(bare,lease.snapshot,hits,record.stamp,operation.context,()=>{current();return retained.draft===record&&this.selectedGenerationPolicy()===policyPort;}):undefined;
           current();
-          if(this.selectedGenerationPolicy()!==policyPort)throw new ProviderFailure('CANCELLED');
+          if(this.selectedGenerationPolicy()!==policyPort||this.historyPolicyRevision(lease.snapshot,config,policyPort)!==historyRevision)
+            throw new ProviderFailure('CANCELLED');
+          current();
           const preview=Object.freeze({...bare,...(policy?{policy}:{})});
-          retained.preview={view:preview,draft:record,policyPort};
+          retained.preview={view:preview,draft:record,policyPort,historyRevision};
           resolve(preview);
         } catch(error) {
           const reason=deadlineFailure(operation.context)??(error instanceof ProviderFailure?error:new ProviderFailure('SOURCE_STALE'));
@@ -904,7 +1024,8 @@ export class SearchController {
         try {
           this.retainedGenerationCurrent(operation,retained,envelope.draft.stamp);
           const policyPort=this.selectedGenerationPolicy();
-          if(!!preview.policy!==!!policyPort||policyPort!==envelope.policyPort)return false;
+          if(!!preview.policy!==!!policyPort||policyPort!==envelope.policyPort
+            ||this.historyPolicyRevision(retained.lease!.snapshot,config,policyPort)!==envelope.historyRevision)return false;
           if(preview.policy&&policyPort&&!policyPort.current(this.retainedPolicyInput(preview,retained.lease!.snapshot,
             retained.response!.hits,envelope.draft.stamp,context),preview.policy))return false;
           this.retainedGenerationCurrent(operation,retained,envelope.draft.stamp);
@@ -931,7 +1052,8 @@ export class SearchController {
       if(!current())throw new ProviderFailure('CANCELLED');
       remainingOperationMs(context);
       const detached=structuredClone(claims);
-      const publish=detached.length?this.prepareCompletedTurn(session,retained,preview,detached):undefined;
+      const publish=detached.length?this.prepareCompletedTurn(session,retained,preview,detached,envelope.policyPort,envelope.historyRevision):undefined;
+      if(!current())throw new ProviderFailure('CANCELLED');
       this.retireScopedRetrieval(operation,'CANCELLED');
       if(this.disposed || this.revision!==operation.revision || this.sourceRevision!==operation.sourceRevision
         || !this.retainedSessions.has(session)) return chatFailure('CANCELLED');
@@ -1150,6 +1272,10 @@ export class SearchController {
           const entry=this.retainedSessions.get(retained.session);
           const scopeDigest=hash(JSON.stringify(lease.snapshot));
           const selected=retained.priorIds ?? [];
+          const pref=this.generationPort?.config();
+          if(entry?.history.length&&(pref?.state!=='configured'||!this.historyCompatible(entry,lease.snapshot,pref)))
+            this.clearRetainedHistory(retained.session);
+          current(lease);
           if (entry?.history.some(turn=>turn.scopeDigest!==scopeDigest || turn.configuration!==config
               || turn.generationId!==generation || turn.sourceRevision!==this.sourceRevision)) this.clearRetainedHistory(retained.session);
           const prior=selected.map(id=>entry?.history.find(turn=>turn.id===id));

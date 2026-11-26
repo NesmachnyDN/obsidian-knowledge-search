@@ -795,7 +795,11 @@ test('06H.2-A2b2d: serialized history limits reject atomically and evict only an
     await complete(sessions[3]!,'byte-eviction');
     assert.equal(c.readRetainedChatHistory(sessions[3]!).length,1);
     assert.notEqual(c.readRetainedChatHistory(sessions[3]!)[0]!.id,priorLarge);
-    const sizes=sessions.map(session=>Buffer.byteLength(JSON.stringify({history:c.readRetainedChatHistory(session),lastUsed:Date.now()}),'utf8'));
+    const sizes:number[]=[];
+    for(const session of sessions){
+      const verified=await c.readVerifiedRetainedChatHistory(session);assert.equal(verified.ok,true);
+      if(verified.ok)sizes.push(Buffer.byteLength(JSON.stringify({history:verified.value,lastUsed:Date.now()}),'utf8'));
+    }
     assert.ok(sizes.every(size=>size<=64*1024));
     assert.ok(sizes.reduce((sum,size)=>sum+size,0)<=256*1024);
     const active=c.startRetainedChatTurn(sessions[3]!,selector,{...request,requestId:'active',query:'active'});
@@ -848,4 +852,34 @@ test('06H.2-A2b2d: history revocation clears prior context and stale consent per
       }finally{c.dispose();}
     },(req,res)=>{calls++;req.resume();reply(res,generated([{kind:'quotation',text:hit.originalExcerpt,citationIds:[0]}]));});
   }
+});
+
+test('POLICY.3d2 history read cancellation settles logically and preserves one physical scope slot',async()=>{
+  const cfg:ProviderConfig={state:'configured',transport:'local',origin:'http://127.0.0.1:1',
+    identity:{model:'synthetic',revision:'v1'},limits:{timeoutMs:1000,maxInputBytes:4096,maxCandidates:3,maxOutputTokens:32,maxConcurrent:1}};
+  const c=new SearchController(async()=>{},undefined,undefined,undefined,{config:()=>cfg,scopeId:()=>root,verify:async()=>{}});
+  const held=deferred<void>(),entered=deferred<void>();let hold=false;
+  try{
+    c.attach(engine(async()=>lease({verify:async()=>{if(hold){entered.resolve();await held.promise;}}})));
+    (c as unknown as {generator:{run:()=>Promise<readonly {kind:'quotation';text:string;citations:readonly EvidenceHit[]}[]>}}).generator={
+      run:async()=>[{kind:'quotation',text:hit.originalExcerpt,citations:[hit]}]};
+    const session=c.openRetainedChatSession(),turn=c.startRetainedChatTurn(session,selector,request);
+    assert.equal((await turn.result).ok,true);
+    const stamp=await c.bindRetainedGenerationCredential(session,turn.owner,'synthetic');
+    let draft=c.createRetainedChatClassificationDraft(session,turn.owner,stamp);
+    draft=c.attestRetainedChatClassification(session,turn.owner,draft,draft.question.id,'synthetic');
+    draft=c.attestRetainedChatClassification(session,turn.owner,draft,draft.evidence[0]!.id,'synthetic');
+    assert.equal((await c.confirmRetainedChatGeneration(session,turn.owner,await c.prepareRetainedChatGeneration(session,turn.owner,draft))).ok,true);
+    hold=true;
+    const read=c.readVerifiedRetainedChatHistory(session);await entered.promise;
+    assert.deepEqual(await c.readVerifiedRetainedChatHistory(session),error('BUSY'));
+    assert.deepEqual(await c.startScopedChatRetrieval(selector,request).result,error('BUSY'));
+    c.invalidateSource([]);
+    assert.deepEqual(await read,error('SUPERSEDED'));
+    assert.deepEqual(c.readRetainedChatHistory(session),[]);
+    assert.deepEqual(await c.startScopedChatRetrieval(selector,request).result,error('BUSY'));
+    hold=false;held.resolve();await flush();
+    assert.equal((await c.startScopedChatRetrieval(selector,request).result).ok,true);
+    assert.deepEqual(await c.readVerifiedRetainedChatHistory(session),{apiVersion:1,ok:true,value:[]});
+  }finally{held.resolve();c.dispose();}
 });
