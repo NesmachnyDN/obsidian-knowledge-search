@@ -1,6 +1,6 @@
 import { constants, type BigIntStats } from 'node:fs';
 import { homedir } from 'node:os';
-import { lstat, open, readlink, realpath, stat } from 'node:fs/promises';
+import { lstat, open, opendir, readlink, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { BOUNDS, StandaloneError, hash, isDigest, validPath } from './contracts';
 
@@ -22,6 +22,15 @@ export type OriginalVersionProof = Readonly<{
 export type DescriptorLifecycleProof = Readonly<{
   version: OriginalVersionProof; stableIdentity: string;
 }>;
+/**
+ * A bounded, fail-closed observation for future lifecycle baseline work.
+ * This is intentionally not SourceProvider.list(): Basic indexing keeps its
+ * native enumeration contract and does not claim this stronger observation.
+ */
+export type CompleteMarkdownInventory = Readonly<{
+  rootId: string;
+  sources: readonly DescriptorLifecycleProof[];
+}>;
 
 function regularOriginal(info: BigIntStats): boolean {
   return info.isFile() && !info.isSymbolicLink() && info.nlink === 1n;
@@ -32,6 +41,20 @@ function versionFields(info: BigIntStats): string[] {
 function sameVersion(a: BigIntStats, b: BigIntStats): boolean {
   return regularOriginal(b) && a.dev === b.dev && a.ino === b.ino && a.size === b.size
     && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs && a.birthtimeNs === b.birthtimeNs;
+}
+type InventoryObservation = { files: Map<string, string[]>; directories: Map<string, string[]> };
+
+function sameDirectory(a: BigIntStats, b: BigIntStats): boolean {
+  return b.isDirectory() && !b.isSymbolicLink() && a.dev === b.dev && a.ino === b.ino
+    && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs && a.birthtimeNs === b.birthtimeNs;
+}
+function originalVersionId(rootId: string, path: string, sha256: string, fields: string[]): string {
+  return hash(JSON.stringify(['oks-original-version-v1', rootId, path, sha256, fields]));
+}
+function sameLifecycleProof(a: DescriptorLifecycleProof, b: DescriptorLifecycleProof): boolean {
+  return a.stableIdentity === b.stableIdentity && a.version.rootId === b.version.rootId
+    && a.version.sourceId === b.version.sourceId && a.version.sha256 === b.version.sha256
+    && a.version.versionId === b.version.versionId;
 }
 // FileSystemAdapter.getBasePath() supplies the trusted authoritative root.
 // Node descriptor reads are deliberately not Vault.cachedRead: the cache may be stale
@@ -68,6 +91,141 @@ export class BoundedVaultReader implements SourceProvider {
     if (!files.every(validPath) || new Set(files).size !== files.length)
       throw new StandaloneError('SOURCE_REJECTED');
     return [...files].sort();
+  }
+  /**
+   * Observe the canonical supported Markdown domain (visible paths only).
+   * Dot-prefixed subtrees and regular non-Markdown attachments are explicitly
+   * outside this domain. An unsafe or unsupported visible path denies the
+   * observation. This is not a filesystem snapshot or admission authority.
+   */
+  async completeMarkdownInventory(signal?: AbortSignal): Promise<CompleteMarkdownInventory> {
+    const check = (): void => {
+      if (signal?.aborted) throw new StandaloneError('INVENTORY_CANCELLED');
+    };
+    const native = (): string[] => {
+      check();
+      let paths: string[];
+      try { paths = this.enumeration(); } catch { throw new StandaloneError('SOURCE_REJECTED'); }
+      if (!Array.isArray(paths) || paths.length > BOUNDS.sources)
+        throw new StandaloneError('SOURCE_LIMIT');
+      if (!paths.every(validPath) || new Set(paths).size !== paths.length)
+        throw new StandaloneError('SOURCE_REJECTED');
+      return [...paths].sort();
+    };
+    const equalPaths = (a: readonly string[], b: readonly string[]): boolean =>
+      a.length === b.length && a.every((path, index) => path === b[index]);
+    const equalMap = (a: Map<string,string[]>, b: Map<string,string[]>): boolean =>
+      a.size === b.size && [...a].every(([path, fields]) => {
+        const other = b.get(path);
+        return other !== undefined && equalPaths(fields, other);
+      });
+    const first = await this.walkSupportedMarkdown(check);
+    const paths = [...first.files.keys()].sort();
+    if (!equalPaths(paths, native())) throw new StandaloneError('SOURCE_CHANGED');
+    const proofs: DescriptorLifecycleProof[] = [];
+    for (const path of paths) {
+      check();
+      const proof = await this.readLifecycleProof(path);
+      // Bind the protected read to the same metadata observed in the walk.
+      if (proof.version.versionId !== originalVersionId(this.rootId, path, proof.version.sha256, first.files.get(path)!)) throw new StandaloneError('SOURCE_CHANGED');
+      proofs.push(proof);
+    }
+    const recheck = async (): Promise<void> => {
+      if (!equalPaths(paths, native())) throw new StandaloneError('SOURCE_CHANGED');
+      const observed = await this.walkSupportedMarkdown(check);
+      if (!equalMap(first.files, observed.files) || !equalMap(first.directories, observed.directories))
+        throw new StandaloneError('SOURCE_CHANGED');
+    };
+    await recheck();
+    for (let i = 0; i < paths.length; i++) {
+      check();
+      if (!sameLifecycleProof(proofs[i]!, await this.readLifecycleProof(paths[i]!)))
+        throw new StandaloneError('SOURCE_CHANGED');
+    }
+    await recheck();
+    await this.rootCheck();
+    check();
+    return Object.freeze({ rootId: this.rootId, sources: Object.freeze(proofs) });
+  }
+
+  private async walkSupportedMarkdown(check: () => void): Promise<InventoryObservation> {
+    const flags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
+    const files = new Map<string,string[]>(), directories = new Map<string,string[]>();
+    const identities = new Set<string>();
+    const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+    let total = 0;
+    const walk = async (directory: Awaited<ReturnType<typeof open>>, prefix: string, depth: number): Promise<void> => {
+      check();
+      if (depth > BOUNDS.inventoryDepth) throw new StandaloneError('SOURCE_LIMIT');
+      const before = await directory.stat({ bigint: true });
+      const identity = JSON.stringify([before.dev.toString(), before.ino.toString()]);
+      if (!before.isDirectory() || before.isSymbolicLink() || before.dev !== BigInt(this.device)
+          || identities.has(identity)) throw new StandaloneError('SOURCE_REJECTED');
+      identities.add(identity);
+      const descriptor = '/proc/self/fd/' + directory.fd;
+      // Stream entries with bounded buffering rather than allocating a complete
+      // readdir result before checking its length. Reject undecodable names.
+      // Node supports raw Buffer names at runtime; current @types/node omits
+      // that encoding for opendir. The runtime result is checked below.
+      const entries = await opendir(descriptor, { encoding: 'buffer' as BufferEncoding, bufferSize: 16 });
+      let count = 0;
+      try {
+        for (;;) {
+          check();
+          const entry = await entries.read();
+          if (!entry) break;
+          if (++count > BOUNDS.inventoryDirectoryEntries || ++total > BOUNDS.inventoryEntries)
+            throw new StandaloneError('SOURCE_LIMIT');
+          const raw: unknown = entry.name;
+          if (!Buffer.isBuffer(raw)) throw new StandaloneError('SOURCE_REJECTED');
+          const name = decoder.decode(raw);
+          if (!name || name.includes('/') || name.includes('\\0'))
+            throw new StandaloneError('SOURCE_REJECTED');
+          // Canonical validPath excludes hidden paths. Do not follow or read
+          // their contents, including Obsidian configuration and Git metadata.
+          if (name.startsWith('.')) continue;
+          const relative = prefix + name;
+          const descriptorPath = descriptor + '/' + name;
+          const info = await lstat(descriptorPath, { bigint: true });
+          if (info.isDirectory() && !info.isSymbolicLink()) {
+            if (!validPath(relative + '/x.md')) throw new StandaloneError('SOURCE_REJECTED');
+            const child = await open(descriptorPath, flags);
+            try {
+              if (!sameDirectory(info, await child.stat({ bigint: true })))
+                throw new StandaloneError('SOURCE_CHANGED');
+              await walk(child, relative + '/', depth + 1);
+            } finally { await child.close(); }
+          } else {
+            // A symlink or special file might conceal another subtree. Never
+            // accept it as an ignored attachment.
+            if (!info.isFile() || info.isSymbolicLink()) throw new StandaloneError('SOURCE_REJECTED');
+            if (!relative.toLowerCase().endsWith('.md')) continue;
+            if (!validPath(relative) || !regularOriginal(info) || files.has(relative))
+              throw new StandaloneError('SOURCE_REJECTED');
+            if (info.size < 0n || info.size > BigInt(BOUNDS.fileBytes) || files.size >= BOUNDS.sources)
+              throw new StandaloneError('SOURCE_LIMIT');
+            files.set(relative, versionFields(info));
+          }
+        }
+      } finally { await entries.close(); }
+      const after = await directory.stat({ bigint: true });
+      const expectedPath = prefix ? join(this.root, prefix.slice(0, -1)) : this.root;
+      if (!sameDirectory(before, after) || await readlink(descriptor) !== expectedPath)
+        throw new StandaloneError('SOURCE_CHANGED');
+      directories.set(prefix, versionFields(after));
+    };
+    let root: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      check(); await this.rootCheck(); root = await open(this.root, flags);
+      const info = await root.stat({ bigint: true });
+      if (info.dev !== BigInt(this.device) || info.ino !== BigInt(this.inode))
+        throw new StandaloneError('VAULT_IDENTITY_CHANGED');
+      await walk(root, '', 0); await this.rootCheck(); check();
+      return {files, directories};
+    } catch (cause) {
+      if (cause instanceof StandaloneError) throw cause;
+      throw new StandaloneError('SOURCE_REJECTED');
+    } finally { await root?.close(); }
   }
   // Cheap authoritative metadata check for *all* enumerated notes on search.
   // The opaque hints are never evidence: a bounded full SHA-256 audit still runs
@@ -124,7 +282,7 @@ export class BoundedVaultReader implements SourceProvider {
   private versionProof(relative:string, observed:{bytes:Uint8Array;version:string[]}):OriginalVersionProof {
     const sha256 = hash(observed.bytes);
     return Object.freeze({ rootId: this.rootId, sourceId: relative, sha256,
-      versionId: hash(JSON.stringify(['oks-original-version-v1', this.rootId, relative, sha256, observed.version])) });
+      versionId: originalVersionId(this.rootId, relative, sha256, observed.version) });
   }
   private async readOriginal(relative: string): Promise<{bytes: Uint8Array; version: string[]; info: BigIntStats}> {
     if (!validPath(relative)) throw new StandaloneError('SOURCE_REJECTED');
