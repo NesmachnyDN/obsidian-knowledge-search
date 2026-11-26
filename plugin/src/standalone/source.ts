@@ -1,6 +1,6 @@
-import { constants } from 'node:fs';
+import { constants, type BigIntStats } from 'node:fs';
 import { homedir } from 'node:os';
-import { lstat, open, realpath, stat } from 'node:fs/promises';
+import { lstat, open, readlink, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { BOUNDS, StandaloneError, hash, isDigest, validPath } from './contracts';
 
@@ -9,6 +9,20 @@ export interface SourceProvider {
   list(): Promise<string[]>;
   versionHints(paths: readonly string[]): Promise<string[]>;
   read(path: string): Promise<Uint8Array>;
+}
+export type OriginalVersionProof = Readonly<{
+  rootId: string; sourceId: string; sha256: string; versionId: string;
+}>;
+
+function regularOriginal(info: BigIntStats): boolean {
+  return info.isFile() && !info.isSymbolicLink() && info.nlink === 1n;
+}
+function versionFields(info: BigIntStats): string[] {
+  return [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs, info.birthtimeNs].map(value => value.toString());
+}
+function sameVersion(a: BigIntStats, b: BigIntStats): boolean {
+  return regularOriginal(b) && a.dev === b.dev && a.ino === b.ino && a.size === b.size
+    && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs && a.birthtimeNs === b.birthtimeNs;
 }
 // FileSystemAdapter.getBasePath() supplies the trusted authoritative root.
 // Node descriptor reads are deliberately not Vault.cachedRead: the cache may be stale
@@ -79,16 +93,29 @@ export class BoundedVaultReader implements SourceProvider {
     return hints;
   }
   async read(relative: string): Promise<Uint8Array> {
+    return (await this.readOriginal(relative)).bytes;
+  }
+  // This is an observed original version, not lifecycle admission or authority.
+  async readVersionProof(relative: string): Promise<OriginalVersionProof> {
+    const { bytes, version } = await this.readOriginal(relative);
+    const sha256 = hash(bytes);
+    return Object.freeze({ rootId: this.rootId, sourceId: relative, sha256,
+      versionId: hash(JSON.stringify(['oks-original-version-v1', this.rootId, relative, sha256, version])) });
+  }
+  private async readOriginal(relative: string): Promise<{bytes: Uint8Array; version: string[]}> {
     if (!validPath(relative)) throw new StandaloneError('SOURCE_REJECTED');
     const parts = relative.split('/');
     // Linux descriptor-anchored walk forbids redirecting an ancestor via symlink.
     const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
+    let rootDirectory: Awaited<ReturnType<typeof open>> | undefined;
     let directory: Awaited<ReturnType<typeof open>> | undefined;
     let handle: Awaited<ReturnType<typeof open>> | undefined;
+    let finalDirectory: Awaited<ReturnType<typeof open>> | undefined;
     try {
       try {
-        directory = await open(this.root, directoryFlags);
-        const rootInfo = await directory.stat();
+        rootDirectory = await open(this.root, directoryFlags);
+        directory = rootDirectory;
+        const rootInfo = await rootDirectory.stat();
         if (!rootInfo.isDirectory() || rootInfo.dev !== this.device || rootInfo.ino !== this.inode)
           throw new StandaloneError('VAULT_IDENTITY_CHANGED');
         await this.rootCheck();
@@ -97,12 +124,12 @@ export class BoundedVaultReader implements SourceProvider {
         const child = await open('/proc/self/fd/' + directory.fd + '/' + part, directoryFlags);
         const previous = directory;
         directory = child;
-        await previous.close();
+        if (previous !== rootDirectory) await previous.close();
       }
       handle = await open('/proc/self/fd/' + directory.fd + '/' + parts[parts.length - 1]!,
         constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-      const opened = await handle.stat();
-      if (!opened.isFile() || opened.nlink !== 1 || opened.size > BOUNDS.fileBytes || opened.size < 0)
+      const opened = await handle.stat({ bigint: true });
+      if (!regularOriginal(opened) || opened.size > BigInt(BOUNDS.fileBytes) || opened.size < 0n)
         throw new StandaloneError('SOURCE_REJECTED');
       const bytes = Buffer.allocUnsafe(BOUNDS.fileBytes + 1);
       let count = 0;
@@ -112,15 +139,29 @@ export class BoundedVaultReader implements SourceProvider {
         count += bytesRead;
       }
       if (count > BOUNDS.fileBytes) throw new StandaloneError('SOURCE_LIMIT');
-      const after = await handle.stat();
       const target = join(this.root, ...parts);
-      const pathAfter = await lstat(target);
+      // The opened parent can be moved outside the root during the read.
+      // Rewalk nested ancestry without following any substituted symlink.
+      // For a root-level note the initial root descriptor is still anchored.
+      for (const part of parts.slice(0, -1)) {
+        const parent = finalDirectory ?? rootDirectory;
+        const child = await open('/proc/self/fd/' + parent.fd + '/' + part, directoryFlags);
+        const previous = finalDirectory;
+        finalDirectory = child;
+        await previous?.close();
+      }
+      const finalParent = finalDirectory ?? directory;
+      const pathAfter = await lstat('/proc/self/fd/' + finalParent.fd + '/' + parts[parts.length - 1]!,
+        { bigint: true });
       await this.rootCheck();
-      if (after.size !== count || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs
-          || after.ino !== opened.ino || after.dev !== opened.dev
-          || pathAfter.ino !== opened.ino || pathAfter.dev !== opened.dev
-          || pathAfter.isSymbolicLink()) throw new StandaloneError('SOURCE_CHANGED');
-      return bytes.subarray(0, count);
+      const after = await handle.stat({ bigint: true });
+      // Linux procfs reports the actual descriptor path, not the caller's
+      // pathname alias. An observed escaped, removed or replaced path denies.
+      if (after.size !== BigInt(count) || !sameVersion(opened, after)
+          || !sameVersion(opened, pathAfter)
+          || await readlink('/proc/self/fd/' + handle.fd) !== target)
+        throw new StandaloneError('SOURCE_CHANGED');
+      return { bytes: bytes.subarray(0, count), version: versionFields(opened) };
     } catch (cause) {
       if (cause instanceof StandaloneError) throw cause;
       // ENOTDIR/ELOOP from descriptor traversal is an explicit denied source,
@@ -128,7 +169,11 @@ export class BoundedVaultReader implements SourceProvider {
       await this.rootCheck();
       throw new StandaloneError('SOURCE_REJECTED');
     } finally {
-      try { await handle?.close(); } finally { await directory?.close(); }
+      try { await handle?.close(); } finally {
+        try { await finalDirectory?.close(); } finally {
+          try { if (directory !== rootDirectory) await directory?.close(); } finally { await rootDirectory?.close(); }
+        }
+      }
     }
   }
 }
