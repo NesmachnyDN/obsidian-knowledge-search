@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile, unlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, unlink, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -156,5 +156,162 @@ test('native baseline overlapping preview or confirmation cannot acquire authori
     const first=f.owner.confirmBaselinePreview(result.preview),second=f.owner.confirmBaselinePreview(result.preview);
     assert.equal((await second).outcome,'denied');assert.equal((await first).outcome,'denied');assert.equal(f.owner.exactAuthorityActive(),false);
     await f.owner.close();const ledger=await f.open();try{assert.equal(await ledger.read(),null);}finally{await ledger.close();}
+  });
+});
+
+test('owner serializes canonical create, modify, rename and delete into the real ledger',async()=>{
+  await fixture('fresh',async f=>{
+    const baseline=await f.owner.prepareBaselinePreview();assert.ok(baseline.ok);
+    assert.deepEqual(await f.owner.confirmBaselinePreview(baseline.preview),{outcome:'admitted'});
+    const a=f.owners.get('a.md')!;
+    await writeFile(join(f.root,'a.md'),'modified synthetic original');
+    assert.deepEqual(await f.owner.admitLiveTransition({event:{sequence:1,kind:'modify'},owner:a,sourceId:'a.md',current:()=>true}),{outcome:'admitted'});
+    await rename(join(f.root,'a.md'),join(f.root,'b.md'));f.owners.delete('a.md');f.owners.set('b.md',a);
+    assert.deepEqual(await f.owner.admitLiveTransition({event:{sequence:2,kind:'rename'},owner:a,sourceId:'a.md',destinationId:'b.md',current:()=>true}),{outcome:'admitted'});
+    const c={};await writeFile(join(f.root,'c.md'),'created synthetic original');f.owners.set('c.md',c);
+    assert.deepEqual(await f.owner.admitLiveTransition({event:{sequence:3,kind:'create'},owner:c,sourceId:'c.md',current:()=>true}),{outcome:'admitted'});
+    await unlink(join(f.root,'c.md'));f.owners.delete('c.md');
+    assert.deepEqual(await f.owner.admitLiveTransition({event:{sequence:4,kind:'delete'},owner:c,sourceId:'c.md',current:()=>true}),{outcome:'admitted'});
+    assert.equal(f.owner.exactAuthorityActive(),true);
+    await f.owner.close();const ledger=await f.open();try{
+      const loaded=await ledger.read();assert.equal(loaded?.snapshot.revision,5);
+      assert.deepEqual(loaded?.snapshot.entries.map(entry=>[entry.sourceId,entry.state]),[['a.md','deleted'],['b.md','existing'],['c.md','deleted']]);
+    }finally{await ledger.close();}
+  });
+});
+
+test('owner denies stale or incomplete live transition evidence and physically retires',async()=>{
+  for(const kind of ['replay','owner','unrelated'] as const)await fixture('fresh',async f=>{
+    const baseline=await f.owner.prepareBaselinePreview();assert.ok(baseline.ok);assert.equal((await f.owner.confirmBaselinePreview(baseline.preview)).outcome,'admitted');
+    const a=f.owners.get('a.md')!;await writeFile(join(f.root,'a.md'),'changed');
+    if(kind==='owner')f.owners.set('a.md',{});
+    if(kind==='unrelated'){await writeFile(join(f.root,'missed.md'),'missed');f.owners.set('missed.md',{});}
+    const event={sequence:kind==='replay'?2:1,kind:'modify' as const};
+    assert.equal((await f.owner.admitLiveTransition({event,owner:a,sourceId:'a.md',current:()=>true})).outcome,'denied',kind);
+    assert.equal(f.owner.exactAuthorityActive(),false);assert.equal(f.owner.readiness(),'retired');
+    await f.owner.close();const ledger=await f.open();try{assert.equal((await ledger.read())?.snapshot.revision,1);}finally{await ledger.close();}
+  });
+});
+
+test('live transition disables classification and export while durable publication is pending',async()=>{
+  await fixture('fresh',async f=>{
+    const baseline=await f.owner.prepareBaselinePreview();assert.ok(baseline.ok);assert.equal((await f.owner.confirmBaselinePreview(baseline.preview)).outcome,'admitted');
+    const a=f.owners.get('a.md')!,before=await f.reader.readLifecycleProof('a.md');await writeFile(join(f.root,'a.md'),'changed');
+    const original=f.reader.completeMarkdownInventory.bind(f.reader);let calls=0,release!:()=>void,entered!:()=>void;
+    const gate=new Promise<void>(resolve=>{release=resolve;}),waiting=new Promise<void>(resolve=>{entered=resolve;});
+    f.reader.completeMarkdownInventory=async signal=>{if(++calls===2){entered();await gate;}return original(signal);};
+    const pending=f.owner.admitLiveTransition({event:{sequence:1,kind:'modify'},owner:a,sourceId:'a.md',current:()=>true});
+    try{
+      assert.equal(f.owner.exactAuthorityActive(),false);
+      assert.equal(f.tracker.lifecycleState(f.context,a,before),'unresolved');
+      assert.equal(f.tracker.exportCommittedLifecycleEvidence(f.context),null);
+      await waiting;assert.equal(f.owner.exactAuthorityActive(),false);
+      assert.equal(f.tracker.lifecycleState(f.context,a,before),'unresolved');assert.equal(f.tracker.exportCommittedLifecycleEvidence(f.context),null);
+      release();assert.equal((await pending).outcome,'admitted');
+    }finally{release();await pending;}
+  });
+});
+
+
+test('live transition captures mutable input before any host callback or async boundary',async()=>{
+  await fixture('fresh',async f=>{
+    const baseline=await f.owner.prepareBaselinePreview();assert.ok(baseline.ok);
+    assert.equal((await f.owner.confirmBaselinePreview(baseline.preview)).outcome,'admitted');
+    const a=f.owners.get('a.md')!;await writeFile(join(f.root,'a.md'),'changed');
+    const input={event:{sequence:1,kind:'modify' as const},owner:a,sourceId:'a.md',current:()=>true};
+    const pending=f.owner.admitLiveTransition(input);input.event.sequence=2;input.sourceId='unknown.md';input.current=()=>false;
+    assert.equal((await pending).outcome,'admitted');
+    await f.owner.close();const ledger=await f.open();try{assert.equal((await ledger.read())?.snapshot.revision,2);}finally{await ledger.close();}
+  });
+});
+
+test('durable authority cannot advance via unguarded or legacy tracker calls',async()=>{
+  for(const kind of ['advance','legacy','rules'] as const)await fixture('fresh',async f=>{
+    const baseline=await f.owner.prepareBaselinePreview();assert.ok(baseline.ok);
+    assert.equal((await f.owner.confirmBaselinePreview(baseline.preview)).outcome,'admitted');
+    const a=f.owners.get('a.md')!,prior=await f.reader.readLifecycleProof('a.md');
+    await writeFile(join(f.root,'a.md'),'changed');const next=await f.reader.readLifecycleProof('a.md');
+    if(kind==='advance')assert.equal(f.tracker.advance(f.context,a,{kind:'modify',sequence:1},prior,next),'unresolved');
+    if(kind==='legacy'){f.tracker.created('a.md',a);assert.equal(f.tracker.state('a.md',a),'unresolved');}
+    if(kind==='rules')assert.equal(f.tracker.reviseRules(f.context,hash('new-rules')),false);
+    assert.equal(f.tracker.exportCommittedLifecycleEvidence(f.context),null);
+    assert.equal(f.tracker.lifecycleState(f.context,a,next),'unresolved');
+    await f.owner.close();const ledger=await f.open();try{assert.equal((await ledger.read())?.snapshot.revision,1);}finally{await ledger.close();}
+  });
+});
+
+test('overlapping live transition retires before publication and drains physical lock',async()=>{
+  await fixture('fresh',async f=>{
+    const baseline=await f.owner.prepareBaselinePreview();assert.ok(baseline.ok);
+    assert.equal((await f.owner.confirmBaselinePreview(baseline.preview)).outcome,'admitted');
+    const a=f.owners.get('a.md')!;await writeFile(join(f.root,'a.md'),'changed');
+    const original=f.reader.completeMarkdownInventory.bind(f.reader);let release!:()=>void,entered!:()=>void;
+    const gate=new Promise<void>(resolve=>{release=resolve;}),waiting=new Promise<void>(resolve=>{entered=resolve;});
+    f.reader.completeMarkdownInventory=async signal=>{entered();await gate;return original(signal);};
+    const event={event:{sequence:1,kind:'modify' as const},owner:a,sourceId:'a.md',current:()=>true};
+    const pending=f.owner.admitLiveTransition(event);
+    try{
+      await waiting;assert.equal((await f.owner.admitLiveTransition(event)).outcome,'denied');
+      assert.equal(f.owner.exactAuthorityActive(),false);await assert.rejects(f.open(),{code:'LIFECYCLE_LEDGER_UNAVAILABLE'});
+      release();assert.equal((await pending).outcome,'denied');
+    }finally{release();await pending;}
+    await f.owner.close();const ledger=await f.open();try{assert.equal((await ledger.read())?.snapshot.revision,1);}finally{await ledger.close();}
+  });
+});
+
+
+test('live transition cancellation before CURRENT denies; after CURRENT is committed-not-live',async()=>{
+  for(const phase of ['before','after'] as const)await fixture('fresh',async f=>{
+    const baseline=await f.owner.prepareBaselinePreview();assert.ok(baseline.ok);
+    assert.equal((await f.owner.confirmBaselinePreview(baseline.preview)).outcome,'admitted');
+    const a=f.owners.get('a.md')!;await writeFile(join(f.root,'a.md'),'changed');
+    const original=f.reader.completeMarkdownInventory.bind(f.reader);let calls=0;
+    f.reader.completeMarkdownInventory=async signal=>{if(++calls===(phase==='before'?2:3))f.owner.retire();return original(signal);};
+    const result=await f.owner.admitLiveTransition({event:{sequence:1,kind:'modify'},owner:a,sourceId:'a.md',current:()=>true});
+    assert.equal(result.outcome,phase==='before'?'denied':'committed-not-live');
+    assert.equal(f.owner.exactAuthorityActive(),false);assert.equal(f.tracker.exportCommittedLifecycleEvidence(f.context),null);
+    await f.owner.close();const ledger=await f.open();try{assert.equal((await ledger.read())?.snapshot.revision,phase==='before'?1:2);}finally{await ledger.close();}
+  });
+});
+
+test('verified-new origin and unrelated records survive same-byte rename and durable reopen',async()=>{
+  await fixture('fresh',async f=>{
+    const baseline=await f.owner.prepareBaselinePreview();assert.ok(baseline.ok);
+    assert.equal((await f.owner.confirmBaselinePreview(baseline.preview)).outcome,'admitted');
+    const existing=f.tracker.exportCommittedLifecycleEvidence(f.context)!.entries[0]!;
+    const b={};await writeFile(join(f.root,'b.md'),'new synthetic');f.owners.set('b.md',b);
+    assert.equal((await f.owner.admitLiveTransition({event:{sequence:1,kind:'create'},owner:b,sourceId:'b.md',current:()=>true})).outcome,'admitted');
+    const prior=await f.reader.readLifecycleProof('b.md');
+    await rename(join(f.root,'b.md'),join(f.root,'c.md'));f.owners.delete('b.md');f.owners.set('c.md',b);
+    const next=await f.reader.readLifecycleProof('c.md');assert.equal(next.version.sha256,prior.version.sha256);
+    assert.equal((await f.owner.admitLiveTransition({event:{sequence:2,kind:'rename'},owner:b,sourceId:'b.md',destinationId:'c.md',current:()=>true})).outcome,'admitted');
+    assert.equal(f.tracker.lifecycleState(f.context,b,next),'verified-new');
+    const entries=f.tracker.exportCommittedLifecycleEvidence(f.context)!.entries;
+    assert.deepEqual(entries,[existing,{sourceId:'b.md',state:'deleted'},{sourceId:'c.md',state:'verified-new',origin:'native-create',originVersionId:prior.version.versionId,proof:next}]);
+    await f.owner.close();const ledger=await f.open();try{
+      assert.deepEqual((await ledger.read())?.snapshot.entries,entries);
+      const tracker=new NewMaterialTracker<object>(),context={...f.context,session:{}};
+      assert.equal(tracker.openLifecycle(context),true);
+      assert.equal(await tracker.restoreCommittedLifecycle(context,ledger,f.reader,{signal:new AbortController().signal,current:()=>true,resolveNativeOwner:path=>f.owners.get(path)??null}),true);
+      assert.equal(tracker.lifecycleState(context,b,next),'verified-new');assert.deepEqual(tracker.exportCommittedLifecycleEvidence(context)?.entries,entries);
+    }finally{await ledger.close();}
+  });
+});
+
+test('same-byte replacement and occupied rename targets retire without durable change',async()=>{
+  for(const kind of ['replacement','collision'] as const)await fixture('fresh',async f=>{
+    const baseline=await f.owner.prepareBaselinePreview();assert.ok(baseline.ok);
+    assert.equal((await f.owner.confirmBaselinePreview(baseline.preview)).outcome,'admitted');
+    const a=f.owners.get('a.md')!;let revision=1;
+    if(kind==='replacement'){
+      await writeFile(join(f.root,'replacement.md'),'synthetic original');await rename(join(f.root,'replacement.md'),join(f.root,'a.md'));
+      assert.equal((await f.owner.admitLiveTransition({event:{sequence:1,kind:'modify'},owner:a,sourceId:'a.md',current:()=>true})).outcome,'denied');
+    }else{
+      const b={};await writeFile(join(f.root,'b.md'),'other');f.owners.set('b.md',b);
+      assert.equal((await f.owner.admitLiveTransition({event:{sequence:1,kind:'create'},owner:b,sourceId:'b.md',current:()=>true})).outcome,'admitted');revision++;
+      await rename(join(f.root,'a.md'),join(f.root,'b.md'));f.owners.delete('a.md');f.owners.set('b.md',a);
+      assert.equal((await f.owner.admitLiveTransition({event:{sequence:2,kind:'rename'},owner:a,sourceId:'a.md',destinationId:'b.md',current:()=>true})).outcome,'denied');
+    }
+    await f.owner.close();const ledger=await f.open();try{assert.equal((await ledger.read())?.snapshot.revision,revision);}finally{await ledger.close();}
   });
 });

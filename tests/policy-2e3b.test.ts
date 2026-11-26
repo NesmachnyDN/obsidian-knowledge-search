@@ -43,7 +43,7 @@ const signal=()=>new AbortController().signal;
 const host=(f:Fixture)=>({signal:signal(),current:()=>true,resolveNativeOwner:(path:string)=>path==='a.md'?f.owner:null});
 const inventory=(owner:object,proof:DescriptorLifecycleProof)=>({complete:true,candidates:[{owner,proof}]});
 
-test('restore authenticates a reopened ledger, exact current original and current native owner; origin survives subsequent verified transition',async()=>{
+test('restore authenticates a reopened ledger, exact current original and current native owner; origin survives restore; direct in-memory transition cannot advance durable evidence',async()=>{
   for(const state of ['existing','verified-new'] as const)await fixture(async f=>{
     const proof=await f.reader.readLifecycleProof('a.md');await f.commit([active(proof,state)]);await f.reopen();
     const value=tracker(f.context),currentOwner={},h={signal:signal(),current:()=>true,resolveNativeOwner:()=>currentOwner};
@@ -57,9 +57,9 @@ test('restore authenticates a reopened ledger, exact current original and curren
     assert.equal(await value.restoreCommittedLifecycle(f.context,f.ledger,f.reader,h),false);
     await writeFile(join(f.root,'a.md'),'edited');const next=await f.reader.readLifecycleProof('a.md');
     assert.equal(value.lifecycleState(f.context,currentOwner,next),'unresolved');
-    assert.equal(value.advance(f.context,currentOwner,{kind:'modify',sequence:1},proof,next),state);
-    const advanced=value.exportCommittedLifecycleEvidence(f.context)!.entries[0]!;
-    assert.deepEqual(advanced,{...active(proof,state),proof:next});
+    assert.equal(value.advance(f.context,currentOwner,{kind:'modify',sequence:1},proof,next),'unresolved');
+    assert.equal(value.exportCommittedLifecycleEvidence(f.context),null);
+    assert.deepEqual((await f.ledger.read())?.snapshot.entries,[active(proof,state)]);
   });
 });
 
@@ -149,9 +149,9 @@ test('initialized empty epoch restores without automatic baseline; baseline flag
     assert.equal(await value.restoreCommittedLifecycle(f.context,f.ledger,f.reader,host(f)),true);
     assert.equal(value.lifecycleState(f.context,f.owner,proof),'unresolved');
     assert.deepEqual(value.exportCommittedLifecycleEvidence(f.context),{baselineAdmitted:false,entries:[]});
-    const i=inventory(f.owner,proof),preview=value.previewInitialBaseline(f.context,i,0,100)!;
-    assert.ok(preview);assert.equal(value.confirmInitialBaseline(f.context,preview,i,1),true);
-    assert.equal(value.previewInitialBaseline(f.context,i,2,100),null);
+    const i=inventory(f.owner,proof);
+    assert.equal(value.previewInitialBaseline(f.context,i,0,100),null);
+    assert.equal((await f.ledger.read())?.snapshot.baselineAdmitted,false);
   });
 });
 
