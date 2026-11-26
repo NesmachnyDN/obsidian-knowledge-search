@@ -5,6 +5,7 @@ import { validNewMaterialRuleConfig, type NewMaterialRuleConfig } from '../ai/ne
 import type { ProviderPreferences } from '../ai/contracts';
 import type { ProbeConfig } from '../controller';
 import type { AdvancedConfig } from '../advanced/health';
+import { parseGraphPreference, type GraphPreference } from './graph-settings';
 
 export type IngestionConfig = {
   enabled: boolean; interpreter: string; entry: string; tokenizerSnapshot: string;
@@ -12,7 +13,7 @@ export type IngestionConfig = {
 };
 export type SearchSettings = {
   version: 6; presentationMode: 'basic' | 'expert'; ai: ProviderPreferences; enabled: boolean; paused: boolean; topK: number; propertiesEnabled: boolean;
-  advanced: AdvancedConfig; ingestion: IngestionConfig; probe: ProbeConfig; markingRules?: NewMaterialRuleConfig;
+  advanced: AdvancedConfig; ingestion: IngestionConfig; probe: ProbeConfig; markingRules?: NewMaterialRuleConfig; graph?: GraphPreference;
 };
 export const defaultSettings = (): SearchSettings => ({
   version: 6, presentationMode: 'basic', ai: defaultProviderPreferences(), enabled: true, paused: false, topK: 10, propertiesEnabled: false,
@@ -64,7 +65,8 @@ export function parseSettings(v: unknown): SearchSettings {
     return { ...defaultSettings(), probe: { ...old } };
   }
   if (!isRecord(v) || ![2,3,4,5,6].includes(v.version as number)
-      || !keys(v, ['version','presentationMode','enabled','paused','topK','propertiesEnabled','advanced','ingestion','probe','ai','markingRules'])
+      || !keys(v, ['version','presentationMode','enabled','paused','topK','propertiesEnabled','advanced','ingestion','probe','ai','markingRules','graph'])
+      || (Object.hasOwn(v,'graph') && v.version!==6)
       || (Object.hasOwn(v,'markingRules') && (v.version!==6 || !validNewMaterialRuleConfig(v.markingRules)))
       || (v.version === 6 && v.presentationMode !== 'basic' && v.presentationMode !== 'expert')
       || (v.version !== 6 && v.presentationMode !== undefined)
@@ -88,5 +90,6 @@ export function parseSettings(v: unknown): SearchSettings {
     ai: (v.version as number) >= 5 ? parseProviderPreferences(v.ai) : defaultProviderPreferences(), enabled:v.enabled, paused:v.paused, topK:v.topK as number,
     propertiesEnabled:v.propertiesEnabled, advanced:active,
     ingestion: { ...ingest }, probe: { ...v.probe },
-    ...(v.markingRules===undefined?{}:{markingRules:structuredClone(v.markingRules as NewMaterialRuleConfig)}) };
+    ...(v.markingRules===undefined?{}:{markingRules:structuredClone(v.markingRules as NewMaterialRuleConfig)}),
+    ...(Object.hasOwn(v,'graph')?{graph:parseGraphPreference(v.graph)}:{}) };
 }

@@ -2181,3 +2181,55 @@ test('06H.2 native registered chat separates retrieve, classify, preview and one
     confirm.onclick!();assert.equal(sends,1);
   }finally{await view?.onClose();await new Promise<void>(r=>server.close(()=>r()));await f.cleanup();}
 });
+
+test('06B.2c graph configuration retirement precedes persistence; failure closes graph and explicit retry restores only committed mapping',async()=>{
+  const {parseGraphDraft}=await import('../plugin/src/search/graph-settings');
+  const mapping=parseGraphDraft(JSON.stringify({schemaVersion:'oks-06b-mapping-v1',rules:[]}))!;
+  const f=await fixture();
+  const scope={mode:'vault-wide'},signal=new AbortController().signal;
+  try{
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    const engine=f.plugin.standalone!;
+    assert.throws(()=>engine.captureGraphScope(scope,signal),/GRAPH_DISABLED/);
+    await f.plugin.patchSettings(s=>{s.graph={state:'configured',mapping};});
+    const old=engine.captureGraphScope(scope,signal);
+    const first=await old.read();assert.equal(first.nodes.length,1);
+    await f.plugin.patchSettings(s=>{s.presentationMode='expert';});
+    assert.equal(old.current(),true); // presentation-only change does not retire
+    const save=f.plugin.saveData.bind(f.plugin);
+    let entered!:()=>void, release!:()=>void;
+    const started=new Promise<void>(r=>entered=r),hold=new Promise<void>(r=>release=r);
+    Object.assign(f.plugin,{saveData:async()=>{entered();await hold;throw new Error('fixture save failure');}});
+    try{
+      const pending=f.plugin.patchSettings(s=>{s.graph={state:'disabled'};});
+      const failure=assert.rejects(pending);
+      await started;
+      assert.equal(old.current(),false);assert.throws(()=>engine.captureGraphScope(scope,signal),/GRAPH_DISABLED/);
+      release();await failure;
+      assert.throws(()=>engine.captureGraphScope(scope,signal),/GRAPH_DISABLED/);
+      assert.equal(engine.status().status,'ready');
+    }finally{release();Object.assign(f.plugin,{saveData:save});}
+    await f.plugin.patchSettings(s=>{s.graph={state:'configured',mapping};});
+    assert.equal((await engine.captureGraphScope(scope,signal).read()).scopedProjectionId,first.scopedProjectionId);
+    await f.plugin.patchSettings(s=>{s.graph={state:'disabled'};});
+    assert.throws(()=>engine.captureGraphScope(scope,signal),/GRAPH_DISABLED/);
+  }finally{await f.cleanup();}
+});
+
+test('06B.2c persisted graph mapping loads on startup while malformed graph does not disable Basic',async()=>{
+  const {parseGraphDraft}=await import('../plugin/src/search/graph-settings');
+  for(const invalid of [false,true]){
+    const f=await fixture();
+    try{
+      const mapping=parseGraphDraft('{"schemaVersion":"oks-06b-mapping-v1","rules":[]}')!;
+      Object.assign(f.plugin,{saved:{...defaultSettings(),graph:{state:'configured',mapping:invalid?{bad:true}:mapping}}});
+      await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+      const engine=f.plugin.standalone!,scope={mode:'vault-wide'},signal=new AbortController().signal;
+      assert.equal(engine.status().status,'ready');
+      if(invalid){assert.equal(f.plugin.settings.graph?.state,'invalid');assert.throws(()=>engine.captureGraphScope(scope,signal),/GRAPH_DISABLED/);}
+      else assert.equal((await engine.captureGraphScope(scope,signal).read()).nodes.length,1);
+      const basic=await engine.search({protocolVersion:2,requestId:'graph-basic',query:'REQ-LIFE-1',requestedMode:'lexical',limit:5});
+      assert.equal(basic.status,'ok');assert.equal(basic.hits.length,1);
+    }finally{await f.cleanup();}
+  }
+});

@@ -155,3 +155,27 @@ test('UX-AC07: embedding-space identity change is visible without a rebuild side
   assert.equal(embeddingSpaceChanged(fixture,{...fixture,origin:'http://127.0.0.1:8766'}),true);
   assert.equal(embeddingSpaceChanged(fixture,{...fixture,limits:{...fixture.limits,maxCandidates:20}}),false);
 });
+
+test('06B.2c optional graph settings are explicit, canonical, independently fail-closed and migration-safe',async()=>{
+  const {parseGraphDraft,configuredGraph}=await import('../plugin/src/search/graph-settings');
+  const initial=defaultSettings();
+  assert.equal(configuredGraph(initial.graph),null);
+  const mapping={schemaVersion:'oks-06b-mapping-v1',businessIdKey:'id',rules:[
+    {relationId:'z',propertyKey:'depends',targetEncoding:'business-id',direction:'author-to-target'},
+    {relationId:'a',propertyKey:'source',targetEncoding:'path',direction:'target-to-author'},
+  ]};
+  const parsed=parseGraphDraft(JSON.stringify(mapping));
+  assert.ok(parsed);assert.deepEqual(parsed.rules.map(r=>r.relationId),['a','z']);
+  const saved=parseSettings({...initial,graph:{state:'configured',mapping}});
+  assert.equal(saved.enabled,true);assert.deepEqual(configuredGraph(saved.graph),parsed);
+  assert.deepEqual(parseSettings(JSON.parse(JSON.stringify(saved))),saved);
+  for (const graph of [null,{}, {state:'configured',mapping:{...mapping,invalid:true}},
+    {state:'configured',mapping,credential:'discard'}, {state:'disabled',extra:true}]) {
+    const bad=parseSettings({...initial,graph});
+    assert.equal(bad.enabled,true);assert.deepEqual(bad.graph,{state:'invalid'});assert.equal(configuredGraph(bad.graph),null);
+  }
+  assert.equal(parseGraphDraft('{"broken":'),null);assert.equal(parseGraphDraft(' '.repeat(16385)),null);
+  const {presentationMode:_mode,...v5}=initial;
+  assert.throws(()=>parseSettings({...v5,version:5,graph:{state:'configured',mapping}}),/SETTINGS_INVALID/);
+  assert.equal(parseSettings({...v5,version:5}).graph,undefined);
+});
