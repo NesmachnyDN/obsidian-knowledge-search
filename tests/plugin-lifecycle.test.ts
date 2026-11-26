@@ -2065,6 +2065,7 @@ test('POLICY.2b native create identity, saved rules, rename and unload guard rea
   const file=Object.assign(new Empty(),{path:'fixture.md'});
   const events=new Map<string,(file:unknown,oldPath?:string)=>void>();
   Object.assign(f.plugin.app.vault,{on:(name:string,fn:(file:unknown,oldPath?:string)=>void)=>{events.set(name,fn);return {};},getAbstractFileByPath:()=>file});
+  Object.assign(f.plugin.app.metadataCache,{on:(name:string,fn:(file:unknown)=>void)=>{events.set('metadata:'+name,fn);return {};}});
   Object.assign(f.plugin.app.workspace,{getActiveFile:()=>file});
   const preview=(f.plugin as unknown as {previewNewMaterial(c:NewMaterialRuleConfig):Promise<NewMaterialDecision>}).previewNewMaterial.bind(f.plugin);
   const rules:NewMaterialRuleConfig={...defaultMarkingRules(),defaultAction:'set-private'};
@@ -2081,6 +2082,10 @@ test('POLICY.2b native create identity, saved rules, rename and unload guard rea
     const modified=Buffer.concat([original,Buffer.from('\n# Modified synthetic')]);
     await writeFile(join(f.vault,file.path),modified);
     events.get('modify')!(file);await f.plugin.standalone!.whenIdle();
+    assert.equal((await preview(rules)).reason,'lifecycle-unresolved');
+    events.get('create')!(file);await f.plugin.standalone!.whenIdle();
+    assert.equal((await preview(rules)).action,'set-private');
+    events.get('metadata:changed')!(file);await f.plugin.standalone!.whenIdle();
     assert.equal((await preview(rules)).reason,'lifecycle-unresolved');
     events.get('create')!(file);await f.plugin.standalone!.whenIdle();
     assert.equal((await preview(rules)).action,'set-private');

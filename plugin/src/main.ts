@@ -211,9 +211,11 @@ export default class SyntheticEvidencePlugin extends Plugin {
     this.addCommand({ id: 'cancel-synthetic-evidence-probe', name: 'Cancel synthetic evidence probe', callback: () => this.controller?.cancel() });
     // Changes can arrive before the asynchronous core has opened; startup does
     // a full authoritative reconciliation after the event handlers are registered.
-    const nativeChange = (file: TAbstractFile, oldPath?: string, fixtureChange = false): void => {
+    const nativeChange = (file: TAbstractFile, oldPath?: string, fixtureChange = false, created = false): void => {
       if (this.unloaded) return;
       const paths = oldPath === undefined ? [file.path] : [file.path, oldPath];
+      if(created&&this.layoutReady&&file instanceof TFile)this.markingTracker.created(file.path,file);
+      else for(const path of paths)this.markingTracker.invalidate(path);
       // Pin concrete owners and immutable path values before any callback.
       const navigator = this.navigator, engine = this.standalone, dense = this.denseHost;
       const ingestion = this.advancedIngestion, retrieval = this.advancedRetrieval;
@@ -230,13 +232,10 @@ export default class SyntheticEvidencePlugin extends Plugin {
       }
       this.searchController.invalidateSource(obligations);
     };
-    this.registerEvent(this.app.vault.on('create', file => {
-      if(!this.unloaded&&this.layoutReady&&file instanceof TFile)this.markingTracker.created(file.path,file);
-      nativeChange(file);
-    }));
-    this.registerEvent(this.app.vault.on('modify', file => {this.markingTracker.invalidate(file.path);nativeChange(file, undefined, true);}));
-    this.registerEvent(this.app.vault.on('delete', file => {this.markingTracker.invalidate(file.path);nativeChange(file, undefined, true);}));
-    this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {this.markingTracker.invalidate(oldPath);this.markingTracker.invalidate(file.path);nativeChange(file, oldPath, true);}));
+    this.registerEvent(this.app.vault.on('create', file => nativeChange(file, undefined, false, true)));
+    this.registerEvent(this.app.vault.on('modify', file => nativeChange(file, undefined, true)));
+    this.registerEvent(this.app.vault.on('delete', file => nativeChange(file, undefined, true)));
+    this.registerEvent(this.app.vault.on('rename', (file, oldPath) => nativeChange(file, oldPath, true)));
     this.registerEvent(this.app.metadataCache.on('changed', file => nativeChange(file)));
     // The renderer remains responsive during Obsidian's initial layout/mount.
     // A full reconciliation covers all source changes before layout readiness.
