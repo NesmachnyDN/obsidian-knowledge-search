@@ -265,17 +265,24 @@ export class StandaloneEngine {
         try {
           check();
           const cached = this.graphCache;
-          let graph: GraphProjection;
+          let graph: GraphProjection, hints:string[];
           if (cached) {
-            await authenticateGraphCatalog(gen,this.provider,this.parser,false,check,this.yieldJob);
+            hints=await authenticateGraphCatalog(gen,this.provider,this.parser,false,check,this.yieldJob);
             graph = cached;
           } else {
-            graph = await buildAuthenticatedGraph(gen,mapping,this.provider,this.parser,()=>{check();return true;},check,this.yieldJob);
+            ({graph,hints}=await buildAuthenticatedGraph(gen,mapping,this.provider,this.parser,()=>{check();return true;},check,this.yieldJob));
           }
           check();
           // Graph reuse must never trust a mutated in-memory parsed record.
           if (graph.lexicalGenerationId!==gen.generationId || generationId(gen.rootId,gen.documents)!==gen.generationId)
             throw new StandaloneError('GRAPH_INDEX_UNAUTHENTICATED');
+          // A full guarded content audit is stronger than the ordinary periodic
+          // audit trigger, but never reuse it across different filesystem hints,
+          // generations or a pending lifecycle transition. Basic-only searches
+          // retain the original query-driven 30-second audit behavior.
+          if(this.versionHints===null||hints.length!==this.versionHints.length
+            ||hints.some((hint,i)=>hint!==this.versionHints![i]))throw new StandaloneError('GRAPH_SOURCE_STALE');
+          check();this.verifiedAt=this.now();
           const snapshot = scopeGraph(gen,mapping,graph,selector);
           check();
           const result=await consume(snapshot,gen,mapping,check);
