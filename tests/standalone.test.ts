@@ -1805,3 +1805,63 @@ test('POLICY.2b expired preview retains physical slot and cannot publish late pr
     assert.equal(proof.sha256,hash(Buffer.from('# synthetic')));
   }finally{t.mock.timers.reset();release();f.reader.read=original;await f.cleanup();}
 });
+
+for(const first of ['incremental','full'] as const){
+  test('06UX-INDEX.1 preserves superseded '+first+' work across unrelated events without query repair',async()=>{
+    const {root,reader,store,engine,cleanup}=await setup({'a.md':'REQ-OLD-A: first\n','b.md':'REQ-OLD-B: second\n','c.md':'REQ-STABLE-C: stable\n'});
+    const actualRead=reader.read.bind(reader),gate=asynchronousGate();
+    let held=false;
+    try{
+      const before=engine.status().generationId;
+      await writeFile(join(root,'a.md'),'REQ-NEW-A: first revised\n');
+      reader.read=async path=>{
+        if(!held&&path==='a.md'){held=true;gate.enter();await gate.held;}
+        return actualRead(path);
+      };
+      if(first==='full')engine.reconcile();else engine.changed('a.md');
+      await gate.entered;
+      await writeFile(join(root,'b.md'),'REQ-NEW-B: second revised\n');
+      engine.changed('b.md');
+      gate.release();await engine.whenIdle();
+      // Do not issue a query until the durable state is verified: query repair
+      // must not conceal loss of the earlier dirty work.
+      assert.equal(engine.status().status,'ready');
+      assert.equal(engine.status().busy,false);
+      const generation=(await store.load()).generation!;
+      assert.notEqual(generation.generationId,before);
+      assert.equal(generation.generationId,engine.status().generationId);
+      assert.deepEqual(generation.documents.map(d=>[d.sourceId,d.sha256]),[
+        ['a.md',hash('REQ-NEW-A: first revised\n')],['b.md',hash('REQ-NEW-B: second revised\n')],['c.md',hash('REQ-STABLE-C: stable\n')]]);
+      assert.equal((await engine.search(search('REQ-OLD-A'))).hits.length,0);
+      assert.equal((await engine.search(search('REQ-NEW-A'))).hits.length,1);
+      assert.equal((await engine.search(search('REQ-NEW-B'))).hits.length,1);
+    }finally{gate.release();reader.read=actualRead;await cleanup();}
+  });
+}
+
+test('06UX-INDEX.1 active storm, rename and delete retain dirty work in bounded full reconciliation',async()=>{
+  const {root,paths,reader,store,engine,cleanup}=await setup({'a.md':'REQ-OLD-A: first\n','b.md':'REQ-OLD-B: second\n','c.md':'REQ-OLD-C: third\n'});
+  const actualRead=reader.read.bind(reader),gate=asynchronousGate();
+  let held=false;
+  try{
+    await writeFile(join(root,'a.md'),'REQ-NEW-A: updated\n');
+    reader.read=async path=>{
+      if(!held&&path==='a.md'){held=true;gate.enter();await gate.held;}
+      return actualRead(path);
+    };
+    engine.changed('a.md');await gate.entered;
+    await rename(join(root,'b.md'),join(root,'renamed.md'));
+    paths.delete('b.md');paths.add('renamed.md');
+    engine.changed('renamed.md');engine.changed('b.md');
+    await rm(join(root,'c.md'));paths.delete('c.md');engine.changed('c.md');
+    for(let i=0;i<BOUNDS.sources+5;i++)engine.changed('synthetic-'+i+'.md');
+    gate.release();await engine.whenIdle();
+    assert.equal(engine.status().status,'ready');
+    assert.equal(engine.status().busy,false);
+    assert.deepEqual((await store.load()).generation!.documents.map(d=>[d.sourceId,d.sha256]),[
+      ['a.md',hash('REQ-NEW-A: updated\n')],['renamed.md',hash('REQ-OLD-B: second\n')]]);
+    assert.equal((await engine.search(search('REQ-NEW-A'))).hits.length,1);
+    assert.equal((await engine.search(search('REQ-OLD-B'))).hits[0]?.sourceId,'renamed.md');
+    assert.equal((await engine.search(search('REQ-OLD-C'))).hits.length,0);
+  }finally{gate.release();reader.read=actualRead;await cleanup();}
+});
