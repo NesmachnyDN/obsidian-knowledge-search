@@ -131,6 +131,7 @@ type ActiveScopedRetrieval = { readonly abort: AbortController; readonly context
   readonly retained?: RetainedScopedTurn;
   timer?: ReturnType<typeof setTimeout>; retired: boolean; inFlight: boolean; physicalReads?:number };
 type ActiveGraphOperation = {
+  readonly presentationOwner?:object;
   readonly abort: AbortController; readonly engine: Engine; lease?:LocalGraphLease;
   revision: number; sourceRevision: number; retired: boolean; inFlight: boolean;
   result?: LocalGraphResult; finish: (value: ApiResult<LocalGraphResult>) => void;
@@ -614,7 +615,7 @@ export class SearchController {
   }
   /** Explicit local graph retrieval. The result is held only as the current
    * presentation authority and is deliberately excluded from lexical state. */
-  graphSearch(input:unknown):Promise<ApiResult<LocalGraphResult>> {
+  graphSearch(input:unknown,presentationOwner?:object):Promise<ApiResult<LocalGraphResult>> {
     let request:ReturnType<typeof parseGraphQuery>;
     try { request=parseGraphQuery(input); }
     catch(error){return Promise.resolve(failure(error instanceof StandaloneError?error.code:'GRAPH_REQUEST_INVALID'));}
@@ -627,7 +628,7 @@ export class SearchController {
     if(this.active||this.pending||this.scopedRetrieval)return Promise.resolve(failure('BUSY'));
     let finish!:(value:ApiResult<LocalGraphResult>)=>void;
     const result=new Promise<ApiResult<LocalGraphResult>>(resolve=>{finish=resolve;});
-    const operation:ActiveGraphOperation={abort:new AbortController(),engine,revision:0,
+    const operation:ActiveGraphOperation={presentationOwner,abort:new AbortController(),engine,revision:0,
       sourceRevision:this.sourceRevision,retired:false,inFlight:true,finish};
     const revision=this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null},owned=>{
       operation.revision=owned;this.graphOperation=operation;
@@ -660,6 +661,10 @@ export class SearchController {
       operation.finish(value);
     })();
     return result;
+  }
+  /** A closing panel may retire only its own graph operation. */
+  retireGraphPresentation(owner:object):void {
+    if(this.graphOperation?.presentationOwner===owner)this.invalidate();
   }
   /** Detached immutable current view, not a source/disclosure authority. */
   graphSnapshot():LocalGraphResult|null {

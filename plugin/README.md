@@ -61,6 +61,10 @@ The view shows actual lexical readiness, unavailable dense/hybrid, generation ID
 
 **Export safe diagnostics** produces selectable JSON in the view with only allowlisted status metadata. Copy that text for diagnostics; do not export search results to public reports. Closing a view releases subscriptions/timers; disabling/unloading stops the worker. Derived host-private cache normally persists after disable/uninstall. The settings tab includes a confirmed, disabled-only cleanup (also supported after a cold restart with indexing disabled) of recognized derived index files, preserving all Vault notes; re-enabling builds a fresh index.
 
+## Optional local graph search (OKS-06B.3)
+
+In Expert settings, explicitly save a valid graph mapping. The search view then shows a separate local graph search panel. Its query, match mode, Top-K and typed Property/tag/wiki-link filters are shared with text search; filtered graph requests cannot expand outside the selected scope. Choose depth 0–2, direction and a configured relation type (or all configured types), then select **Search graph**. The result distinguishes lexical seeds from expanded sources, displays original ranks and paths through authored, unverified relations, and offers exact source/edge-anchor navigation after renewed source verification. Cancel or explicitly retry text-only search; graph search never falls back automatically. The panel is hidden when graph mapping is disabled. No provider, model, persistent graph index or AI preview is activated by this operation. Quality/resource acceptance remains a separate 06B.4 gate.
+
 ## Versioned API and real-host smoke
 
 The [API v1 reference](../docs/standalone-api.md) documents exact envelope validation, native protocol-v2 response semantics and supported `obsidian eval code=...` commands. Use `plugin.api.request(...)`; the historical `standalone` engine field is an internal developer hook, not the stable interface.
@@ -73,8 +77,8 @@ The script installs into a disposable synthetic Vault with separate HOME/XDG/Ele
 
 ## Limitations and legacy diagnostic
 
-- Markdown lexical-only. No PDF/DOCX/OCR, embeddings, real dense/hybrid, reranker, graph traversal or semantic retrieval. Unsupported modes return `CAPABILITY_UNAVAILABLE`, not a lexical result mislabeled hybrid.
-- Typed Properties support unambiguous YAML subset of strings, finite numbers, booleans, ISO dates, null and scalar lists. No arbitrary YAML objects/anchors, implicit coercion or external execution. wiki-link targets are retained as strings; graph traversal is deliberately absent.
+- The default Basic search remains Markdown lexical-only. Optional local graph search is separate; PDF/DOCX/OCR, embeddings, real dense/hybrid, reranker and semantic retrieval are not part of Basic search. Unsupported modes return `CAPABILITY_UNAVAILABLE`, not a lexical result mislabeled hybrid.
+- Typed Properties support unambiguous YAML subset of strings, finite numbers, booleans, ISO dates, null and scalar lists. No arbitrary YAML objects/anchors, implicit coercion or external execution. wiki-link targets are retained as strings in Basic search; optional graph traversal uses only the explicitly configured local mapping.
 - First supported execution target is Linux desktop with host filesystem APIs and local fsync/rename. No cross-OS, signed release or public distribution claim. A release-shaped package is a pre-release candidate until independent acceptance.
 - The manually invoked legacy `Run synthetic evidence probe` command still uses a maintainer-configured Python interpreter for OKS-01A regression only; it is disabled by default and is **outside Standalone**. For historical probe acceptance and its independent process safeguards, see [OKS-01A contract](../docs/prompts/OKS-01A.md) and [ADR-0002](../docs/adr/0002-first-vertical-and-experiment-gates.md). Do not enable it for normal native indexing.
 

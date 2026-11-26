@@ -1,8 +1,10 @@
-import { ItemView, type WorkspaceLeaf } from 'obsidian';
+import { getLanguage, ItemView, type WorkspaceLeaf } from 'obsidian';
 import { propertyInput, uiRequest, type SearchController } from './controller';
 import type { SearchSettings } from './settings';
 import { diagnostics } from './status';
 import { textElement } from './render';
+import { mountGraphPanel } from './graph-ui';
+import { settingsLocale } from './settings-i18n';
 import { renderRerankConfirmation } from '../ai/rerank-confirm';
 import { ProviderFailure } from '../ai/contracts';
 import { mountDensePanel } from '../ai/dense-ui';
@@ -16,6 +18,7 @@ export class SearchView extends ItemView {
   private disposed = true;
   private generationOwner?:object;
   private densePanel?: {dispose():void};
+  private graphPanel?: {refresh():void;dispose():void};
   constructor(leaf: WorkspaceLeaf, private readonly controller: SearchController,
     private readonly settings: () => SearchSettings,
     private readonly control: (action: 'pause' | 'cancel' | 'resume' | 'rebuild') => Promise<void>,
@@ -83,6 +86,8 @@ export class SearchView extends ItemView {
       } catch { if (!this.disposed) this.controller.message('INVALID_REQUEST'); }
     };
     button('Search', 'oks-submit', () => { void search(); });
+    this.graphPanel=mountGraphPanel(root,this.controller,this.settings,request,()=>{void search();},
+      (en,ru)=>settingsLocale(getLanguage())==='ru'?ru:en);
     input.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); void search(); } };
     // Every query/filter edit revokes prior results before another submit.
     for (const el of [input, tag, linkTarget, key, value, topK])
@@ -163,6 +168,7 @@ export class SearchView extends ItemView {
         + `Generation: ${s.generationId ?? 'none'}\nSources: ${s.sources} | Records: ${s.records} | Busy: ${s.busy} | Paused: ${s.paused}\n`
         + `Status: ${s.error ?? 'none'} | Maintenance: ${s.maintenanceWarning ?? 'none'}`;
       filters.disabled = !this.settings().propertiesEnabled;
+      this.graphPanel?.refresh();
       rerankPanel.clearStale();generationPanel.clearStale();
     };
     const render = (): void => {
@@ -206,7 +212,7 @@ export class SearchView extends ItemView {
     render(); input.focus();
   }
   private cleanup(): void {
-    this.disposed = true; this.densePanel?.dispose(); this.densePanel=undefined; this.unsubscribe?.(); this.unsubscribe = undefined; this.controller.cancelRerank();
+    this.disposed = true; this.graphPanel?.dispose(); this.graphPanel=undefined; this.densePanel?.dispose(); this.densePanel=undefined; this.unsubscribe?.(); this.unsubscribe = undefined; this.controller.cancelRerank();
     const owner=this.generationOwner;this.generationOwner=undefined;
     if(owner)this.controller.closeGenerationViewOwner(owner);
     if (this.timer !== undefined) this.contentEl.ownerDocument.defaultView!.clearInterval(this.timer);

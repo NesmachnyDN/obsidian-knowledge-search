@@ -55,7 +55,7 @@
   if(!initial){
     assert(disabled(),'DEFAULT_DISABLED');
     const original=structuredClone(p.settings);
-    await app.vault.create(graphFiles[0],'---\nid: A\ndepends: B\n---\nSynthetic source A.\n');
+    await app.vault.create(graphFiles[0],'---\nid: A\ndepends: B\n---\nSynthetic source A. <img src=x onerror=alert(1)>\n');
     await app.vault.create(graphFiles[1],'---\nid: B\n---\nSynthetic source B.\n');
     await tick();await engine.whenIdle();
     await open();
@@ -88,10 +88,52 @@
     assert(!previous.current()&&(await read(selected(graphFiles))).edges.length===0,'MAPPING_REVOCATION');
     editMapping(JSON.stringify(graphMapping));
     press('Save mapping');await wait(()=>p.settings.graph?.mapping?.rules.length===1&&!p.denseSettingsChanging,'RESTORE_MAPPING');
+    app.setting.close();await p.openSearch();
+    const root=()=>app.workspace.getLeavesOfType('oks-standalone-search')[0]?.view.contentEl;
+    const el=selector=>{const found=root()?.querySelector(selector);assert(found,'MISSING_UI_'+selector);return found;};
+    await wait(()=>!!root()?.querySelector('.oks-graph-panel')&&!el('.oks-graph-panel').hidden,'PANEL_VISIBLE');
+    const run=async()=>{
+      edit(el('.oks-query'),'Synthetic source A.');
+      edit(el('.oks-graph-depth'),'1','change');
+      edit(el('.oks-graph-relation'),'depends-on','change');
+      el('.oks-graph-submit').click();
+      await wait(()=>el('.oks-graph-results').children.length===2,'UI_GRAPH_RESULT');
+    };
+    await run();
+    assert(el('.oks-graph-results').textContent.includes('<img src=x onerror=alert(1)>')&&!el('.oks-graph-results').querySelector('img'),'TEXT_ONLY');
+    assert(el('.oks-graph-results').textContent.includes('depends: B')&&el('.oks-results').children.length===0,'ISOLATED_PATH');
+    const query={requestId:'graph-cli',query:'Synthetic source A.',limit:10,matchMode:'literal',scope:selected(graphFiles),
+      expansion:{depth:1,direction:'outgoing',fanOut:16,maxExpanded:32,relationIds:['depends-on']}};
+    const api=await p.api.request({apiVersion:1,operation:'graph-search',request:query});
+    assert(api.ok&&api.value.candidates.length===2&&api.value.candidates[1].sourceId===graphFiles[1],'CLI_GRAPH');
+    await wait(()=>el('.oks-graph-results').children.length===0,'UNRELATED_API_RETIRE');
+    const narrowApi=await p.api.request({apiVersion:1,operation:'graph-search',request:{...query,scope:selected([graphFiles[0]])}});
+    assert(narrowApi.ok&&narrowApi.value.candidates.length===1&&!JSON.stringify(narrowApi.value).includes(graphFiles[1]),'CLI_SELECTED');
+    await run();
+    const originalOpen=p.searchController.openGraphEvidence.bind(p.searchController);
+    let navigationResult;
+    p.searchController.openGraphEvidence=async(...args)=>{navigationResult=await originalOpen(...args);return navigationResult;};
+    try{
+      el('.oks-graph-open-anchor').click();
+      await wait(()=>!!navigationResult,'UI_ANCHOR_COMPLETE');
+      const leaf=app.workspace.getMostRecentLeaf(),v=leaf?.view;
+      assert(navigationResult.ok&&v?.editor?.getSelection()==='depends: B','UI_ANCHOR_'+JSON.stringify({
+        ok:navigationResult.ok,error:navigationResult.error,mode:v?.getMode?.(),state:v?.getState?.(),
+        selection:v?.editor?.getSelection(),message:el('.oks-graph-message').textContent,
+        current:!!p.searchController.graphSnapshot()
+      }));
+    }finally{p.searchController.openGraphEvidence=originalOpen;}
+    assert(app.workspace.getMostRecentLeaf()?.view?.file?.path===graphFiles[0],'ANCHOR_AUTHOR');
+    await p.openSearch();await run();
+    edit(el('.oks-query'),'Synthetic source A. ');
+    assert(el('.oks-graph-results').children.length===0,'QUERY_RETIRE');
+    edit(el('.oks-query'),'Synthetic source A.');el('.oks-graph-retry').click();
+    await wait(()=>el('.oks-results').children.length===1,'EXPLICIT_LEXICAL_RETRY');
+    assert(el('.oks-graph-results').children.length===0,'NO_GRAPH_FALLBACK');
     const reloadLease=engine.captureGraphScope(selected(graphFiles),signal);await reloadLease.read();
     globalThis.__oksGraphSmoke={original,lease:reloadLease,mappingId:s.mappingId};
     app.setting.close();
-    return 'OBSIDIAN_GRAPH_HOST_BEFORE_RELOAD_PASS: explicit settings save, typed original anchor, narrow scope, invalid draft, source and mapping revocation';
+    return 'OBSIDIAN_GRAPH_HOST_BEFORE_RELOAD_PASS: explicit settings save, typed original anchor, narrow scope, invalid draft, source and mapping revocation, native graph and scoped CLI, exact anchor navigation, lexical retry';
   }
   try{
     assert(!initial.lease.current(),'OLD_LEASE_RETIRED');
@@ -103,6 +145,11 @@
     await wait(()=>p.settings.graph?.state==='disabled'&&!p.denseSettingsChanging,'DISABLE');
     assert(!lease.current()&&disabled(),'DISABLED_REVOCATION');
     assert((await p.loadData()).graph.state==='disabled','DISABLED_PERSISTED');
+    app.setting.close();await p.openSearch();
+    await wait(()=>app.workspace.getLeavesOfType('oks-standalone-search')[0]?.view.contentEl.querySelector('.oks-graph-panel')?.hidden===true,'PANEL_DISABLED');
+    const denied=await p.api.request({apiVersion:1,operation:'graph-search',request:{requestId:'disabled-graph',query:'Synthetic source A.',limit:5,
+      scope:selected(graphFiles),expansion:{depth:1,direction:'outgoing',fanOut:16,maxExpanded:32}}});
+    assert(!denied.ok&&denied.error==='GRAPH_DISABLED','CLI_DISABLED');
     return 'OBSIDIAN_GRAPH_HOST_PASS: offline real settings, CLI scope lease, durable reload, original anchors, explicit disable';
   }finally{
     await p.updateSettings(initial.original);app.setting.close();

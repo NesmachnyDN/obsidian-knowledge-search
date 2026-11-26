@@ -108,3 +108,21 @@ test('06B.3c1 failure codes, unsupported engine, pause and terminal seal fail cl
   controller.sealTerminal();assert.equal(controller.graphSnapshot(),null);controller.dispose();
   assert.deepEqual(await controller.graphSearch(request()),{apiVersion:1,ok:false,error:'DISABLED'});
 });
+
+test('06B.3c2 closing exact graph presentation retires only its own operation',async()=>{
+  const controller=new SearchController(async()=>{});
+  controller.attach(host());
+  const owner={}, other={};
+  const first=await controller.graphSearch(request(),owner);assert.ok(first.ok);
+  controller.retireGraphPresentation(other);assert.equal(controller.graphSnapshot(),first.value);
+  controller.retireGraphPresentation(owner);assert.equal(controller.graphSnapshot(),null);
+  const api=await controller.graphSearch(request());assert.ok(api.ok);
+  controller.retireGraphPresentation(owner);assert.equal(controller.graphSnapshot(),api.value);
+  const pending=deferred<LocalGraphResult>();
+  controller.attach(host(async()=>pending.promise));
+  const work=controller.graphSearch(request('close'),owner);
+  controller.retireGraphPresentation(owner);
+  assert.deepEqual(await work,{apiVersion:1,ok:false,error:'SUPERSEDED'});
+  pending.resolve(graph('close'));await Promise.resolve();
+  assert.equal(controller.graphSnapshot(),null);
+});
