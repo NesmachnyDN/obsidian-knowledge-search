@@ -2,6 +2,8 @@
 
 Status: proposed for independent DOCS_ONLY acceptance. Authority: ADR-0019, AC-11-POLICY-02/03, ROADMAP POLICY.2, #79/#78/#105. No change to source write, provider, disclosure or operational permissions.
 
+**Prospective supersession notice:** [ADR-0023](0023-standalone-consumer-reuse.md) removes mandatory intake-time lifecycle/marking admission as a consumer dependency. The design below remains historical authority for its accepted bounded slices; no permission to bypass current runtime checks. Reuse exact original-version, retirement, persistence and recovery protections where they protect current search/processing authority. No writer/import enrollment required by the revised read-only policy.
+
 ## Decision
 
 New-material marking needs a lifecycle classification distinct from current-note Properties and external eligibility. Extend the existing host-owned NewMaterialTracker; do not add a competing policy or source authority. Its durable records are evidence of an admitted exact version, not grants. Continue using the canonical protected original reader and shared evaluator. Offline Basic Search must remain usable when the lifecycle subsystem is absent, unavailable or corrupt.

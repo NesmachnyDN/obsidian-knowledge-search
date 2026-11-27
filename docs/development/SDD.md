@@ -77,3 +77,7 @@ Maintainer decision (2026-11-25): use the least expensive adequate Codex model a
 ## Workstation use
 
 Use one active writer per worktree, inspect process state before editing, and avoid parallel heavy work. Codex commands should be bounded, non-interactive with closed stdin, and monitored with explicit time/resource controls. For ChatGPT-authored changes, arrange a new independent ChatGPT chat via Remote Desktop Commander or a distinct Codex/human reviewer; never reuse the authoring conversation as its own reviewer. Review a pinned committed candidate against its explicit base. Do not copy sensitive source into prompts, public artifacts or external services; only synthetic test data. A failed transport is not evidence of a failed Git mutation: check generated state before retrying.
+
+## 2026-11-27 standalone consumer rebaseline
+
+ADR-0023 and the rebaseline contract define the prospective owner direction. A reviewed DOCS_ONLY merge precedes changed production implementation; preserve all historical gates and security evidence. Reconcile implemented marking/lifecycle dependencies and the current Advanced/Dense exclusion through bounded contracts and independent negative tests, never through an unconditional guard deletion. Separate producer availability from acceptance and verify standalone and optional reuse scenarios. Priority P1 lexical RAG is not gated by unclaimed dense, formats, portability or #80; actual provider acceptance and all applicable gates remain mandatory.

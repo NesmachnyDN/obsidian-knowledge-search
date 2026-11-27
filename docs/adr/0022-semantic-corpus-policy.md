@@ -2,6 +2,8 @@
 
 Status: maintainer-approved target direction (2026-11-27), pending independent DOCS_ONLY acceptance. Not a runtime or deployment acceptance. Applies prospectively to CAP-04/05/06/07/08/09/10/11/12/14 and AC-18 below; does not change historical evidence, active slice contracts or the mandatory provider-free Gate A.
 
+**Refinement (ADR-0023):** a configured hard search-scope exclusion applies to ordinary search as well as AI and cannot be overridden by explicit-source selection; AI-only exclusions retain the Basic Search behavior below. No producer dependency or mandatory note writes. This is a prospective requirement, not evidence that the exclusion is implemented.
+
 ## Context and decision
 
 A Vault is the authoritative knowledge and evidence repository, not a vector index. Curated notes can contain reusable findings while their linked raw logs, datasets, spreadsheets, scripts and historical originals are evidence rather than useful default retrieval candidates. Conversely, an original technical document may be the only useful content. Select the semantic corpus independently of storage, ordinary text search and processing permission.
