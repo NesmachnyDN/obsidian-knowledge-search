@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { lstat, open, opendir, readlink, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { BOUNDS, StandaloneError, hash, isDigest, validPath } from './contracts';
+import {captureHardSearchScope,validHardScopePath,type HardSearchScope} from './hard-search-scope';
 
 export interface SourceProvider {
   readonly rootId: string;
@@ -62,10 +63,12 @@ function sameLifecycleProof(a: DescriptorLifecycleProof, b: DescriptorLifecycleP
 export class BoundedVaultReader implements SourceProvider {
   readonly rootId: string;
   private constructor(private readonly root: string, private readonly device: number,
-    private readonly inode: number, private readonly enumeration: () => string[]) {
+    private readonly inode: number, private readonly enumeration: () => string[],
+    private readonly searchScope?: HardSearchScope) {
     this.rootId = hash(JSON.stringify([this.root, device, inode]));
   }
-  static async open(root: string, enumerate: () => string[]): Promise<BoundedVaultReader> {
+  static async open(root: string, enumerate: () => string[], scopeConfig?:unknown): Promise<BoundedVaultReader> {
+    const scope=scopeConfig===undefined?undefined:captureHardSearchScope(scopeConfig);
     if (!isAbsolute(root)) throw new StandaloneError('UNSUPPORTED_FILESYSTEM');
     const absolute = resolve(root);
     try {
@@ -73,7 +76,7 @@ export class BoundedVaultReader implements SourceProvider {
       if (!info.isDirectory() || info.isSymbolicLink()) throw new StandaloneError('UNSUPPORTED_FILESYSTEM');
       const canonical = await realpath(absolute);
       if (canonical !== absolute) throw new StandaloneError('UNSUPPORTED_FILESYSTEM');
-      return new BoundedVaultReader(absolute, info.dev, info.ino, enumerate);
+      return new BoundedVaultReader(absolute, info.dev, info.ino, enumerate, scope);
     } catch { throw new StandaloneError('UNSUPPORTED_FILESYSTEM'); }
   }
   private async rootCheck(): Promise<void> {
@@ -90,7 +93,8 @@ export class BoundedVaultReader implements SourceProvider {
     if (!Array.isArray(files) || files.length > BOUNDS.sources) throw new StandaloneError('SOURCE_LIMIT');
     if (!files.every(validPath) || new Set(files).size !== files.length)
       throw new StandaloneError('SOURCE_REJECTED');
-    return [...files].sort();
+    if(this.searchScope?.hasExclusions&&!files.every(validHardScopePath))throw new StandaloneError('SOURCE_REJECTED');
+    return files.filter(path=>!this.searchScope?.hasExclusions||this.searchScope.allows(path)).sort();
   }
   /**
    * Observe the canonical supported Markdown domain (visible paths only).
@@ -99,6 +103,8 @@ export class BoundedVaultReader implements SourceProvider {
    * observation. This is not a filesystem snapshot or admission authority.
    */
   async completeMarkdownInventory(signal?: AbortSignal): Promise<CompleteMarkdownInventory> {
+    // Never reinterpret a restricted search domain as the historical full-vault lifecycle proof.
+    if(this.searchScope?.hasExclusions)throw new StandaloneError('SEARCH_SCOPE_RESTRICTED');
     const check = (): void => {
       if (signal?.aborted) throw new StandaloneError('INVENTORY_CANCELLED');
     };
@@ -233,6 +239,7 @@ export class BoundedVaultReader implements SourceProvider {
   async versionHints(paths: readonly string[]): Promise<string[]> {
     if (paths.length > BOUNDS.sources || !paths.every(validPath))
       throw new StandaloneError('SOURCE_REJECTED');
+    if(this.searchScope?.hasExclusions&&paths.some(path=>!this.searchScope!.allows(path)))throw new StandaloneError('SEARCH_SCOPE_RESTRICTED');
     await this.rootCheck();
     const hints: string[] = [];
     // Limit outstanding lstat operations; do not read document contents here.
@@ -286,6 +293,7 @@ export class BoundedVaultReader implements SourceProvider {
   }
   private async readOriginal(relative: string): Promise<{bytes: Uint8Array; version: string[]; info: BigIntStats}> {
     if (!validPath(relative)) throw new StandaloneError('SOURCE_REJECTED');
+    if(this.searchScope?.hasExclusions&&!this.searchScope.allows(relative))throw new StandaloneError('SEARCH_SCOPE_RESTRICTED');
     const parts = relative.split('/');
     // Linux descriptor-anchored walk forbids redirecting an ancestor via symlink.
     const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
