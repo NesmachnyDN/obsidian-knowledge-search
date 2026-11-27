@@ -2,8 +2,8 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {Hash} from 'node:crypto';
 import {configDigest} from '../plugin/src/ai/disclosure';
-import type {ProviderConfig} from '../plugin/src/ai/contracts';
-import type {PolicySnapshot} from '../plugin/src/ai/processing-policy';
+import type {ProviderConfig,CallContext} from '../plugin/src/ai/contracts';
+import type {PolicySnapshot,PolicyHost} from '../plugin/src/ai/processing-policy';
 import {mkdtemp,writeFile,rm,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -21,15 +21,24 @@ import {parseGraphQuery} from '../plugin/src/standalone/graph-expansion';
 import {validateGraphMapping} from '../plugin/src/standalone/graph-mapping';
 import type {RevocableHardSearchScope} from '../plugin/src/standalone/hard-search-scope';
 
+// Existing cases use a stable synthetic host authority; terminal revocation
+// tests below explicitly invalidate a real token rather than faking currency.
+function preview(engine:StandaloneEngine,path:string,current:()=>boolean,proof=false){
+  return engine.previewPolicyMetadata(path,current,proof,new AbortController().signal);
+}
+function evaluate(engine:StandaloneEngine,host:PolicyHost,context:CallContext){
+  return engine.evaluateProcessingPolicy({...host,authority:new AbortController().signal},context);
+}
+
 const request={protocolVersion:PROTOCOL,requestId:'synthetic-scope',query:'unique',requestedMode:'lexical',limit:10} as const;
 async function fixture(files:Record<string,string>={'one.md':'# unique one.md','two.md':'# unique two.md'}){
   const root=await realpath(await mkdtemp(join(tmpdir(),'oks-engine-scope-')));
   const paths=Object.keys(files).sort();
   for(const path of paths)await writeFile(join(root,path),files[path]!);
-  let raw: string[]|null=null;
+  let raw: string[]|null=null;let configHook=()=>{};
   const callbacks=new Set<()=>void>();
   const metadata={userIgnoreFilters:null as object[]|null,isUserIgnored:(path:string)=>raw?.includes(path)??false};
-  const vault={getConfig:()=>raw,on:(_event:string,callback:()=>void)=>{callbacks.add(callback);return callback;},offref:(ref:unknown)=>{callbacks.delete(ref as ()=>void);}};
+  const vault={getConfig:()=>{configHook();return raw;},on:(_event:string,callback:()=>void)=>{callbacks.add(callback);return callback;},offref:(ref:unknown)=>{callbacks.delete(ref as ()=>void);}};
   const capture=()=>captureNativeExclusions({vault,metadataCache:metadata},{version:'1.15.1',desktop:true,linux:true},()=>{});
   const change=(next:string[]|null,emit=true)=>{raw=next;metadata.userIgnoreFilters=raw?.map(()=>({}))??null;if(emit)for(const cb of [...callbacks])cb();};
   const storePath=join(root,'.obsidian/plugins/oks-synthetic-evidence/index');
@@ -45,7 +54,7 @@ async function fixture(files:Record<string,string>={'one.md':'# unique one.md','
     engines.push(engine);
     return {engine,reader,store,parses:()=>parses,onParse:(cb:()=>void)=>{onParse=cb;},previews:()=>previews,onPreview:(cb:()=>void)=>{onPreview=cb;}};
   };
-  return {open,change,write:(path:string,text:string)=>writeFile(join(root,path),text),cleanup:async()=>{for(const e of engines)await e.close();for(const l of leases)l.dispose();await rm(root,{recursive:true,force:true});}};
+  return {open,change,onConfigRead:(cb:()=>void)=>{configHook=cb;},write:(path:string,text:string)=>writeFile(join(root,path),text),cleanup:async()=>{for(const e of engines)await e.close();for(const l of leases)l.dispose();await rm(root,{recursive:true,force:true});}};
 }
 async function denied(engine:StandaloneEngine){
   assert.equal(engine.status().generationId,null);
@@ -134,9 +143,9 @@ for(const stage of ['read','parser'] as const)test('revoked policy preview canno
     const original=reader.read.bind(reader);let reads=0;
     reader.read=async path=>{reads++;const bytes=await original(path);if(stage==='read')f.change(['one.md']);return bytes;};
     if(stage==='parser')onPreview(()=>f.change(['one.md']));
-    await assert.rejects(engine.previewPolicyMetadata('one.md',()=>true),/SOURCE_CHANGED/);
+    await assert.rejects(preview(engine,'one.md',()=>true),/SOURCE_CHANGED/);
     await engine.whenIdle();assert.equal(reads,1);assert.equal(previews(),stage==='read'?0:1);
-    await assert.rejects(engine.previewPolicyMetadata('two.md',()=>true),/SEARCH_SCOPE_INVALID/);
+    await assert.rejects(preview(engine,'two.md',()=>true),/SEARCH_SCOPE_INVALID/);
     await denied(engine);
   }finally{await f.cleanup();}
 });
@@ -232,7 +241,7 @@ test('revoked settlement discards bytes before processing: '+stage,async t=>{
       await assert.rejects(dense.verify(dense.evidence[0]!),/SOURCE_STALE/);
       assert.equal(dense.current(),false);
     }else if(stage.startsWith('preview')){
-      await assert.rejects(engine.previewPolicyMetadata('one.md',()=>true,proof),/SOURCE_CHANGED/);
+      await assert.rejects(preview(engine,'one.md',()=>true,proof),/SOURCE_CHANGED/);
     }else{
       const deadlineUnixMs=Date.now()+5000;
       const config:ProviderConfig={state:'configured',transport:'local',origin:'http://127.0.0.1:1',
@@ -242,7 +251,7 @@ test('revoked settlement discards bytes before processing: '+stage,async t=>{
           adapter:'fixture',classification:'trusted-internal'},role:'generation',config,adapter:'fixture',
         ownerId:'fixture-owner',hostId:'fixture-host',scopeId:reader.rootId,policyRevision:'p1',configRevision:'c1',
         credentialEpoch:1,deadlineUnixMs,payloadDigest:hash('fixture'),restrictions:[],evaluationComplete:true};
-      await assert.rejects(engine.evaluateProcessingPolicy({snapshot:()=>snapshot,current:()=>true,requireOriginalProof:true},
+      await assert.rejects(evaluate(engine,{snapshot:()=>snapshot,current:()=>true,requireOriginalProof:true},
         {signal:new AbortController().signal,deadlineUnixMs}),/CANCELLED/);
     }
     await engine.whenIdle();assert.equal(revoked,true);assert.ok(watched);
@@ -257,7 +266,7 @@ test('revoked settlement discards bytes before processing: '+stage,async t=>{
 // Inspect owner state before status()/current() can repair the missing fence.
 const ownerState=(engine:StandaloneEngine)=>engine as unknown as {
   scopeRetired:boolean;generation:unknown;graphCache:unknown;localRead:Promise<unknown>|null;
-  work:Promise<void>|null;all:boolean;pending:Set<string>;yieldJob:()=>Promise<void>;scopeCurrent():boolean;
+  localSettlement:Promise<unknown>|null;work:Promise<void>|null;all:boolean;pending:Set<string>;yieldJob:()=>Promise<void>;scopeCurrent():boolean;
 };
 const graphRequest={requestId:'synthetic-graph',query:'unique',limit:10,scope:{mode:'vault-wide'},
   expansion:{depth:0,direction:'outgoing',fanOut:16,maxExpanded:32}};
@@ -343,8 +352,8 @@ for(const timing of ['before-terminal','after-terminal'] as const)test(route+' o
     const held=new Promise<void>(r=>{release=r;});
     reader.read=async path=>{reads++;const bytes=await read(path);enter();await held;return bytes;};
     if(route==='preview')t.mock.timers.enable({apis:['setTimeout']});
-    const pending=route==='preview'?engine.previewPolicyMetadata('one.md',()=>true):
-      engine.evaluateProcessingPolicy({snapshot:()=>snapshot,current:()=>true},{signal:abort.signal,deadlineUnixMs});
+    const pending=route==='preview'?preview(engine,'one.md',()=>true):
+      evaluate(engine,{snapshot:()=>snapshot,current:()=>true},{signal:abort.signal,deadlineUnixMs});
     const settled=route==='preview'?assert.rejects(pending,timing==='before-terminal'?/SOURCE_CHANGED/:/PARSER_TIMEOUT/):
       timing==='before-terminal'?assert.rejects(pending,/CANCELLED/):pending.then(value=>{
         assert.ok('allowed' in value);assert.equal(value.allowed,false);assert.equal(value.reason,'cancelled');
@@ -608,7 +617,7 @@ test('processing policy callback fence '+stage,async t=>{
         if(stage==='snapshot-null')return null;
         if(stage==='snapshot-error')throw Error('synthetic snapshot error');
         if(stage==='snapshot-reentrant'&&!nested){
-          nested=assert.rejects(engine.evaluateProcessingPolicy(host,context),/BUSY/);
+          nested=assert.rejects(evaluate(engine,host,context),/BUSY/);
           assert.ok(owner.localRead,'reserve before entering host callback');
         }
         return wrapped;
@@ -623,7 +632,7 @@ test('processing policy callback fence '+stage,async t=>{
     };
     const expectRevoked=['initial-snapshot','post-read-snapshot','snapshot-throw','current-revoke','marking-allow-revoke','marking-deny-revoke','marking-throw-revoke'].includes(stage);
     try{
-      const pending=engine.evaluateProcessingPolicy(host,context),physical=owner.localRead;assert.ok(physical);
+      const pending=evaluate(engine,host,context),physical=owner.localRead;assert.ok(physical);
       if(expectRevoked)await assert.rejects(pending,/CANCELLED/);
       else{
         const result=await pending;
@@ -680,8 +689,8 @@ test('local policy terminal '+route+' '+mode,async t=>{
       if(mode==='nested-revoke')queueMicrotask(()=>queueMicrotask(()=>queueMicrotask(revoke)));
       if(mode==='throw'||mode==='microtask-throw')throw Error('synthetic final failure');
       const reenter=()=>{
-        nested.push(assert.rejects(engine.evaluateProcessingPolicy(ordinary,context),/BUSY/));
-        nested.push(assert.rejects(engine.previewPolicyMetadata('one.md',()=>true),/PARSER_BUSY/));
+        nested.push(assert.rejects(evaluate(engine,ordinary,context),/BUSY/));
+        nested.push(assert.rejects(preview(engine,'one.md',()=>true),/PARSER_BUSY/));
         nested.push(assert.rejects(engine.captureGraphScope({mode:'vault-wide'},abort.signal).read(),/GRAPH_BUSY/));
         // Attach rejection handlers immediately; assertions are awaited below.
         for(const p of nested)void p.catch(()=>{});
@@ -699,8 +708,8 @@ test('local policy terminal '+route+' '+mode,async t=>{
       }
       return mode!=='deny';
     };
-    const pending=route==='policy'?engine.evaluateProcessingPolicy({...ordinary,current},context):
-      engine.previewPolicyMetadata('one.md',current);
+    const pending=route==='policy'?evaluate(engine,{...ordinary,current},context):
+      preview(engine,'one.md',current);
     if(mode==='allow'||mode==='reenter'||mode==='microtask-reenter'){
       const value=await pending;
       if('allowed' in value)assert.equal(value.allowed,true);else assert.equal(value.sourceId,'one.md');
@@ -728,7 +737,7 @@ test('local policy terminal whenIdle waits for queued reconciliation',async()=>{
     let entered=false,finished=false,idle=false;
     const gate=new Promise<void>(resolve=>{release=resolve;});
     let finalCalls=0;
-    const pending=engine.previewPolicyMetadata('one.md',()=>{
+    const pending=preview(engine,'one.md',()=>{
       if(owner.localRead===null){
         finalCalls++;
         reader.list=async()=>{entered=true;await gate;finished=true;return list();};
@@ -744,4 +753,192 @@ test('local policy terminal whenIdle waits for queued reconciliation',async()=>{
     assert.equal(idle,false,'idle must include reconciliation queued at publication');
     release();await waiting;assert.equal(finished,true);
   }finally{release();await f.cleanup();}
+});
+
+
+// Publication and idle cuts exercise independent host authority and actual
+// native callbacks, not only the engine's own revision.
+function terminalPolicyFixture(rootId:string,deadlineUnixMs:number):PolicySnapshot{
+  const config:ProviderConfig={state:'configured',transport:'local',origin:'http://127.0.0.1:1',
+    identity:{model:'synthetic',revision:'fixture'},limits:{timeoutMs:5000,maxInputBytes:8192,maxCandidates:10,maxOutputTokens:64,maxConcurrent:1}};
+  return {subjects:[{kind:'original',sourceId:'one.md',expectedSha256:hash('# unique one.md'),ownerIds:['one.md']}],
+    profile:{profileId:'fixture',admissionId:'fixture-review',role:'generation',configDigest:configDigest('generation',config),
+      adapter:'fixture',classification:'trusted-internal'},role:'generation',config,adapter:'fixture',
+    ownerId:'fixture-owner',hostId:'fixture-host',scopeId:rootId,policyRevision:'p1',configRevision:'c1',
+    credentialEpoch:1,deadlineUnixMs,payloadDigest:hash('fixture'),restrictions:[],evaluationComplete:true};
+}
+for(const route of ['policy','preview'] as const)
+for(const mode of ['host-revoke','host-nested-revoke','native-cancel','native-change','native-close','native-abort','native-host-revoke','native-scope-revoke','native-missed-change'] as const)
+test('publication cut '+route+' '+mode,async()=>{
+  const f=await fixture();try{
+    const {engine,reader,previews}=await f.open();await engine.start();await engine.whenIdle();
+    const owner=ownerState(engine),authority=new AbortController(),abort=new AbortController();
+    const context={signal:abort.signal,deadlineUnixMs:Date.now()+5000};
+    const snapshot=terminalPolicyFixture(reader.rootId,context.deadlineUnixMs);
+    let hostLive=true,armed=false,fired=false,held=false,late=0,closing:Promise<void>|undefined;
+    const read=reader.read.bind(reader);reader.read=async path=>{if(fired)late++;return read(path);};
+    const invalidate=()=>{
+      if(fired)return;fired=true;held=owner.localSettlement!==null;
+      if(mode.startsWith('host-')){hostLive=false;authority.abort();}
+      else if(mode==='native-cancel')engine.cancel();
+      else if(mode==='native-change')engine.changed('one.md');
+      else if(mode==='native-close')closing=engine.close();
+      else if(mode==='native-abort'){abort.abort();authority.abort();}
+      else if(mode==='native-host-revoke')authority.abort();
+      else f.change(['one.md'],mode!=='native-missed-change');
+    };
+    const current=()=>{
+      if(owner.localRead===null&&!armed){
+        armed=true;
+        if(mode==='host-revoke')queueMicrotask(invalidate);
+        else if(mode==='host-nested-revoke')queueMicrotask(()=>queueMicrotask(invalidate));
+        else queueMicrotask(()=>f.onConfigRead(()=>{
+          // Identify the final native observation by its semantic phase.
+          // Prior HEAD reached it inside the deadline assertion; the
+          // remediated engine has one explicit publication observation.
+          const stack=new Error().stack??'';
+          if(stack.includes('observePublication')||
+            (route==='policy'?stack.includes('assertPublicationDeadline'):stack.includes('confirm')))invalidate();
+        }));
+      }
+      return hostLive;
+    };
+    const pending=route==='policy'?engine.evaluateProcessingPolicy({snapshot:()=>snapshot,current,authority:authority.signal},context):
+      engine.previewPolicyMetadata('one.md',current,false,authority.signal);
+    await assert.rejects(pending,route==='policy'?/CANCELLED/:/SOURCE_CHANGED/);
+    assert.equal(armed,true);assert.equal(fired,true);assert.equal(held,true);
+    assert.equal(previews(),1);
+    // changed() legitimately starts new reconciliation after settlement; that
+    // is not a continuation of the revoked policy/preview operation.
+    if(mode!=='native-change')assert.equal(late,0);
+    if(mode==='native-scope-revoke'||mode==='native-missed-change'){assert.equal(owner.scopeRetired,true);assert.equal(owner.generation,null);}
+    await closing;
+  }finally{await f.cleanup();}
+});
+
+test('idle cut observes native callback admitted work before returning',async()=>{
+  const f=await fixture();let release=()=>{};try{
+    const {engine,reader}=await f.open();await engine.start();await engine.whenIdle();
+    const owner=ownerState(engine),list=reader.list.bind(reader);
+    let entered=false,finished=false,idle=false,fired=false,calls=0;
+    const gate=new Promise<void>(resolve=>{release=resolve;});
+    reader.list=async()=>{entered=true;await gate;finished=true;return list();};
+    f.onConfigRead(()=>{
+      if(++calls!==2||fired)return;
+      fired=true;engine.changed('one.md');
+    });
+    const waiting=engine.whenIdle().then(()=>{idle=true;});
+    await new Promise<void>(resolve=>setImmediate(resolve));
+    assert.equal(fired,true);assert.equal(entered,true);assert.equal(finished,false);
+    assert.ok(owner.work);assert.equal(idle,false,'idle must include already-admitted reconciliation');
+    release();await waiting;assert.equal(finished,true);
+  }finally{release();await f.cleanup();}
+});
+
+
+// A callback-only host can no longer accidentally acquire a native-scoped
+// policy capability; an untrusted imitation of an AbortSignal also denies.
+for(const route of ['policy','preview'] as const)
+for(const mode of ['missing','aborted','fake','source-seal'] as const)
+test('revocable policy admission rejects '+route+' '+mode,async()=>{
+  const f=await fixture();try{
+    const {engine,reader,previews}=await f.open();await engine.start();await engine.whenIdle();
+    const abort=new AbortController();abort.abort();
+    const authority=mode==='missing'?undefined:mode==='aborted'?abort.signal:mode==='fake'?({aborted:false} as AbortSignal):
+      (reader.hardSearchScope as RevocableHardSearchScope).retirementSignal;
+    let calls=0,reads=0;
+    const original=reader.read.bind(reader);reader.read=async path=>{reads++;return original(path);};
+    const context={signal:new AbortController().signal,deadlineUnixMs:Date.now()+5000};
+    const snapshot=terminalPolicyFixture(reader.rootId,context.deadlineUnixMs);
+    const current=()=>{calls++;return true;};
+    const pending=route==='policy'?engine.evaluateProcessingPolicy({snapshot:()=>{calls++;return snapshot;},current,authority},context):
+      engine.previewPolicyMetadata('one.md',current,false,authority);
+    await assert.rejects(pending,route==='policy'?/CANCELLED/:/SOURCE_CHANGED/);
+    assert.equal(calls,0);assert.equal(reads,0);assert.equal(previews(),0);
+    const owner=ownerState(engine);assert.equal(owner.localRead,null);assert.equal(owner.localSettlement,null);
+    assert.ok(owner.generation);assert.equal(owner.scopeRetired,false);
+  }finally{await f.cleanup();}
+});
+
+for(const route of ['policy','preview'] as const)
+test('publication native observation holds both route admissions '+route,async()=>{
+  const f=await fixture();try{
+    const {engine,reader,previews}=await f.open();await engine.start();await engine.whenIdle();
+    engine.configureGraph({schemaVersion:'oks-06b-mapping-v1',rules:[]});
+    const owner=ownerState(engine),authority=new AbortController();
+    const context={signal:new AbortController().signal,deadlineUnixMs:Date.now()+5000};
+    const snapshot=terminalPolicyFixture(reader.rootId,context.deadlineUnixMs);
+    let armed=false,observed=false;const nested:Promise<void>[]=[];
+    const current=()=>{
+      if(owner.localRead===null&&!armed){
+        armed=true;
+        queueMicrotask(()=>f.onConfigRead(()=>{
+          if(observed||!(new Error().stack??'').includes('observePublication'))return;
+          observed=true;assert.ok(owner.localSettlement);
+          nested.push(assert.rejects(evaluate(engine,{snapshot:()=>snapshot,current:()=>true},context),/BUSY/));
+          nested.push(assert.rejects(preview(engine,'one.md',()=>true),/PARSER_BUSY/));
+          nested.push(assert.rejects(engine.captureGraphScope({mode:'vault-wide'},context.signal).read(),/GRAPH_BUSY/));
+          for(const item of nested)void item.catch(()=>{});
+        }));
+      }
+      return true;
+    };
+    const pending=route==='policy'?engine.evaluateProcessingPolicy({snapshot:()=>snapshot,current,authority:authority.signal},context):
+      engine.previewPolicyMetadata('one.md',current,false,authority.signal);
+    const result=await pending;
+    assert.equal('allowed' in result?result.allowed:result.sourceId==='one.md',true);
+    assert.equal(observed,true);assert.equal(nested.length,3);await Promise.all(nested);
+    assert.equal(previews(),1);assert.equal(owner.localSettlement,null);assert.equal(owner.localRead,null);
+  }finally{await f.cleanup();}
+});
+
+test('native retirement queued by the last getter is after direct publication and fences next consumer observation',async()=>{
+  const f=await fixture();try{
+    const {engine,reader}=await f.open();await engine.start();await engine.whenIdle();
+    const owner=ownerState(engine),authority=new AbortController();
+    let armed=false,queued=false,revoked=false;
+    const current=()=>{
+      if(owner.localRead===null&&!armed){
+        armed=true;queueMicrotask(()=>f.onConfigRead(()=>{
+          if(queued||!(new Error().stack??'').includes('observePublication'))return;
+          queued=true;queueMicrotask(()=>{revoked=true;f.change(['one.md']);});
+        }));
+      }
+      return true;
+    };
+    const proof=await engine.previewPolicyMetadata('one.md',current,false,authority.signal);
+    assert.equal(proof.sourceId,'one.md');assert.equal(queued,true);assert.equal(revoked,true);
+    // Revocation executed after the callback-free resolve, but before this
+    // consumer reaction. Consumer revalidation must deny immediately.
+    assert.equal((reader.hardSearchScope as RevocableHardSearchScope).retirementSignal.aborted,true);
+    assert.equal(engine.status().generationId,null);assert.equal(owner.scopeRetired,true);
+    await denied(engine);
+  }finally{await f.cleanup();}
+});
+
+
+for(const route of ['policy','preview'] as const)
+test('host seal revoked at physical read settlement '+route,async t=>{
+  const f=await fixture();try{
+    const {engine,reader,previews}=await f.open();await engine.start();await engine.whenIdle();
+    const owner=ownerState(engine),authority=new AbortController();
+    const context={signal:new AbortController().signal,deadlineUnixMs:Date.now()+5000};
+    const snapshot=terminalPolicyFixture(reader.rootId,context.deadlineUnixMs);
+    let watched:Uint8Array|undefined,reads=0,lateHashes=0;
+    const originalUpdate=Hash.prototype.update;
+    t.mock.method(Hash.prototype,'update',function(this:Hash,...args:unknown[]){
+      if(authority.signal.aborted&&args[0]===watched)lateHashes++;
+      return Reflect.apply(originalUpdate,this,args);
+    });
+    const read=reader.read.bind(reader);
+    reader.read=async path=>{reads++;watched=await read(path);authority.abort();return watched;};
+    const pending=route==='policy'?engine.evaluateProcessingPolicy({snapshot:()=>snapshot,current:()=>true,authority:authority.signal},context):
+      engine.previewPolicyMetadata('one.md',()=>true,false,authority.signal);
+    await assert.rejects(pending,route==='policy'?/CANCELLED/:/SOURCE_CHANGED/);
+    await engine.processingPolicyDrain();
+    assert.equal(authority.signal.aborted,true);assert.ok(watched);assert.equal(reads,1);
+    assert.equal(lateHashes,0);assert.equal(previews(),0);
+    // Host-only invalidation never retires the independent source owner.
+    assert.equal(owner.scopeRetired,false);assert.ok(owner.generation);
+  }finally{await f.cleanup();}
 });

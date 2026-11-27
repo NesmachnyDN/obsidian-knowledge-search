@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {BoundedVaultReader} from '../plugin/src/standalone/source';
 import {captureNativeExclusions,type NativeExclusionPlatform} from '../plugin/src/search/native-exclusions';
-import {captureHardSearchScope,HARD_SEARCH_SCOPE_VERSION} from '../plugin/src/standalone/hard-search-scope';
+import {captureHardSearchScope,HARD_SEARCH_SCOPE_VERSION,liveRevocationSignal} from '../plugin/src/standalone/hard-search-scope';
 
 const supported:NativeExclusionPlatform={version:'1.15.1',desktop:true,linux:true};
 function hostFixture(raw:unknown=null){
@@ -285,4 +285,21 @@ test('exceptional completion without revocation preserves historical errors',asy
       finally{t.mock.restoreAll();}
     }
   }finally{await rm(root,{recursive:true,force:true});}
+});
+
+
+test('native retirement seal is the same irreversible owner state, including missed change',()=>{
+  const f=hostFixture();let observations=0,liveAtRetirement:boolean|undefined;
+  let lease:ReturnType<typeof captureNativeExclusions>|undefined;
+  lease=captureNativeExclusions(f.host,supported,()=>{
+    observations++;liveAtRetirement=liveRevocationSignal(lease!.scope.retirementSignal);
+  });
+  assert.equal(liveRevocationSignal(lease.scope.retirementSignal),true);
+  f.update(['note.md'],false);
+  assert.equal(liveRevocationSignal(lease.scope.retirementSignal),true,'missed change requires native observation');
+  assert.equal(lease.scope.current(),false);
+  assert.equal(liveRevocationSignal(lease.scope.retirementSignal),false);
+  assert.equal(observations,1);assert.equal(liveAtRetirement,false);
+  f.update(null);assert.equal(lease.scope.current(),false);
+  lease.dispose();assert.equal(observations,1);
 });

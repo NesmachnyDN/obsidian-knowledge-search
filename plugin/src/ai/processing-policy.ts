@@ -31,6 +31,9 @@ export type PolicySnapshot = Readonly<{
   payloadDigest: string; restrictions: readonly Restriction[]; evaluationComplete: boolean;
 }>;
 export type PolicyHost = Readonly<{ snapshot(): PolicySnapshot | null; current(): boolean;
+  /** For revocable engine scopes, the host must synchronously seal this
+   * existing operation authority on any invalidation of current(). */
+  authority?:AbortSignal;
   requireOriginalProof?:true; marking?(proof:PolicyMetadataProof,original?:DescriptorLifecycleProof):boolean }>;
 export type PolicyEnvelope = Readonly<{
   policyVersion: typeof POLICY_VERSION; allowed: boolean; reason: PolicyReason;
@@ -98,7 +101,8 @@ export class EligibilityEvaluator {
   /** Engine publication must use the exact evaluator-bound elapsed budget,
    * not a fresh wall-clock deadline or a renewed allowance. */
   assertPublicationDeadline():void {
-    this.requireOwner();
+    // Owner observation is the engine's responsibility before its final
+    // callback-free publication cut. No host callback is permitted here.
     if(!this.publicationContext)throw new ProviderFailure('CANCELLED');
     remainingOperationMs(this.publicationContext);
   }

@@ -15,7 +15,7 @@ import { ProviderFailure, type CallContext } from '../ai/contracts';
 import type { PolicyMetadataProof } from './shared';
 import { verifiedOriginalDigest, type SourceProvider } from './source';
 import type { GenerationStore } from './storage';
-import type { HardSearchScope } from './hard-search-scope';
+import { liveRevocationSignal, type HardSearchScope, type RevocableHardSearchScope } from './hard-search-scope';
 import { validateGraphMapping, type GraphMapping } from './graph-mapping';
 import type { GraphProjection } from './graph-projection';
 import { authenticateGraphCatalog, buildAuthenticatedGraph, scopeGraph, type GraphScopeLease,
@@ -74,21 +74,20 @@ export class StandaloneEngine {
   private verifiedAt = 0;
   private readonly hardSearchScope: HardSearchScope|undefined;
   private scopeRetired = false;
+  private readonly revocableScope:boolean;
+  private readonly sourceRetirementSignal:AbortSignal|undefined;
   constructor(private readonly provider: SourceProvider, private readonly store: GenerationStore,
     private readonly parser: MarkdownParser,
     private readonly yieldJob: () => Promise<void> = yieldToHost,
     private readonly now: () => number = Date.now) {
     if (provider.rootId !== store.rootId) throw new StandaloneError('VAULT_IDENTITY_CHANGED');
     this.hardSearchScope = provider.hardSearchScope;
+    this.revocableScope=!!this.hardSearchScope&&'current' in this.hardSearchScope;
+    this.sourceRetirementSignal=this.revocableScope?(this.hardSearchScope as RevocableHardSearchScope).retirementSignal:undefined;
   }
   status(): EngineState { this.scopeCurrent(); return { ...this.state }; }
   /** The source owner is the only scope authority. Retirement is irreversible. */
-  private scopeCurrent(): boolean {
-    if (this.scopeRetired) return false;
-    const scope = this.hardSearchScope;
-    if (!scope || !('current' in scope)) return true;
-    try { if (typeof scope.current === 'function' && scope.current() === true && !this.scopeRetired) return true; }
-    catch { /* malformed or unavailable host authority denies */ }
+  private retireScope():false {
     if (!this.scopeRetired) {
       this.scopeRetired = true;
       this.generation = null;
@@ -97,6 +96,20 @@ export class StandaloneEngine {
       this.recordState('unavailable', 'SEARCH_SCOPE_INVALID');
     }
     return false;
+  }
+  /** No host access: the existing native owner's irreversible event seal. */
+  private scopeSealCurrent():boolean {
+    if(this.scopeRetired)return false;
+    return !this.revocableScope||liveRevocationSignal(this.sourceRetirementSignal)||this.retireScope();
+  }
+  /** Effectful observation also detects a missed native configuration event. */
+  private scopeCurrent(): boolean {
+    if(!this.scopeSealCurrent())return false;
+    if(!this.revocableScope)return true;
+    const scope=this.hardSearchScope as RevocableHardSearchScope;
+    try{if(typeof scope.current==='function'&&scope.current()===true&&this.scopeSealCurrent())return true;}
+    catch{/* malformed or unavailable host authority denies */}
+    return this.retireScope();
   }
   private requireScope(): void {
     if (!this.scopeCurrent()) throw new StandaloneError('SEARCH_SCOPE_INVALID');
@@ -203,7 +216,11 @@ export class StandaloneEngine {
   }
   private schedule(): void {
     if (!this.scopeCurrent() || !this.initialized || this.stopped || this.paused || this.work || this.localRead || this.localSettlement) return;
-    this.work = this.run().catch(error => {
+    // Publish the reservation before run() can enter any source callback.
+    this.work = Promise.resolve().then(()=>{
+      if(!this.scopeCurrent()||this.stopped||this.paused)return;
+      return this.run();
+    }).catch(error => {
       if (this.scopeCurrent()) this.recordState(this.generation ? 'degraded' : 'failed', code(error));
     }).finally(() => {
       const live = this.scopeCurrent();
@@ -214,17 +231,16 @@ export class StandaloneEngine {
     this.state.busy = true;
   }
   async whenIdle(): Promise<void> {
-    try {
-      for (;;) {
-        // A terminal consumer can enter before the deferred reconciliation
-        // microtask. Admit queued work through the same scheduler before
-        // declaring idle; the scheduler still honors both reservations.
-        this.schedulePendingLocalWork();
-        const pending=this.work??this.localRead??this.localSettlement;
-        if(!pending)return;
-        await pending.catch(()=>{});
-      }
-    } finally { this.scopeCurrent(); }
+    for (;;) {
+      // Observe effectful authority and admit eligible queued work before
+      // the idle decision. Neither a finally callback nor a scheduler may
+      // run between the last inspection of reservations and returning idle.
+      this.scopeCurrent();
+      this.schedulePendingLocalWork();
+      const pending=this.work??this.localRead??this.localSettlement;
+      if(!pending)return;
+      await pending.catch(()=>{});
+    }
   }
   /** A logical denial does not release an outstanding physical operation. */
   private releaseLocalRead(physical:Promise<unknown>):void {
@@ -239,7 +255,8 @@ export class StandaloneEngine {
    * callback-free authority check (no adopted success/catch forwarding chain).
    * Revocation after the direct resolve is a consumer-side lease boundary. */
   private settleLocalPolicy<T>(physical:Promise<unknown>,outcome:Promise<T>,
-    check:(value:T)=>void,confirm:(value:T)=>void,normalize:(error:unknown)=>unknown):Promise<T>{
+    prepare:(value:T)=>void,observePublication:(value:T)=>void,confirm:(value:T)=>void,
+    normalize:(error:unknown)=>unknown):Promise<T>{
     this.localRead=physical;
     const drain=()=>this.releaseLocalRead(physical);
     void physical.then(drain,drain);
@@ -250,7 +267,13 @@ export class StandaloneEngine {
         setImmediate(()=>{
           try{
             if('error' in settled)reject(normalize(settled.error));
-            else{confirm(settled.value);resolve(settled.value);}
+            else{
+              observePublication(settled.value);
+              // Linearization cut: only local state, intrinsic signal reads,
+              // and the already-bound budget are allowed after observation.
+              confirm(settled.value);
+              resolve(settled.value);
+            }
           }catch(error){reject(normalize(error));}
           finally{
             this.localSettlement=null;
@@ -261,7 +284,7 @@ export class StandaloneEngine {
         });
       };
       void outcome.then(value=>{
-        try{check(value);finish({value});}catch(error){finish({error});}
+        try{prepare(value);finish({value});}catch(error){finish({error});}
       },error=>finish({error}));
     });
     this.localSettlement=logical;
@@ -272,29 +295,45 @@ export class StandaloneEngine {
   }
   /** Local preview only. Share the existing worker and hold the physical slot
    * through late read/parser completion; a timeout never publishes a proof. */
-  previewPolicyMetadata(path:string,current:()=>boolean,requireOriginalProof=false):Promise<PolicyMetadataProof> {
+  previewPolicyMetadata(path:string,current:()=>boolean,requireOriginalProof=false,authority?:AbortSignal):Promise<PolicyMetadataProof> {
     const parser=this.parser as MarkdownParser & Partial<PolicyMetadataParser>;
     if(!this.scopeCurrent())return Promise.reject(new StandaloneError('SEARCH_SCOPE_INVALID'));
     if(this.stopped||!this.initialized||this.paused||this.work||this.localRead||this.localSettlement||!validPath(path)||!parser.policyMetadata)
       return Promise.reject(new StandaloneError('PARSER_BUSY'));
+    // Callback-only legacy callers have no native scope. They cannot acquire
+    // a revocable engine lease without an actual host retirement signal.
+    if((this.revocableScope||authority!==undefined)&&(!liveRevocationSignal(authority)
+      ||authority===this.sourceRetirementSignal))
+      return Promise.reject(new StandaloneError('SOURCE_CHANGED'));
     const revision=this.revision,root=this.provider.rootId;
     let expired=false;
     const deadline=performance.now()+5000;
-    const live=()=>this.scopeCurrent()&&!this.stopped&&!this.paused&&this.revision===revision;
+    const localLive=()=>this.scopeSealCurrent()&&!this.stopped&&!this.paused&&this.revision===revision
+      &&(authority===undefined||liveRevocationSignal(authority));
     const confirm=()=>{
-      if(!live())throw new StandaloneError('SOURCE_CHANGED');
+      if(!localLive())throw new StandaloneError('SOURCE_CHANGED');
       if(expired||performance.now()>=deadline)throw new StandaloneError('PARSER_TIMEOUT');
+      if(!localLive())throw new StandaloneError('SOURCE_CHANGED');
+    };
+    const observe=()=>{
+      if(!this.scopeCurrent())throw new StandaloneError('SOURCE_CHANGED');
     };
     const check=()=>{
-      confirm();
+      observe();confirm();
       try{
         const allowed=current();
-        confirm();
+        observe();confirm();
         if(!allowed)throw new StandaloneError('SOURCE_CHANGED');
       }catch(error){
-        if(!this.scopeCurrent())throw new StandaloneError('SOURCE_CHANGED');
+        observe();
         throw error;
       }
+    };
+    const observePublication=()=>{
+      // A token-backed operation has already finished all host policy
+      // callbacks; observe native state for missed events before the cut.
+      if(authority===undefined)check();
+      else observe();
     };
     const read=async()=>{
       check();
@@ -320,7 +359,7 @@ export class StandaloneEngine {
       timer=setTimeout(()=>{expired=true;reject(new StandaloneError(this.scopeCurrent()?'PARSER_TIMEOUT':'SOURCE_CHANGED'));},5000);
       void physical.then(resolve,reject);
     });
-    const logical=this.settleLocalPolicy(physical,outcome,check,confirm,
+    const logical=this.settleLocalPolicy(physical,outcome,check,observePublication,confirm,
       error=>this.scopeCurrent()?error:new StandaloneError('SOURCE_CHANGED'));
     const clear=()=>clearTimeout(timer);
     void logical.then(clear,clear);
@@ -332,29 +371,55 @@ export class StandaloneEngine {
     if(!this.scopeCurrent())return Promise.reject(new ProviderFailure('CANCELLED'));
     if(this.stopped||!this.initialized||this.paused||this.work||this.localRead||this.localSettlement||!parser.policyMetadata)
       return Promise.reject(new ProviderFailure('BUSY'));
+    const authority=host.authority,operationSignal=context.signal;
+    if((this.revocableScope||authority!==undefined)&&(!liveRevocationSignal(authority)
+      ||authority===this.sourceRetirementSignal))
+      return Promise.reject(new ProviderFailure('CANCELLED'));
     const revision=this.revision;
-    const live=()=>this.scopeCurrent()&&!this.stopped&&!this.paused&&this.revision===revision;
+    const localLive=()=>this.scopeSealCurrent()&&!this.stopped&&!this.paused&&this.revision===revision
+      &&(authority===undefined||liveRevocationSignal(authority));
+    const live=()=>this.scopeCurrent()&&localLive();
     const callback=<T>(call:()=>T,denied:T):T=>{
       if(!live())return denied;
-      try{const value=call();return live()?value:denied;}
-      finally{this.scopeCurrent();}
+      let value:T;
+      try{value=call();}
+      catch(error){this.scopeCurrent();throw error;}
+      // Observe after the callback, then decide using the local seals; do
+      // not run another effectful native port in a return-value finally.
+      return live()?value:denied;
     };
     const current=()=>callback(()=>host.current(),false);
     const evaluator=new EligibilityEvaluator(this.provider,{policyMetadata:(path,bytes,root)=>parser.policyMetadata!(path,bytes,root)},
       {snapshot:()=>callback(()=>host.snapshot(),null),current,...(host.requireOriginalProof?{requireOriginalProof:true as const}:{}),
         ...(host.marking?{marking:(proof,original)=>callback(()=>host.marking!(proof,original),false)}:{})},
-      ()=>{if(!this.scopeCurrent())throw new ProviderFailure('CANCELLED');});
+      ()=>{
+        // Host revocation is independent of source retirement. Observe the
+        // source even on host-denied paths; never process a returned proof
+        // or assemble an envelope after the explicit host seal has retired.
+        if(!this.scopeCurrent()||authority!==undefined&&!liveRevocationSignal(authority))
+          throw new ProviderFailure('CANCELLED');
+      });
     const result=Promise.resolve().then(()=>evaluator.evaluate(context));
     const physical=result.then(()=>evaluator.drain(),()=>evaluator.drain());
     const outcome=result.then(envelope=>evaluator.physicallyPending?envelope:physical.then(()=>envelope));
     const confirm=(envelope:PolicyEnvelope)=>{
-      if(!this.scopeCurrent()||envelope.allowed&&!live())throw new ProviderFailure('CANCELLED');
-      if(envelope.allowed)evaluator.assertPublicationDeadline();
+      if(!this.scopeSealCurrent())throw new ProviderFailure('CANCELLED');
+      if(envelope.allowed){
+        evaluator.assertPublicationDeadline();
+        if(!localLive()||!liveRevocationSignal(operationSignal))throw new ProviderFailure('CANCELLED');
+      }
+    };
+    const observe=()=>{if(!this.scopeCurrent())throw new ProviderFailure('CANCELLED');};
+    const observePublication=(envelope:PolicyEnvelope)=>{
+      // Historical unscoped callers have only a point-in-time callback.
+      // Revocable owners must supply an event seal instead.
+      if(envelope.allowed&&authority===undefined&&!current())throw new ProviderFailure('CANCELLED');
+      observe();
     };
     return this.settleLocalPolicy(physical,outcome,envelope=>{
-      confirm(envelope);
+      observe();confirm(envelope);
       if(envelope.allowed&&!current())throw new ProviderFailure('CANCELLED');
-    },confirm,error=>this.scopeCurrent()?error:new ProviderFailure('CANCELLED'));
+    },observePublication,confirm,error=>this.scopeCurrent()?error:new ProviderFailure('CANCELLED'));
   }
   processingPolicyDrain():Promise<void>{
     const observe=()=>{this.scopeCurrent();};
