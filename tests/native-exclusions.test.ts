@@ -70,6 +70,8 @@ test('unsupported hosts and malformed or unobservable configuration fail closed'
   const malformed=hostFixture(['note.md']);
   malformed.metadata.userIgnoreFilters=[];
   assert.throws(()=>malformed.capture(),/SEARCH_SCOPE_INVALID/);
+  const sparse=hostFixture(['note.md']);sparse.metadata.userIgnoreFilters=Array(1);
+  assert.throws(()=>sparse.capture(),/SEARCH_SCOPE_INVALID/);assert.equal(sparse.subscriptions(),0);
   const unknown=hostFixture();unknown.raw(undefined);assert.throws(()=>unknown.capture(),/SEARCH_SCOPE_INVALID/);
   const missing=hostFixture();Object.assign(missing.vault,{getConfig:undefined});
   assert.throws(()=>missing.capture(),/SEARCH_SCOPE_INVALID/);
@@ -110,6 +112,13 @@ test('subscription precedes capture and retirement callback sees the seal; dispo
   let l:ReturnType<typeof captureNativeExclusions>;
   l=captureNativeExclusions(f.host,supported,()=>{assert.equal(l.scope.current(),false);throw Error('observer failure');});
   callback();callback();assert.equal(l.scope.current(),false);l.dispose();l.dispose();assert.equal(f.subscriptions(),0);
+  const direct=hostFixture();let notifications=0;
+  let d:ReturnType<typeof captureNativeExclusions>;
+  d=captureNativeExclusions(direct.host,supported,()=>{
+    assert.equal(d.scope.current(),false);notifications++;d.dispose();
+  });
+  d.dispose();d.dispose();direct.notify();
+  assert.equal(notifications,1);assert.equal(direct.subscriptions(),0);
   const g=hostFixture();
   const subscribe=g.vault.on;g.vault.on=(event,listener)=>{const ref=subscribe(event,listener);listener();return ref;};
   assert.throws(()=>g.capture(),/SEARCH_SCOPE_INVALID/);assert.equal(g.subscriptions(),0);

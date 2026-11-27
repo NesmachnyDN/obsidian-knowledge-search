@@ -61,9 +61,9 @@ export function captureNativeExclusions(host:NativeExclusionHost,platform:Native
     try{onRetired();}catch{/* The seal still holds if the observer fails. */}
   };
   const dispose=():void=>{
-    retired=true;
     if(disposed)return;
     disposed=true;
+    retire();
     if(ref!==undefined&&ref!==null){try{off.call(vault,ref);}catch{throw invalid();}}
   };
   try{
@@ -75,7 +75,7 @@ export function captureNativeExclusions(host:NativeExclusionHost,platform:Native
     // compiled filters; explicit empty uses two empty arrays.
     const nativeDefault=rules.serialized==='default';
     if(nativeDefault?filters!==null:(!Array.isArray(filters)||filters.length!==rules.count
-      ||!filters.every(object)))throw invalid();
+      ||![...filters].every(object)))throw invalid();
     const entries=Array.isArray(filters)?[...filters]:[];
     const revision=hash(JSON.stringify(['oks-native-exclusion-v1',platform.version,randomUUID(),
       rules.serialized,base?.revision??null]));
