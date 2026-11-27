@@ -94,6 +94,14 @@ export class EligibilityEvaluator {
   private active=false;
   private pending=false;
   private dependency?:Promise<void>;
+  private publicationContext?:CallContext;
+  /** Engine publication must use the exact evaluator-bound elapsed budget,
+   * not a fresh wall-clock deadline or a renewed allowance. */
+  assertPublicationDeadline():void {
+    this.requireOwner();
+    if(!this.publicationContext)throw new ProviderFailure('CANCELLED');
+    remainingOperationMs(this.publicationContext);
+  }
   get physicallyPending():boolean{return this.pending;}
   async drain():Promise<void>{await this.dependency;}
   constructor(private readonly reader: SourceProvider, private readonly parser: PolicyMetadataParser,
@@ -138,6 +146,7 @@ export class EligibilityEvaluator {
     this.requireOwner();
     if(this.active||this.pending)return freeze({policyVersion:POLICY_VERSION,allowed:false,reason:'busy',bindingDigest:null,rootId:'',sourceVersions:[]});
     this.active=true;
+    this.publicationContext=undefined;
     try{const envelope=await this.evaluateOwned(context);this.requireOwner();return envelope;}
     finally{this.active=false;this.requireOwner();}
   }
@@ -167,6 +176,7 @@ export class EligibilityEvaluator {
       if(!validSnapshot(s))return done('source-unresolved');
       const p=profileReason(s); if(p)return done(p);
       context=bindActiveDeadline(context,30000,s.deadlineUnixMs);
+      this.publicationContext=context;
       bindingDigest=hash(JSON.stringify([POLICY_VERSION,rootId,s]));
     }catch(error){return done(error instanceof ProviderFailure&&error.code==='TIMEOUT'?'timeout':signal.aborted?'cancelled':'source-unresolved');}
     const current=():boolean=>{

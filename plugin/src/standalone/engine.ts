@@ -1,3 +1,4 @@
+import { setImmediate } from 'node:timers';
 import {
   BOUNDS, PROTOCOL, StandaloneError, hash, generationId, makeGeneration, matches, validPath, validateRequest,
   type IndexGeneration, type SearchRequest, type SearchResponse, type EvidenceHit, type SourceVersion,
@@ -54,6 +55,9 @@ export class StandaloneEngine {
   private work: Promise<void> | null = null;
   // One shared physical slot for parser-backed local policy/graph operations.
   private localRead: Promise<unknown> | null = null;
+  // Callback-bearing policy operations also own logical publication until
+  // their final callback and callback-free settlement fence have completed.
+  private localSettlement: Promise<unknown> | null = null;
   private graphMapping: GraphMapping | null = null;
   private graphRevision = 0;
   private graphCache: GraphProjection | null = null;
@@ -198,7 +202,7 @@ export class StandaloneEngine {
     this.reconcile();
   }
   private schedule(): void {
-    if (!this.scopeCurrent() || !this.initialized || this.stopped || this.paused || this.work || this.localRead) return;
+    if (!this.scopeCurrent() || !this.initialized || this.stopped || this.paused || this.work || this.localRead || this.localSettlement) return;
     this.work = this.run().catch(error => {
       if (this.scopeCurrent()) this.recordState(this.generation ? 'degraded' : 'failed', code(error));
     }).finally(() => {
@@ -211,9 +215,14 @@ export class StandaloneEngine {
   }
   async whenIdle(): Promise<void> {
     try {
-      while (this.work||this.localRead) {
-        if(this.work)await this.work;else await this.localRead?.catch(()=>{});
-        this.scopeCurrent();
+      for (;;) {
+        // A terminal consumer can enter before the deferred reconciliation
+        // microtask. Admit queued work through the same scheduler before
+        // declaring idle; the scheduler still honors both reservations.
+        this.schedulePendingLocalWork();
+        const pending=this.work??this.localRead??this.localSettlement;
+        if(!pending)return;
+        await pending.catch(()=>{});
       }
     } finally { this.scopeCurrent(); }
   }
@@ -224,21 +233,64 @@ export class StandaloneEngine {
     this.localRead=null;
     if(live&&!this.stopped&&!this.paused&&(this.all||this.pending.size))this.schedule();
   }
+  /** Separate physical drain from callback-bearing logical publication.
+   * A callback may reenter synchronously or queue a revocation microtask.
+   * Keep admission through that callback and publish directly from a later,
+   * callback-free authority check (no adopted success/catch forwarding chain).
+   * Revocation after the direct resolve is a consumer-side lease boundary. */
+  private settleLocalPolicy<T>(physical:Promise<unknown>,outcome:Promise<T>,
+    check:(value:T)=>void,confirm:(value:T)=>void,normalize:(error:unknown)=>unknown):Promise<T>{
+    this.localRead=physical;
+    const drain=()=>this.releaseLocalRead(physical);
+    void physical.then(drain,drain);
+    const logical=new Promise<T>((resolve,reject)=>{
+      const finish=(settled:{value:T}|{error:unknown})=>{
+        // A task boundary drains the callback's entire queued microtask
+        // chain, not just its first microtask, before terminal publication.
+        setImmediate(()=>{
+          try{
+            if('error' in settled)reject(normalize(settled.error));
+            else{confirm(settled.value);resolve(settled.value);}
+          }catch(error){reject(normalize(error));}
+          finally{
+            this.localSettlement=null;
+            // Do not call another host port between the terminal fence and
+            // publication. Schedule pending work only after direct settlement.
+            queueMicrotask(()=>this.schedulePendingLocalWork());
+          }
+        });
+      };
+      void outcome.then(value=>{
+        try{check(value);finish({value});}catch(error){finish({error});}
+      },error=>finish({error}));
+    });
+    this.localSettlement=logical;
+    return logical;
+  }
+  private schedulePendingLocalWork():void{
+    if(this.scopeCurrent()&&!this.stopped&&!this.paused&&(this.all||this.pending.size))this.schedule();
+  }
   /** Local preview only. Share the existing worker and hold the physical slot
    * through late read/parser completion; a timeout never publishes a proof. */
   previewPolicyMetadata(path:string,current:()=>boolean,requireOriginalProof=false):Promise<PolicyMetadataProof> {
     const parser=this.parser as MarkdownParser & Partial<PolicyMetadataParser>;
     if(!this.scopeCurrent())return Promise.reject(new StandaloneError('SEARCH_SCOPE_INVALID'));
-    if(this.stopped||!this.initialized||this.paused||this.work||this.localRead||!validPath(path)||!parser.policyMetadata)
+    if(this.stopped||!this.initialized||this.paused||this.work||this.localRead||this.localSettlement||!validPath(path)||!parser.policyMetadata)
       return Promise.reject(new StandaloneError('PARSER_BUSY'));
     const revision=this.revision,root=this.provider.rootId;
     let expired=false;
-    const live=()=>this.scopeCurrent()&&!expired&&!this.stopped&&!this.paused&&this.revision===revision;
-    const check=()=>{
+    const deadline=performance.now()+5000;
+    const live=()=>this.scopeCurrent()&&!this.stopped&&!this.paused&&this.revision===revision;
+    const confirm=()=>{
       if(!live())throw new StandaloneError('SOURCE_CHANGED');
+      if(expired||performance.now()>=deadline)throw new StandaloneError('PARSER_TIMEOUT');
+    };
+    const check=()=>{
+      confirm();
       try{
         const allowed=current();
-        if(!live()||!allowed)throw new StandaloneError('SOURCE_CHANGED');
+        confirm();
+        if(!allowed)throw new StandaloneError('SOURCE_CHANGED');
       }catch(error){
         if(!this.scopeCurrent())throw new StandaloneError('SOURCE_CHANGED');
         throw error;
@@ -263,25 +315,22 @@ export class StandaloneEngine {
         throw new StandaloneError('SOURCE_CHANGED');
       check();return proof;
     });
-    this.localRead=physical;
-    const drain=()=>this.releaseLocalRead(physical);
-    void physical.then(drain,drain);
-    return new Promise((resolve,reject)=>{
-      const timer=setTimeout(()=>{expired=true;reject(new StandaloneError(this.scopeCurrent()?'PARSER_TIMEOUT':'SOURCE_CHANGED'));},5000);
-      physical.then(value=>{
-        clearTimeout(timer);
-        const live=this.scopeCurrent();
-        if(!expired){try{if(!live)throw new StandaloneError('SOURCE_CHANGED');check();resolve(value);}catch(error){reject(error);}}
-      },error=>{
-        clearTimeout(timer);reject(this.scopeCurrent()?error:new StandaloneError('SOURCE_CHANGED'));
-      });
+    let timer!:ReturnType<typeof setTimeout>;
+    const outcome=new Promise<PolicyMetadataProof>((resolve,reject)=>{
+      timer=setTimeout(()=>{expired=true;reject(new StandaloneError(this.scopeCurrent()?'PARSER_TIMEOUT':'SOURCE_CHANGED'));},5000);
+      void physical.then(resolve,reject);
     });
+    const logical=this.settleLocalPolicy(physical,outcome,check,confirm,
+      error=>this.scopeCurrent()?error:new StandaloneError('SOURCE_CHANGED'));
+    const clear=()=>clearTimeout(timer);
+    void logical.then(clear,clear);
+    return logical;
   }
   /** One existing worker/source owner, shared with lexical indexing and dry-run. */
   evaluateProcessingPolicy(host:PolicyHost,context:CallContext):Promise<PolicyEnvelope>{
     const parser=this.parser as MarkdownParser & Partial<PolicyMetadataParser>;
     if(!this.scopeCurrent())return Promise.reject(new ProviderFailure('CANCELLED'));
-    if(this.stopped||!this.initialized||this.paused||this.work||this.localRead||!parser.policyMetadata)
+    if(this.stopped||!this.initialized||this.paused||this.work||this.localRead||this.localSettlement||!parser.policyMetadata)
       return Promise.reject(new ProviderFailure('BUSY'));
     const revision=this.revision;
     const live=()=>this.scopeCurrent()&&!this.stopped&&!this.paused&&this.revision===revision;
@@ -297,21 +346,19 @@ export class StandaloneEngine {
       ()=>{if(!this.scopeCurrent())throw new ProviderFailure('CANCELLED');});
     const result=Promise.resolve().then(()=>evaluator.evaluate(context));
     const physical=result.then(()=>evaluator.drain(),()=>evaluator.drain());
-    this.localRead=physical;
-    const release=()=>this.releaseLocalRead(physical);
-    void physical.then(release,release);
-    return result.then(async envelope=>{
-      if(!evaluator.physicallyPending)await physical;
-      if(!this.scopeCurrent()||envelope.allowed&&!current())throw new ProviderFailure('CANCELLED');
-      return envelope;
-    }).catch(error=>{
-      if(!this.scopeCurrent())throw new ProviderFailure('CANCELLED');
-      throw error;
-    });
+    const outcome=result.then(envelope=>evaluator.physicallyPending?envelope:physical.then(()=>envelope));
+    const confirm=(envelope:PolicyEnvelope)=>{
+      if(!this.scopeCurrent()||envelope.allowed&&!live())throw new ProviderFailure('CANCELLED');
+      if(envelope.allowed)evaluator.assertPublicationDeadline();
+    };
+    return this.settleLocalPolicy(physical,outcome,envelope=>{
+      confirm(envelope);
+      if(envelope.allowed&&!current())throw new ProviderFailure('CANCELLED');
+    },confirm,error=>this.scopeCurrent()?error:new ProviderFailure('CANCELLED'));
   }
   processingPolicyDrain():Promise<void>{
     const observe=()=>{this.scopeCurrent();};
-    return (this.localRead??Promise.resolve()).then(observe,observe);
+    return Promise.allSettled([this.localRead,this.localSettlement]).then(observe,observe);
   }
   /** Explicit internal host configuration. Invalid or null input revokes the
    * prior graph; ordinary lexical search is unchanged. */
@@ -357,7 +404,7 @@ export class StandaloneEngine {
     check();
     const read = async (): Promise<T> => {
       check();
-      if (this.localRead) throw new StandaloneError('GRAPH_BUSY');
+      if (this.localRead||this.localSettlement) throw new StandaloneError('GRAPH_BUSY');
       // Reserve synchronously before starting any asynchronous source read.
       const physical = Promise.resolve().then(async () => {
         try {
@@ -954,6 +1001,7 @@ export class StandaloneEngine {
       if (this.work) await this.work;
       this.scopeCurrent();
       if(this.localRead)await this.localRead.catch(()=>{});
+      if(this.localSettlement)await this.localSettlement.catch(()=>{});
       this.scopeCurrent();
       this.recordState('unavailable', 'LIFECYCLE_INVALID');
     } finally { this.scopeCurrent(); }

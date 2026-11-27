@@ -646,3 +646,102 @@ test('processing policy callback fence '+stage,async t=>{
     }finally{Array.prototype.map=originalMap;}
   }finally{await f.cleanup();}
 });
+
+// The final callback runs after physical drain but before logical publication.
+// Exercise both routes with the actual native lease, not a mocked owner guard.
+for(const route of ['policy','preview'] as const)
+for(const mode of ['allow','deny','throw','revoke','microtask-revoke','nested-revoke','microtask-throw','reenter','microtask-reenter','cancel','microtask-cancel','revision','microtask-revision','deadline'] as const)
+test('local policy terminal '+route+' '+mode,async t=>{
+  const f=await fixture();try{
+    const {engine,reader,previews}=await f.open();await engine.start();await engine.whenIdle();
+    engine.configureGraph({schemaVersion:'oks-06b-mapping-v1',rules:[]});
+    await engine.captureGraphScope({mode:'vault-wide'},new AbortController().signal).read();
+    const owner=ownerState(engine),abort=new AbortController(),deadlineUnixMs=Date.now()+5000;
+    const context={signal:abort.signal,deadlineUnixMs};
+    if(route==='preview'&&mode==='deadline')t.mock.timers.enable({apis:['setTimeout']});
+    const config:ProviderConfig={state:'configured',transport:'local',origin:'http://127.0.0.1:1',
+      identity:{model:'synthetic',revision:'fixture'},limits:{timeoutMs:5000,maxInputBytes:8192,maxCandidates:10,maxOutputTokens:64,maxConcurrent:1}};
+    const snapshot:PolicySnapshot={subjects:[{kind:'original',sourceId:'one.md',expectedSha256:hash('# unique one.md'),ownerIds:['one.md']}],
+      profile:{profileId:'fixture',admissionId:'fixture-review',role:'generation',configDigest:configDigest('generation',config),
+        adapter:'fixture',classification:'trusted-internal'},role:'generation',config,adapter:'fixture',
+      ownerId:'fixture-owner',hostId:'fixture-host',scopeId:reader.rootId,policyRevision:'p1',configRevision:'c1',
+      credentialEpoch:1,deadlineUnixMs,payloadDigest:hash('fixture'),restrictions:[],evaluationComplete:true};
+    const ordinary={snapshot:()=>snapshot,current:()=>true};
+    let finalCalls=0,revoked=false,lateReads=0;
+    const read=reader.read.bind(reader);
+    reader.read=async path=>{if(revoked)lateReads++;return read(path);};
+    const revoke=()=>{revoked=true;f.change(['one.md']);};
+    const nested:Promise<void>[]=[];
+    const current=()=>{
+      if(owner.localRead!==null)return true;
+      finalCalls++;
+      if(mode==='revoke')revoke();
+      if(mode==='microtask-revoke'||mode==='microtask-throw')queueMicrotask(revoke);
+      if(mode==='nested-revoke')queueMicrotask(()=>queueMicrotask(()=>queueMicrotask(revoke)));
+      if(mode==='throw'||mode==='microtask-throw')throw Error('synthetic final failure');
+      const reenter=()=>{
+        nested.push(assert.rejects(engine.evaluateProcessingPolicy(ordinary,context),/BUSY/));
+        nested.push(assert.rejects(engine.previewPolicyMetadata('one.md',()=>true),/PARSER_BUSY/));
+        nested.push(assert.rejects(engine.captureGraphScope({mode:'vault-wide'},abort.signal).read(),/GRAPH_BUSY/));
+        // Attach rejection handlers immediately; assertions are awaited below.
+        for(const p of nested)void p.catch(()=>{});
+      };
+      if(mode==='reenter')reenter();
+      if(mode==='microtask-reenter')queueMicrotask(reenter);
+      const cancel=()=>{if(route==='policy')abort.abort();else engine.cancel();};
+      if(mode==='cancel')cancel();
+      if(mode==='microtask-cancel')queueMicrotask(cancel);
+      if(mode==='revision')engine.changed('one.md');
+      if(mode==='microtask-revision')queueMicrotask(()=>engine.changed('one.md'));
+      if(mode==='deadline'){
+        if(route==='policy')t.mock.method(Date,'now',()=>deadlineUnixMs+1);
+        else t.mock.timers.tick(5001);
+      }
+      return mode!=='deny';
+    };
+    const pending=route==='policy'?engine.evaluateProcessingPolicy({...ordinary,current},context):
+      engine.previewPolicyMetadata('one.md',current);
+    if(mode==='allow'||mode==='reenter'||mode==='microtask-reenter'){
+      const value=await pending;
+      if('allowed' in value)assert.equal(value.allowed,true);else assert.equal(value.sourceId,'one.md');
+    }else{
+      const expected=mode==='throw'?/synthetic final failure/:mode==='deadline'?/TIMEOUT/:
+        route==='policy'?/CANCELLED/:/SOURCE_CHANGED/;
+      await assert.rejects(pending,expected);
+    }
+    const retired=mode==='revoke'||mode==='microtask-revoke'||mode==='nested-revoke'||mode==='microtask-throw';
+    assert.equal(finalCalls,1);assert.equal(revoked,retired);
+    assert.equal(owner.scopeRetired,retired);assert.equal(owner.generation===null,retired);
+    if(retired)assert.equal(owner.graphCache,null);
+    assert.equal(owner.localRead,null);assert.equal(lateReads,0);
+    await Promise.all(nested);
+    assert.equal(previews(),1);
+  }finally{t.mock.restoreAll();t.mock.timers.reset();await f.cleanup();}
+});
+
+// A waiter arriving directly from the logical terminal rejection must also
+// observe reconciliation queued during the last callback, not a false idle gap.
+test('local policy terminal whenIdle waits for queued reconciliation',async()=>{
+  const f=await fixture();let release=()=>{};try{
+    const {engine,reader}=await f.open();await engine.start();await engine.whenIdle();
+    const owner=ownerState(engine),list=reader.list.bind(reader);
+    let entered=false,finished=false,idle=false;
+    const gate=new Promise<void>(resolve=>{release=resolve;});
+    let finalCalls=0;
+    const pending=engine.previewPolicyMetadata('one.md',()=>{
+      if(owner.localRead===null){
+        finalCalls++;
+        reader.list=async()=>{entered=true;await gate;finished=true;return list();};
+        engine.changed('one.md');
+      }
+      return true;
+    });
+    try{await pending;assert.fail('revision invalidates preview');}
+    catch(error){assert.match(String(error),/SOURCE_CHANGED/);}
+    const waiting=engine.whenIdle().then(()=>{idle=true;});
+    await new Promise<void>(resolve=>setImmediate(resolve));
+    assert.equal(finalCalls,1);assert.equal(entered,true);assert.equal(finished,false);
+    assert.equal(idle,false,'idle must include reconciliation queued at publication');
+    release();await waiting;assert.equal(finished,true);
+  }finally{release();await f.cleanup();}
+});
