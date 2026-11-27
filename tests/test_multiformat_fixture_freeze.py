@@ -120,6 +120,9 @@ class TextDiagramFixtureFreeze(unittest.TestCase):
         with self.assertRaises(ET.ParseError):
             ET.fromstring(self.sources["n06.drawio"])
         self.assertIn(b"target=\"missing\"", self.sources["n07.drawio"])
+        self.assertEqual(next(row["expect"] for row in self.oracle["negative"] if row["source"] == "n08.drawio"), "reject-format-mismatch")
+        with self.assertRaises(ET.ParseError):
+            ET.fromstring(self.sources["n08.drawio"])
         self.assertIn(b"<!DOCTYPE", self.sources["n09.drawio"])
         self.assertEqual(self.sources["x01.drawio"], self.sources["copy.drawio"])
         self.assertIn(b"ai_indexing: full", self.sources["owner-a.md"])
