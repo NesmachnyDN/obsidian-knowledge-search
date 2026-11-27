@@ -1,0 +1,561 @@
+{
+  "absentQueries": [
+    "SYNTH-ABSENT-501",
+    "SYNTH-ABSENT-502"
+  ],
+  "negative": [
+    {
+      "encoding": "utf-8",
+      "expect": "reject-invalid-utf8-or-nul",
+      "source": "n01.txt"
+    },
+    {
+      "encoding": "cp1251",
+      "expect": "reject-invalid-declared-encoding",
+      "source": "n02.txt"
+    },
+    {
+      "encoding": null,
+      "expect": "explicit-encoding-required-no-guess",
+      "source": "n03.txt"
+    },
+    {
+      "expect": "never-resolve-external-include",
+      "localQuery": "LOCAL-ONLY-401",
+      "source": "n04.puml"
+    },
+    {
+      "expect": "reject-invalid-compressed-payload",
+      "source": "n05.drawio"
+    },
+    {
+      "expect": "reject-malformed-xml",
+      "source": "n06.drawio"
+    },
+    {
+      "expect": "partial-dangling-edge-no-inferred-target",
+      "localQuery": "LOCAL-ONLY-402",
+      "source": "n07.drawio"
+    },
+    {
+      "expect": "reject-format-mismatch",
+      "source": "n08.drawio"
+    },
+    {
+      "expect": "reject-dtd-external-entity-without-fetch",
+      "source": "n09.drawio"
+    }
+  ],
+  "noCapabilityClaim": true,
+  "ownershipScenarios": {
+    "attachment": "x01.drawio",
+    "expected": [
+      "no automatic admission from wiki-links alone",
+      "restrictive owner wins once ownership is verified",
+      "unknown or incomplete ownership denies automatic AI retrieval",
+      "local authorized document search independent of AI eligibility",
+      "source rename/delete or owner/property drift invalidates prior lease"
+    ],
+    "intendedOwners": [
+      "owner-a.md",
+      "owner-b.md"
+    ],
+    "orphan": "x02.drawio",
+    "sameBytesDifferentSource": "copy.drawio",
+    "sources": [
+      "owner-a.md",
+      "owner-b.md",
+      "backlink.md",
+      "copy.drawio"
+    ],
+    "status": "declarative-unadmitted",
+    "unrelatedBacklink": "backlink.md"
+  },
+  "positive": [
+    {
+      "encoding": "utf-8",
+      "format": "md",
+      "judgments": [
+        {
+          "byteEnd": 31,
+          "byteStart": 21,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "REQ-MA-101"
+        },
+        {
+          "byteEnd": 52,
+          "byteStart": 33,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "СХЕМА-МА-101"
+        }
+      ],
+      "source": "m01.md"
+    },
+    {
+      "encoding": "utf-8",
+      "format": "md",
+      "judgments": [
+        {
+          "byteEnd": 30,
+          "byteStart": 20,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "REQ-MA-102"
+        },
+        {
+          "byteEnd": 51,
+          "byteStart": 32,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "СХЕМА-МА-102"
+        }
+      ],
+      "source": "m02.md"
+    },
+    {
+      "encoding": "utf-8",
+      "format": "txt",
+      "judgments": [
+        {
+          "byteEnd": 19,
+          "byteStart": 9,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "REQ-TA-101"
+        },
+        {
+          "byteEnd": 40,
+          "byteStart": 21,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "СХЕМА-ТА-101"
+        }
+      ],
+      "source": "t01.txt"
+    },
+    {
+      "encoding": "utf-8",
+      "format": "txt",
+      "judgments": [
+        {
+          "byteEnd": 18,
+          "byteStart": 8,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "REQ-TA-102"
+        },
+        {
+          "byteEnd": 39,
+          "byteStart": 20,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "СХЕМА-ТА-102"
+        }
+      ],
+      "source": "t02.txt"
+    },
+    {
+      "encoding": "cp1251",
+      "format": "txt",
+      "judgments": [
+        {
+          "byteEnd": 19,
+          "byteStart": 9,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "REQ-TA-103"
+        },
+        {
+          "byteEnd": 33,
+          "byteStart": 21,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "СХЕМА-ТА-103"
+        }
+      ],
+      "source": "t03.txt"
+    },
+    {
+      "encoding": "cp1251",
+      "format": "txt",
+      "judgments": [
+        {
+          "byteEnd": 18,
+          "byteStart": 8,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "REQ-TA-104"
+        },
+        {
+          "byteEnd": 32,
+          "byteStart": 20,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "СХЕМА-ТА-104"
+        }
+      ],
+      "source": "t04.txt"
+    },
+    {
+      "encoding": "utf-8",
+      "format": "mermaid",
+      "judgments": [
+        {
+          "byteEnd": 27,
+          "byteStart": 17,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "REQ-DA-101"
+        },
+        {
+          "byteEnd": 56,
+          "byteStart": 37,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "СХЕМА-ДА-101"
+        }
+      ],
+      "source": "d01.mermaid"
+    },
+    {
+      "encoding": "utf-8",
+      "format": "mermaid",
+      "judgments": [
+        {
+          "byteEnd": 28,
+          "byteStart": 18,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "REQ-DA-102"
+        },
+        {
+          "byteEnd": 57,
+          "byteStart": 38,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "СХЕМА-ДА-102"
+        }
+      ],
+      "source": "d02.mermaid"
+    },
+    {
+      "encoding": "utf-8",
+      "format": "mmd",
+      "judgments": [
+        {
+          "byteEnd": 27,
+          "byteStart": 17,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "REQ-DA-103"
+        },
+        {
+          "byteEnd": 56,
+          "byteStart": 37,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "СХЕМА-ДА-103"
+        }
+      ],
+      "source": "d03.mmd"
+    },
+    {
+      "encoding": "utf-8",
+      "format": "mmd",
+      "judgments": [
+        {
+          "byteEnd": 28,
+          "byteStart": 18,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "REQ-DA-104"
+        },
+        {
+          "byteEnd": 57,
+          "byteStart": 38,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "СХЕМА-ДА-104"
+        }
+      ],
+      "source": "d04.mmd"
+    },
+    {
+      "encoding": "utf-8",
+      "format": "uml",
+      "judgments": [
+        {
+          "byteEnd": 32,
+          "byteStart": 22,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "REQ-DA-105"
+        },
+        {
+          "byteEnd": 70,
+          "byteStart": 51,
+          "contentLayer": "source-text",
+          "line": 3,
+          "query": "СХЕМА-ДА-105"
+        }
+      ],
+      "source": "d05.uml"
+    },
+    {
+      "encoding": "utf-8",
+      "format": "uml",
+      "judgments": [
+        {
+          "byteEnd": 33,
+          "byteStart": 23,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "REQ-DA-106"
+        },
+        {
+          "byteEnd": 72,
+          "byteStart": 53,
+          "contentLayer": "source-text",
+          "line": 3,
+          "query": "СХЕМА-ДА-106"
+        }
+      ],
+      "source": "d06.uml"
+    },
+    {
+      "encoding": "utf-8",
+      "format": "puml",
+      "judgments": [
+        {
+          "byteEnd": 32,
+          "byteStart": 22,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "REQ-DA-107"
+        },
+        {
+          "byteEnd": 70,
+          "byteStart": 51,
+          "contentLayer": "source-text",
+          "line": 3,
+          "query": "СХЕМА-ДА-107"
+        }
+      ],
+      "source": "d07.puml"
+    },
+    {
+      "encoding": "utf-8",
+      "format": "puml",
+      "judgments": [
+        {
+          "byteEnd": 33,
+          "byteStart": 23,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "REQ-DA-108"
+        },
+        {
+          "byteEnd": 72,
+          "byteStart": 53,
+          "contentLayer": "source-text",
+          "line": 3,
+          "query": "СХЕМА-ДА-108"
+        }
+      ],
+      "source": "d08.puml"
+    },
+    {
+      "encoding": "utf-8",
+      "format": "plantuml",
+      "judgments": [
+        {
+          "byteEnd": 32,
+          "byteStart": 22,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "REQ-DA-109"
+        },
+        {
+          "byteEnd": 70,
+          "byteStart": 51,
+          "contentLayer": "source-text",
+          "line": 3,
+          "query": "СХЕМА-ДА-109"
+        }
+      ],
+      "source": "d09.plantuml"
+    },
+    {
+      "encoding": "utf-8",
+      "format": "plantuml",
+      "judgments": [
+        {
+          "byteEnd": 33,
+          "byteStart": 23,
+          "contentLayer": "source-text",
+          "line": 2,
+          "query": "REQ-DA-110"
+        },
+        {
+          "byteEnd": 72,
+          "byteStart": 53,
+          "contentLayer": "source-text",
+          "line": 3,
+          "query": "СХЕМА-ДА-110"
+        }
+      ],
+      "source": "d10.plantuml"
+    },
+    {
+      "compressed": false,
+      "format": "drawio",
+      "judgments": [
+        {
+          "cell": "n1",
+          "contentLayer": "native-label",
+          "page": "p1",
+          "query": "REQ-XA-101-START"
+        },
+        {
+          "cell": "n1",
+          "contentLayer": "native-label",
+          "page": "p2",
+          "query": "REQ-XA-102-START"
+        },
+        {
+          "cell": "n2",
+          "contentLayer": "native-label",
+          "page": "p2",
+          "query": "СХЕМА-ХА-102"
+        },
+        {
+          "cell": "e1",
+          "contentLayer": "native-label",
+          "page": "p2",
+          "query": "REQ-XA-102-EDGE",
+          "source": "n1",
+          "target": "n2"
+        }
+      ],
+      "source": "x01.drawio"
+    },
+    {
+      "compressed": false,
+      "format": "drawio",
+      "judgments": [
+        {
+          "cell": "n1",
+          "contentLayer": "native-label",
+          "page": "p1",
+          "query": "REQ-XA-103-START"
+        },
+        {
+          "cell": "n1",
+          "contentLayer": "native-label",
+          "page": "p2",
+          "query": "REQ-XA-104-START"
+        },
+        {
+          "cell": "n2",
+          "contentLayer": "native-label",
+          "page": "p2",
+          "query": "СХЕМА-ХА-104"
+        },
+        {
+          "cell": "e1",
+          "contentLayer": "native-label",
+          "page": "p2",
+          "query": "REQ-XA-104-EDGE",
+          "source": "n1",
+          "target": "n2"
+        }
+      ],
+      "source": "x02.drawio"
+    },
+    {
+      "compressed": true,
+      "format": "drawio",
+      "judgments": [
+        {
+          "cell": "n1",
+          "contentLayer": "native-label",
+          "page": "p1",
+          "query": "REQ-XA-105-START"
+        },
+        {
+          "cell": "n1",
+          "contentLayer": "native-label",
+          "page": "p2",
+          "query": "REQ-XA-106-START"
+        },
+        {
+          "cell": "n2",
+          "contentLayer": "native-label",
+          "page": "p2",
+          "query": "СХЕМА-ХА-106"
+        },
+        {
+          "cell": "e1",
+          "contentLayer": "native-label",
+          "page": "p2",
+          "query": "REQ-XA-106-EDGE",
+          "source": "n1",
+          "target": "n2"
+        }
+      ],
+      "source": "x03.drawio"
+    },
+    {
+      "compressed": true,
+      "format": "drawio",
+      "judgments": [
+        {
+          "cell": "n1",
+          "contentLayer": "native-label",
+          "page": "p1",
+          "query": "REQ-XA-107-START"
+        },
+        {
+          "cell": "n1",
+          "contentLayer": "native-label",
+          "page": "p2",
+          "query": "REQ-XA-108-START"
+        },
+        {
+          "cell": "n2",
+          "contentLayer": "native-label",
+          "page": "p2",
+          "query": "СХЕМА-ХА-108"
+        },
+        {
+          "cell": "e1",
+          "contentLayer": "native-label",
+          "page": "p2",
+          "query": "REQ-XA-108-EDGE",
+          "source": "n1",
+          "target": "n2"
+        }
+      ],
+      "source": "x04.drawio"
+    }
+  ],
+  "schema": "oks-06g1b-text-diagram-oracle-v1",
+  "unfrozenFamilies": [
+    "pdf-text",
+    "pdf-scan",
+    "doc",
+    "docx",
+    "xls",
+    "xlsx",
+    "ppt",
+    "pptx",
+    "vsdx",
+    "png",
+    "jpg",
+    "jpeg",
+    "bmp",
+    "msg"
+  ]
+}
