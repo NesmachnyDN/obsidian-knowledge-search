@@ -75,6 +75,9 @@ type RetirementObligation = {
 // One shared controller owns admission; obligations do not confer authority.
 // A bounded overflow is terminal-only: never silently discard freshness work.
 const MAX_RETIREMENT_OBLIGATIONS = 4096;
+/** Host-internal source constituent only. No listener, operation grant, or
+ * provider authority. The frozen seal reads a private, irreversible local bit. */
+export type SourceRevisionSeal = Readonly<{revision:number; retired:boolean}>;
 type EvidenceRole = 'reranking' | 'generation';
 export const EVIDENCE_PREVIEW_TTL_MS = 300_000;
 export type RerankPreview = { role: EvidenceRole; sequence: number; revision: number; expiresUnixMs: number; config: ProviderConfig; scopeId: string; query: string; hits: EvidenceHit[]; runtimeProfileBinding?: string; runtimeProfileDigest?: string; credentialStamp?:GenerationCredentialStamp; policy?:GenerationPolicyBinding };
@@ -191,6 +194,7 @@ export class SearchController {
     running: boolean; sourceRunning: boolean; overflow: boolean;
   } = {sharedHookFault:false,obligations:[],running:false,sourceRunning:false,overflow:false};
   private sourceRevision = 0;
+  private sourceSeal?: {seal:SourceRevisionSeal; state:{retired:boolean}};
   private sourceDrains = new Set<Promise<void>>();
   private sourceDrainFailed = false;
   /** An asynchronous owner cannot be considered retired on dispatch alone.
@@ -198,12 +202,16 @@ export class SearchController {
   trackSourceDrain(work:Promise<void>):void {
     if(this.disposed){void work.catch(()=>{});return;}
     if(this.sourceDrains.size>=MAX_RETIREMENT_OBLIGATIONS){
-      this.retirement.overflow=true;void work.catch(()=>{});return;
+      this.markRetirementOverflow();void work.catch(()=>{});return;
     }
+    const inWave=this.retirement.running||this.retirement.sourceRunning;
+    // A first source drain inside an ordinary evidence-abort wave still
+    // loses source currency. Do not let the old revision revive after drain.
+    if(inWave&&!this.sourceRetirementPending)this.advanceSourceAuthority();
     this.sourceDrains.add(work);
     // An independently detected stale source may start retirement outside a
     // Vault-event callback. Invalidate existing publication rights as well.
-    if(!this.retirement.running&&!this.retirement.sourceRunning)this.invalidateSource([]);
+    if(!inWave)this.invalidateSource([]);
     void work.then(()=>{
       this.sourceDrains.delete(work);
       if(!this.disposed)this.emit();
@@ -232,6 +240,31 @@ export class SearchController {
   sourceAuthorityRevision(): number { return this.sourceRevision; }
   sourceAuthorityCurrent(revision: number): boolean {
     return !this.disposed && !this.sourceRetirementPending && revision === this.sourceRevision;
+  }
+  /** Capture the existing revision only outside retirement and shared
+   * transitions. This passive constituent is deliberately not an AbortSignal:
+   * terminal logical retirement must not invoke arbitrary listeners. */
+  captureSourceAuthority():SourceRevisionSeal|null {
+    const revision=this.sourceRevision;
+    if(!this.sourceAuthorityCurrent(revision)||this.sharedAuthorityTransition()||this.retirement.running)return null;
+    if(!this.sourceSeal){
+      const state={retired:false};
+      const seal=Object.freeze({revision,get retired(){return state.retired;}});
+      this.sourceSeal={seal,state};
+    }
+    return this.sourceSeal.seal;
+  }
+  private retireSourceSeal():void {
+    if(this.sourceSeal)this.sourceSeal.state.retired=true;
+    this.sourceSeal=undefined;
+  }
+  private advanceSourceAuthority():number {
+    this.retireSourceSeal();
+    return ++this.sourceRevision;
+  }
+  private markRetirementOverflow():void {
+    if(!this.disposed&&!this.sourceRetirementPending)this.advanceSourceAuthority();
+    this.retirement.overflow=true;
   }
   private deliveringLifecycle = false;
   private evidencePending?: number;
@@ -472,7 +505,7 @@ export class SearchController {
     if (this.disposed || this.explicitRetirementPending || this.retirement.running || this.revokingSharedAuthority || (this.sharedAuthorityFault && this.notifying))
       throw new StandaloneError('INTERNAL_FAILURE');
     this.runtimeSettingsChanging = true;
-    ++this.sourceRevision;
+    this.advanceSourceAuthority();
     this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null},undefined,true);
     if (this.disposed) return;
     if (revokeRerankProfile) this.rerankProfiles.revoke();
@@ -485,7 +518,7 @@ export class SearchController {
    * Run it only after the same logical shared reset as lexical search. */
   invalidateSource(obligations: readonly (() => void)[]): void {
     if (this.disposed) return;
-    const revision = ++this.sourceRevision;
+    const revision = this.advanceSourceAuthority();
     for (const run of obligations) this.enqueueRetirement({kind:'source',revision,run,attempted:false});
     // Nested source work joins the running wave. If the wave belongs to an
     // ordinary shared reset, revoke any lexical reservation made in its callbacks.
@@ -499,7 +532,7 @@ export class SearchController {
   private enqueueRetirement(obligation: RetirementObligation): void {
     if (obligation.owner && this.retirement.obligations.some(item => item.owner === obligation.owner)) return;
     if (this.retirement.obligations.length >= MAX_RETIREMENT_OBLIGATIONS) {
-      this.retirement.overflow = true;
+      this.markRetirementOverflow();
       return;
     }
     this.retirement.obligations.push(obligation);
@@ -537,6 +570,9 @@ export class SearchController {
   }
   private transitionSourceRetirement(retry: boolean): void {
     if (this.disposed || this.retirement.running || this.retirement.sourceRunning) return;
+    // An evidence-only recovery can enter the source retirement barrier
+    // without an earlier source event. Seal before that temporary loss.
+    if(retry&&!this.sourceRetirementPending)this.advanceSourceAuthority();
     this.retirement.sourceRunning = true;
     try {
       if (retry) for (const obligation of this.retirement.obligations) obligation.attempted = false;
@@ -2087,6 +2123,7 @@ export class SearchController {
   sealTerminal(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.retireSourceSeal();
     this.retainedSessions.clear();
     this.generationCredential.seal();
     this.revokeGraphOperation();
