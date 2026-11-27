@@ -4,6 +4,7 @@ export const HARD_SEARCH_SCOPE_VERSION='oks-hard-search-scope-v1';
 export type HardSearchScopeConfig=Readonly<{version:typeof HARD_SEARCH_SCOPE_VERSION;
   excludedFolders:readonly string[];excludedFiles:readonly string[]}>;
 export type HardSearchScope=Readonly<{revision:string;hasExclusions:boolean;allows(path:unknown):boolean}>;
+export type RevocableHardSearchScope=HardSearchScope&Readonly<{current():boolean}>;
 const MAX_ENTRIES=64,MAX_CONFIG_BYTES=32768;
 /** Canonical vault-relative path, independent of file format. No host paths; wildcard characters are literal, not patterns. */
 export function validHardScopePath(value:unknown):value is string{

@@ -1,5 +1,9 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import fs,{mkdtemp,writeFile,rm,realpath} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {BoundedVaultReader} from '../plugin/src/standalone/source';
 import {captureNativeExclusions,type NativeExclusionPlatform} from '../plugin/src/search/native-exclusions';
 import {captureHardSearchScope,HARD_SEARCH_SCOPE_VERSION} from '../plugin/src/standalone/hard-search-scope';
 
@@ -110,8 +114,9 @@ test('subscription precedes capture and retirement callback sees the seal; dispo
   const on=f.vault.on;
   f.vault.on=(event,listener)=>{callback=listener;return on(event,listener);};
   let l:ReturnType<typeof captureNativeExclusions>;
-  l=captureNativeExclusions(f.host,supported,()=>{assert.equal(l.scope.current(),false);throw Error('observer failure');});
-  callback();callback();assert.equal(l.scope.current(),false);l.dispose();l.dispose();assert.equal(f.subscriptions(),0);
+  const observations:boolean[]=[];
+  l=captureNativeExclusions(f.host,supported,()=>{observations.push(l.scope.current());throw Error('observer failure');});
+  callback();callback();assert.deepEqual(observations,[false]);assert.equal(l.scope.current(),false);l.dispose();l.dispose();assert.equal(f.subscriptions(),0);
   const direct=hostFixture();let notifications=0;
   let d:ReturnType<typeof captureNativeExclusions>;
   d=captureNativeExclusions(direct.host,supported,()=>{
@@ -122,4 +127,162 @@ test('subscription precedes capture and retirement callback sees the seal; dispo
   const g=hostFixture();
   const subscribe=g.vault.on;g.vault.on=(event,listener)=>{const ref=subscribe(event,listener);listener();return ref;};
   assert.throws(()=>g.capture(),/SEARCH_SCOPE_INVALID/);assert.equal(g.subscriptions(),0);
+});
+
+test('revocable reader uses the native matcher even for empty configuration and preserves descriptor proofs',async()=>{
+  const root=await realpath(await mkdtemp(join(tmpdir(),'oks-native-reader-')));
+  try{
+    await writeFile(join(root,'note.md'),'# synthetic');
+    await writeFile(join(root,'other.md'),'# sibling');
+    for(const raw of [null,[],['note.md']]){
+      const f=hostFixture(raw);f.behavior(path=>raw!==null&&raw.length>0&&path==='note.md');
+      const l=f.capture();
+      try{
+        const r=await BoundedVaultReader.openWithScope(root,()=>['note.md','other.md'],l.scope);
+        assert.equal(r.hardSearchScope,l.scope);
+        assert.deepEqual(await r.list(),raw?.length?['other.md']:['note.md','other.md']);
+        const allowed=await r.readVerifiedOriginal('other.md');
+        assert.equal(Buffer.from(allowed.bytes).toString(),'# sibling');
+        assert.equal(allowed.proof.version.sourceId,'other.md');
+        assert.equal((await r.versionHints(['other.md'])).length,1);
+        if(raw?.length){
+          await assert.rejects(r.read('note.md'),/SEARCH_SCOPE_RESTRICTED/);
+          await assert.rejects(r.readVersionProof('note.md'),/SEARCH_SCOPE_RESTRICTED/);
+          await assert.rejects(r.readLifecycleProof('note.md'),/SEARCH_SCOPE_RESTRICTED/);
+          await assert.rejects(r.versionHints(['note.md']),/SEARCH_SCOPE_RESTRICTED/);
+        }
+        await assert.rejects(r.completeMarkdownInventory(),/SEARCH_SCOPE_RESTRICTED/);
+        f.update(['other.md']);f.update(raw);
+        for(const operation of [()=>r.list(),()=>r.versionHints([]),()=>r.read('other.md'),
+          ()=>r.readVerifiedOriginal('other.md'),()=>r.readVersionProof('other.md'),()=>r.readLifecycleProof('other.md'),
+          ()=>r.completeMarkdownInventory(),()=>BoundedVaultReader.openWithScope(root,()=>[],l.scope)])
+          await assert.rejects(operation(),/SEARCH_SCOPE_INVALID/);
+      }finally{l.dispose();}
+    }
+  }finally{await rm(root,{recursive:true,force:true});}
+});
+
+test('native reader never returns partial enumeration or stale asynchronous read and hint results',async()=>{
+  const root=await realpath(await mkdtemp(join(tmpdir(),'oks-native-race-')));
+  try{
+    await writeFile(join(root,'note.md'),'# synthetic');
+    for(const kind of ['enumeration','empty-enumeration','matcher','missed','read','hints'] as const){
+      const f=hostFixture([]);f.behavior(()=>false);
+      const l=f.capture();
+      try{
+        const r=await BoundedVaultReader.openWithScope(root,()=>{
+          if(kind==='enumeration'||kind==='empty-enumeration')f.notify();
+          return kind==='empty-enumeration'?[]:['note.md'];
+        },l.scope);
+        if(kind==='matcher')f.behavior(()=>{f.notify();return false;});
+        if(kind==='missed')f.raw(['changed.md']);
+        const pending=kind==='read'?r.read('note.md')
+          :kind==='hints'?r.versionHints(['note.md']):r.list();
+        if(kind==='read'||kind==='hints')f.notify();
+        await assert.rejects(pending,/SEARCH_SCOPE_INVALID/);
+        assert.equal(l.scope.current(),false);
+      }finally{l.dispose();}
+    }
+  }finally{await rm(root,{recursive:true,force:true});}
+});
+
+// Inject at the actual I/O boundary, not at a particular matcher call count.
+// The original operation is still executed against a synthetic fixture.
+test('revocation takes precedence over enumeration and root/hint I/O rejection',async t=>{
+  const root=await realpath(await mkdtemp(join(tmpdir(),'oks-native-error-')));
+  try{
+    await writeFile(join(root,'note.md'),'# synthetic');
+    for(const kind of ['enumeration','open-root','list-root','hint'] as const){
+      const f=hostFixture([]);f.behavior(()=>false);
+      const l=f.capture();
+      try{
+        const r=await BoundedVaultReader.openWithScope(root,()=>{
+          if(kind==='enumeration'){f.notify();throw Error('synthetic callback failure');}
+          return ['note.md'];
+        },l.scope);
+        const original=fs.lstat;
+        if(kind!=='enumeration')t.mock.method(fs,'lstat',async (...args:unknown[])=>{
+          if(String(args[0])===(kind==='hint'?join(root,'note.md'):root)){
+            f.notify();throw Object.assign(Error('synthetic I/O failure'),{code:'ENOENT'});
+          }
+          return Reflect.apply(original,fs,args);
+        });
+        const pending=kind==='open-root'?BoundedVaultReader.openWithScope(root,()=>[],l.scope)
+          :kind==='hint'?r.versionHints(['note.md']):r.list();
+        await assert.rejects(pending,{name:'StandaloneError',code:'SEARCH_SCOPE_INVALID'});
+        assert.equal(l.scope.current(),false);
+      }finally{t.mock.restoreAll();l.dispose();}
+    }
+  }finally{await rm(root,{recursive:true,force:true});}
+});
+
+test('revocation during actual descriptor I/O discards bytes and proofs and closes every handle',async t=>{
+  const root=await realpath(await mkdtemp(join(tmpdir(),'oks-native-descriptor-')));
+  try{
+    await writeFile(join(root,'note.md'),'# synthetic');
+    for(const kind of ['open-success','open-error','read-success','read-error','cleanup-success','cleanup-error'] as const){
+      for(const operation of ['read','readVersionProof','readVerifiedOriginal','readLifecycleProof'] as const){
+        const f=hostFixture([]);f.behavior(()=>false);
+        const l=f.capture();
+        let reads=0,opened=0,closed=0;
+        try{
+          const r=await BoundedVaultReader.openWithScope(root,()=>['note.md'],l.scope);
+          const original=fs.open;
+          t.mock.method(fs,'open',async (...args:Parameters<typeof fs.open>)=>{
+            const note=String(args[0]).endsWith('/note.md');
+            if(note&&kind==='open-error'){f.notify();throw Object.assign(Error('synthetic open failure'),{code:'EIO'});}
+            const handle=await original(...args);opened++;
+            if(note&&kind==='open-success')f.notify();
+            const close=handle.close.bind(handle);
+            t.mock.method(handle,'close',async ()=>{
+              await close();closed++;
+              if(note&&(kind==='cleanup-success'||kind==='cleanup-error')){
+                f.notify();
+                if(kind==='cleanup-error')throw Error('synthetic close failure');
+              }
+            });
+            if(note){
+              const read=handle.read.bind(handle);
+              t.mock.method(handle,'read',async (...readArgs:unknown[])=>{
+                reads++;
+                const observed=await Reflect.apply(read,handle,readArgs);
+                if(kind==='read-success'||kind==='read-error'){
+                  f.notify();
+                  if(kind==='read-error')throw Object.assign(Error('synthetic read failure'),{code:'EIO'});
+                }
+                return observed;
+              });
+            }
+            return handle;
+          });
+          await assert.rejects(r[operation]('note.md'),{name:'StandaloneError',code:'SEARCH_SCOPE_INVALID'});
+          assert.equal(l.scope.current(),false);
+          assert.equal(reads,kind.startsWith('open')?0:kind.startsWith('cleanup')?2:1);
+          assert.equal(opened,kind==='open-error'?1:2);
+          assert.equal(closed,opened);
+        }finally{t.mock.restoreAll();l.dispose();}
+      }
+    }
+  }finally{await rm(root,{recursive:true,force:true});}
+});
+
+test('exceptional completion without revocation preserves historical errors',async t=>{
+  const root=await realpath(await mkdtemp(join(tmpdir(),'oks-native-unscoped-error-')));
+  try{
+    await writeFile(join(root,'note.md'),'# synthetic');
+    const immutable={version:HARD_SEARCH_SCOPE_VERSION,excludedFolders:[],excludedFiles:[]};
+    for(const config of [undefined,immutable]){
+      const failure=Error('synthetic enumeration failure');
+      const reader=await BoundedVaultReader.open(root,()=>{throw failure;},config);
+      await assert.rejects(reader.list(),error=>error===failure);
+      const original=fs.lstat;
+      const ioFailure=Object.assign(Error('synthetic metadata failure'),{code:'ENOENT'});
+      t.mock.method(fs,'lstat',async (...args:unknown[])=>{
+        if(String(args[0])===join(root,'note.md'))throw ioFailure;
+        return Reflect.apply(original,fs,args);
+      });
+      try{await assert.rejects(reader.versionHints(['note.md']),error=>error===ioFailure);}
+      finally{t.mock.restoreAll();}
+    }
+  }finally{await rm(root,{recursive:true,force:true});}
 });

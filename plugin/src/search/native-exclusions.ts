@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import {hash,StandaloneError} from '../standalone/contracts';
-import {validHardScopePath,type HardSearchScope} from '../standalone/hard-search-scope';
+import {validHardScopePath,type HardSearchScope,type RevocableHardSearchScope} from '../standalone/hard-search-scope';
 
 /** Compatibility is deliberately restricted to the measured host release.
  * This boundary is the only consumer of the undocumented native methods. */
@@ -18,7 +18,7 @@ type NativeMetadata={
 export type NativeExclusionHost=Readonly<{vault:unknown;metadataCache:unknown}>;
 export type NativeExclusionPlatform=Readonly<{version:string;desktop:boolean;linux:boolean}>;
 export type NativeExclusionLease=Readonly<{
-  scope:HardSearchScope&Readonly<{current():boolean}>;
+  scope:RevocableHardSearchScope;
   dispose():void;
 }>;
 const invalid=():StandaloneError=>new StandaloneError('SEARCH_SCOPE_INVALID');

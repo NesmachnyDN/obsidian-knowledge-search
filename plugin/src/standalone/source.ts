@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { lstat, open, opendir, readlink, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { BOUNDS, StandaloneError, hash, isDigest, validPath } from './contracts';
-import {captureHardSearchScope,validHardScopePath,type HardSearchScope} from './hard-search-scope';
+import {captureHardSearchScope,validHardScopePath,type HardSearchScope,type RevocableHardSearchScope} from './hard-search-scope';
 
 export interface SourceProvider {
   readonly rootId: string;
@@ -77,11 +77,24 @@ export class BoundedVaultReader implements SourceProvider {
   readonly rootId: string;
   private constructor(private readonly root: string, private readonly device: number,
     private readonly inode: number, private readonly enumeration: () => string[],
-    private readonly searchScope?: HardSearchScope) {
+    private readonly searchScope?: HardSearchScope,
+    private readonly liveScope?: RevocableHardSearchScope) {
     this.rootId = hash(JSON.stringify([this.root, device, inode]));
   }
   static async open(root: string, enumerate: () => string[], scopeConfig?:unknown): Promise<BoundedVaultReader> {
     const scope=scopeConfig===undefined?undefined:captureHardSearchScope(scopeConfig);
+    return this.openScoped(root,enumerate,scope);
+  }
+  /** Host-only factory: the caller retains ownership of the captured lease. */
+  static async openWithScope(root:string,enumerate:()=>string[],scope:RevocableHardSearchScope):Promise<BoundedVaultReader>{
+    if(!scope.current())throw new StandaloneError('SEARCH_SCOPE_INVALID');
+    try{
+      return await this.openScoped(root,enumerate,scope,scope);
+    }finally{
+      if(!scope.current())throw new StandaloneError('SEARCH_SCOPE_INVALID');
+    }
+  }
+  private static async openScoped(root:string,enumerate:()=>string[],scope?:HardSearchScope,liveScope?:RevocableHardSearchScope):Promise<BoundedVaultReader>{
     if (!isAbsolute(root)) throw new StandaloneError('UNSUPPORTED_FILESYSTEM');
     const absolute = resolve(root);
     try {
@@ -89,10 +102,23 @@ export class BoundedVaultReader implements SourceProvider {
       if (!info.isDirectory() || info.isSymbolicLink()) throw new StandaloneError('UNSUPPORTED_FILESYSTEM');
       const canonical = await realpath(absolute);
       if (canonical !== absolute) throw new StandaloneError('UNSUPPORTED_FILESYSTEM');
-      return new BoundedVaultReader(absolute, info.dev, info.ino, enumerate, scope);
+      return new BoundedVaultReader(absolute, info.dev, info.ino, enumerate, scope, liveScope);
     } catch { throw new StandaloneError('UNSUPPORTED_FILESYSTEM'); }
   }
   get hardSearchScope(): HardSearchScope|undefined { return this.searchScope; }
+  /** Recheck at settlement, including rejection, so revoked authority takes precedence. */
+  private checkScope():void{
+    if(this.liveScope&&!this.liveScope.current())throw new StandaloneError('SEARCH_SCOPE_INVALID');
+  }
+  private allowsScope(path:string):boolean{
+    this.checkScope();
+    const allowed=this.liveScope?this.liveScope.allows(path):!this.searchScope?.hasExclusions||this.searchScope.allows(path);
+    this.checkScope();
+    return allowed;
+  }
+  private requireScope(path:string):void{
+    if(!this.allowsScope(path))throw new StandaloneError('SEARCH_SCOPE_RESTRICTED');
+  }
   /** Synchronous adapter-path fence; descriptor reads still authenticate root identity. */
   matchesRootPath(root:string):boolean{return isAbsolute(root)&&resolve(root)===this.root;}
   private async rootCheck(): Promise<void> {
@@ -104,13 +130,19 @@ export class BoundedVaultReader implements SourceProvider {
     } catch { throw new StandaloneError('VAULT_IDENTITY_CHANGED'); }
   }
   async list(): Promise<string[]> {
-    await this.rootCheck();
-    const files = this.enumeration();
-    if (!Array.isArray(files) || files.length > BOUNDS.sources) throw new StandaloneError('SOURCE_LIMIT');
-    if (!files.every(validPath) || new Set(files).size !== files.length)
-      throw new StandaloneError('SOURCE_REJECTED');
-    if(this.searchScope?.hasExclusions&&!files.every(validHardScopePath))throw new StandaloneError('SOURCE_REJECTED');
-    return files.filter(path=>!this.searchScope?.hasExclusions||this.searchScope.allows(path)).sort();
+    try{
+      this.checkScope();
+      await this.rootCheck();
+      this.checkScope();
+      const files = this.enumeration();
+      this.checkScope();
+      if (!Array.isArray(files) || files.length > BOUNDS.sources) throw new StandaloneError('SOURCE_LIMIT');
+      if (!files.every(validPath) || new Set(files).size !== files.length)
+        throw new StandaloneError('SOURCE_REJECTED');
+      if((this.liveScope||this.searchScope?.hasExclusions)&&![...files].every(validHardScopePath))throw new StandaloneError('SOURCE_REJECTED');
+      const allowed=files.filter(path=>this.allowsScope(path)).sort();
+      return allowed;
+    }finally{this.checkScope();}
   }
   /**
    * Observe the canonical supported Markdown domain (visible paths only).
@@ -120,7 +152,8 @@ export class BoundedVaultReader implements SourceProvider {
    */
   async completeMarkdownInventory(signal?: AbortSignal): Promise<CompleteMarkdownInventory> {
     // Never reinterpret a restricted search domain as the historical full-vault lifecycle proof.
-    if(this.searchScope?.hasExclusions)throw new StandaloneError('SEARCH_SCOPE_RESTRICTED');
+    this.checkScope();
+    if(this.liveScope||this.searchScope?.hasExclusions)throw new StandaloneError('SEARCH_SCOPE_RESTRICTED');
     const check = (): void => {
       if (signal?.aborted) throw new StandaloneError('INVENTORY_CANCELLED');
     };
@@ -253,59 +286,82 @@ export class BoundedVaultReader implements SourceProvider {
   // The opaque hints are never evidence: a bounded full SHA-256 audit still runs
   // periodically, and returned evidence always gets a fresh byte-level rehash.
   async versionHints(paths: readonly string[]): Promise<string[]> {
-    if (paths.length > BOUNDS.sources || !paths.every(validPath))
-      throw new StandaloneError('SOURCE_REJECTED');
-    if(this.searchScope?.hasExclusions&&paths.some(path=>!this.searchScope!.allows(path)))throw new StandaloneError('SEARCH_SCOPE_RESTRICTED');
-    await this.rootCheck();
-    const hints: string[] = [];
-    // Limit outstanding lstat operations; do not read document contents here.
-    for (let i = 0; i < paths.length; i += 16) {
-      const batch = paths.slice(i, i + 16);
-      const values = await Promise.all(batch.map(async relative => {
-        let path = this.root;
-        const components = relative.split('/');
-        for (const component of components.slice(0, -1)) {
-          path = join(path, component);
-          const directory = await lstat(path);
-          if (!directory.isDirectory() || directory.isSymbolicLink())
+    try{
+      this.checkScope();
+      if (paths.length > BOUNDS.sources || !paths.every(validPath))
+        throw new StandaloneError('SOURCE_REJECTED');
+      for(const path of paths)this.requireScope(path);
+      await this.rootCheck();
+      const hints: string[] = [];
+      // Limit outstanding lstat operations; do not read document contents here.
+      for (let i = 0; i < paths.length; i += 16) {
+        this.checkScope();
+        const batch = paths.slice(i, i + 16);
+        const values = await Promise.all(batch.map(async relative => {
+          this.requireScope(relative);
+          let path = this.root;
+          const components = relative.split('/');
+          for (const component of components.slice(0, -1)) {
+            path = join(path, component);
+            this.checkScope();
+            const directory = await lstat(path);
+            if (!directory.isDirectory() || directory.isSymbolicLink())
+              throw new StandaloneError('SOURCE_REJECTED');
+          }
+          path = join(path, components[components.length - 1]!);
+          this.requireScope(relative);
+          const info = await lstat(path, { bigint: true });
+          if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1n)
             throw new StandaloneError('SOURCE_REJECTED');
-        }
-        path = join(path, components[components.length - 1]!);
-        const info = await lstat(path, { bigint: true });
-        if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1n)
-          throw new StandaloneError('SOURCE_REJECTED');
-        return JSON.stringify([relative, info.dev.toString(), info.ino.toString(),
-          info.size.toString(), info.mtimeNs.toString(), info.ctimeNs.toString()]);
-      }));
-      hints.push(...values);
-    }
-    await this.rootCheck();
-    return hints;
+          return JSON.stringify([relative, info.dev.toString(), info.ino.toString(),
+            info.size.toString(), info.mtimeNs.toString(), info.ctimeNs.toString()]);
+        }));
+        hints.push(...values);
+      }
+      this.checkScope();
+      await this.rootCheck();
+      return hints;
+    }finally{this.checkScope();}
   }
   async read(relative: string): Promise<Uint8Array> {
-    return (await this.readOriginal(relative)).bytes;
+    try{
+      const observed=await this.readOriginal(relative);
+      this.requireScope(relative);
+      return observed.bytes;
+    }finally{this.checkScope();}
   }
   // This is an observed original version, not lifecycle admission or authority.
   async readVersionProof(relative: string): Promise<OriginalVersionProof> {
-    return this.versionProof(relative, await this.readOriginal(relative));
+    try{
+      const observed=await this.readOriginal(relative);
+      this.requireScope(relative);
+      return this.versionProof(relative,observed);
+    }finally{this.checkScope();}
   }
   /** One protected descriptor read supplies both version and stable identity. */
   async readLifecycleProof(relative: string): Promise<DescriptorLifecycleProof> {
-    return (await this.readVerifiedOriginal(relative)).proof;
+    try{
+      const observed=await this.readVerifiedOriginal(relative);
+      this.requireScope(relative);
+      return observed.proof;
+    }finally{this.checkScope();}
   }
   /** Read content and descriptor proof from the same protected observation, without ledger admission. */
   async readVerifiedOriginal(relative:string):Promise<VerifiedOriginalRead> {
-    const observed = await this.readOriginal(relative);
-    const birthtime = observed.info.birthtimeNs;
-    // Linux filesystems which cannot supply a real creation time must not
-    // manufacture an identity from mutable timestamps.
-    if (birthtime <= 0n) throw new StandaloneError('LIFECYCLE_IDENTITY_UNSUPPORTED');
-    const version = this.versionProof(relative, observed);
-    const proof=Object.freeze({ version, stableIdentity: hash(JSON.stringify([
-      'oks-lifecycle-descriptor-identity-v1', this.rootId,
-      observed.info.dev.toString(), observed.info.ino.toString(), birthtime.toString(),
-    ])) });
-    return Object.freeze({bytes:observed.bytes,proof});
+    try{
+      const observed = await this.readOriginal(relative);
+      this.requireScope(relative);
+      const birthtime = observed.info.birthtimeNs;
+      // Linux filesystems which cannot supply a real creation time must not
+      // manufacture an identity from mutable timestamps.
+      if (birthtime <= 0n) throw new StandaloneError('LIFECYCLE_IDENTITY_UNSUPPORTED');
+      const version = this.versionProof(relative, observed);
+      const proof=Object.freeze({ version, stableIdentity: hash(JSON.stringify([
+        'oks-lifecycle-descriptor-identity-v1', this.rootId,
+        observed.info.dev.toString(), observed.info.ino.toString(), birthtime.toString(),
+      ])) });
+      return Object.freeze({bytes:observed.bytes,proof});
+    }finally{this.checkScope();}
   }
   private versionProof(relative:string, observed:{bytes:Uint8Array;version:string[]}):OriginalVersionProof {
     const sha256 = hash(observed.bytes);
@@ -313,8 +369,16 @@ export class BoundedVaultReader implements SourceProvider {
       versionId: originalVersionId(this.rootId, relative, sha256, observed.version) });
   }
   private async readOriginal(relative: string): Promise<{bytes: Uint8Array; version: string[]; info: BigIntStats}> {
-    if (!validPath(relative)) throw new StandaloneError('SOURCE_REJECTED');
-    if(this.searchScope?.hasExclusions&&!this.searchScope.allows(relative))throw new StandaloneError('SEARCH_SCOPE_RESTRICTED');
+    try{
+      this.checkScope();
+      if (!validPath(relative)) throw new StandaloneError('SOURCE_REJECTED');
+      this.requireScope(relative);
+      const observed=await this.readDescriptor(relative);
+      this.requireScope(relative);
+      return observed;
+    }finally{this.checkScope();}
+  }
+  private async readDescriptor(relative:string):Promise<{bytes:Uint8Array;version:string[];info:BigIntStats}>{
     const parts = relative.split('/');
     // Linux descriptor-anchored walk forbids redirecting an ancestor via symlink.
     const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
@@ -326,29 +390,36 @@ export class BoundedVaultReader implements SourceProvider {
       try {
         rootDirectory = await open(this.root, directoryFlags);
         directory = rootDirectory;
+        this.checkScope();
         const rootInfo = await rootDirectory.stat();
         if (!rootInfo.isDirectory() || rootInfo.dev !== this.device || rootInfo.ino !== this.inode)
           throw new StandaloneError('VAULT_IDENTITY_CHANGED');
+        this.checkScope();
         await this.rootCheck();
-      } catch { throw new StandaloneError('VAULT_IDENTITY_CHANGED'); }
+      } catch { this.checkScope(); throw new StandaloneError('VAULT_IDENTITY_CHANGED'); }
       for (const part of parts.slice(0, -1)) {
+        this.checkScope();
         const child = await open('/proc/self/fd/' + directory.fd + '/' + part, directoryFlags);
         const previous = directory;
         directory = child;
         if (previous !== rootDirectory) await previous.close();
       }
+      this.requireScope(relative);
       handle = await open('/proc/self/fd/' + directory.fd + '/' + parts[parts.length - 1]!,
         constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      this.checkScope();
       const opened = await handle.stat({ bigint: true });
       if (!regularOriginal(opened) || opened.size > BigInt(BOUNDS.fileBytes) || opened.size < 0n)
         throw new StandaloneError('SOURCE_REJECTED');
       const bytes = Buffer.allocUnsafe(BOUNDS.fileBytes + 1);
       let count = 0;
       while (count < bytes.length) {
+        this.requireScope(relative);
         const { bytesRead } = await handle.read(bytes, count, bytes.length - count, count);
         if (!bytesRead) break;
         count += bytesRead;
       }
+      this.requireScope(relative);
       if (count > BOUNDS.fileBytes) throw new StandaloneError('SOURCE_LIMIT');
       const target = join(this.root, ...parts);
       // The opened parent can be moved outside the root during the read.
@@ -374,6 +445,7 @@ export class BoundedVaultReader implements SourceProvider {
         throw new StandaloneError('SOURCE_CHANGED');
       return { bytes: bytes.subarray(0, count), version: versionFields(opened), info: opened };
     } catch (cause) {
+      this.checkScope();
       if (cause instanceof StandaloneError) throw cause;
       // ENOTDIR/ELOOP from descriptor traversal is an explicit denied source,
       // never an untyped filesystem error or a fallback to pathname reading.
