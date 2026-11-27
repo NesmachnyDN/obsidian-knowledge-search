@@ -16,7 +16,7 @@
 3. Obsidian opt-in `ingest-active-advanced-source`, profile fields and settings/status, `AdvancedIngestionManager`, TS raw-source provenance verifier, concurrent one-at-a-time `AdvancedIngestRunner` using `systemd-run` cgroup v2 memory4GiB/swap0/CPU200%/pids64/time120s, AF_UNIX-only, whole tree cancellation, refusal on unverified resource preflight and malformed response. Only active vault TFile accepted; read source uses O_NOFOLLOW and double stat. No backend at default Standalone startup.
 4. Separate private generation snapshots under XDG outside the Vault; checksummed immutable generation and fsync+atomic `CURRENT` update; restart/rehydration checked; stale and corrupt generated evidence rejected. No modification of native Standalone index/identity or search modes. Dense/hybrid always explicit `CAPABILITY_UNAVAILABLE` with `executedMode:none`.
 
-## Synthetic tests and measured results (author, ZenBook)
+## Synthetic tests and measured results (author, Linux test host)
 
 - `npm test` currently 211 total / 208 passed / 3 skipped (three host cgroup tests require explicitly enabled environment); `npm run test:python` 133 total / 128 passed / 5 skipped; `npm run typecheck` passed.
 - `npm run build`, `npm run licenses`, `npm run test:package` (10/10), `npm run benchmark:standalone`, `git diff --check` passed in recorded author runs. Immutable prior package was verified and preserved under separate build/standalone-package-baseline-f94f6580 before generating a new 05C package. No modifications to historic benchmark baseline retained.

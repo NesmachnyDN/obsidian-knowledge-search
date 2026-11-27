@@ -22,7 +22,7 @@ This ADR **supersedes only the mandatory offline Advanced AI gate, the local-onl
 
 ## Model selection and evaluation
 
-- Embedding candidates: BGE-M3 (existing experimental baseline), Qwen3-Embedding-0.6B, Giga-Embeddings-instruct-480M, Giga-Embeddings-instruct-3B; availability and exact model IDs must be rechecked at the selected provider before implementation.
+- Embedding candidates: BGE-M3 (existing experimental baseline), Qwen3-Embedding-0.6B; availability and exact model IDs must be rechecked at the selected provider before implementation.
 - Reranking candidates: Qwen3-Reranker-0.6B (preferred evaluation starting point) and BGE-Reranker-v2-M3. There is **no approved production winner**. Different embedding/reranking model families may be combined; benchmark the joint pipeline.
 - Compare at least relevant Russian and mixed RU/EN technical documentation, API identifiers, configuration/code and long documents using a fixed labeled corpus. Evaluate independent retrieval legs and end-to-end quality, latency, cost and source/provenance error rates. Never present cross-provider marketing metrics or mutable prices as verified OKS results.
 - See [provider evaluation plan](../AI-PROVIDER-EVALUATION.md) for mutable catalog references and acceptance methodology.

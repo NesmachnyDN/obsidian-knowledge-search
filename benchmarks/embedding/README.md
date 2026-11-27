@@ -4,7 +4,7 @@
 
 ## Local artifact preflight (metadata/hashes only)
 
-On the ZenBook, an already locally cached BGE-M3 revision `5617a9f61b028005a4858fdac845db406aefb181` was inspected. **No artifacts were downloaded, installed, copied to this repository or loaded into a neural runtime.**
+On the Linux test host, an already locally cached BGE-M3 revision `5617a9f61b028005a4858fdac845db406aefb181` was inspected. **No artifacts were downloaded, installed, copied to this repository or loaded into a neural runtime.**
 
 - Local upstream model-card license: MIT. Exact bytes and SHA-256 are pinned in [embedding-artifacts.json](../../engine/embedding-artifacts.json); `pytorch_model.bin` is 2,271,145,830 bytes with SHA-256 `b5e0ce3470abf5ef3831aa1bd5553b486803e83251590ab7ff35a117cf6aad38`. Original `config.json` specifies XLM-RoBERTa, hidden dimension 1024, 24 layers and maximum position count 8194.
 - The [02C tokenizer manifest](../../engine/tokenizer-artifacts.json) independently pins revision, tokenizer input, MIT model-card text and SHA-256. Exact text serialization remains `bge-m3-heading-lines-v1` (original text plus heading prefix, with BOS/EOS counted, no truncation). Do not confuse 8192 advertised tokens with an experimentally supported inference length.
