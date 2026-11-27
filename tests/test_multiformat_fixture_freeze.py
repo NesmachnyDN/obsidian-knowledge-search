@@ -110,8 +110,13 @@ class TextDiagramFixtureFreeze(unittest.TestCase):
         with self.assertRaises(UnicodeDecodeError):
             self.sources["n03.txt"].decode("utf-8")
         self.assertIn(b"!includeurl https://example.invalid/", self.sources["n04.puml"])
+        broken = ET.fromstring(self.sources["n05.drawio"])
+        self.assertEqual(broken.attrib["compressed"], "true")
+        payload = broken.find("diagram")
+        self.assertIsNotNone(payload)
+        self.assertEqual(len(payload), 0)
         with self.assertRaises(ValueError):
-            base64.b64decode(ET.fromstring(self.sources["n05.drawio"]).find("diagram").text, validate=True)
+            base64.b64decode(payload.text, validate=True)
         with self.assertRaises(ET.ParseError):
             ET.fromstring(self.sources["n06.drawio"])
         self.assertIn(b"target=\"missing\"", self.sources["n07.drawio"])

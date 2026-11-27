@@ -80,7 +80,7 @@ def fixtures() -> dict[str, bytes]:
         "n02.txt": b"\x98\n",  # undefined CP1251 byte
         "n03.txt": _text("Неоднозначная кодировка\n", "cp1251"),
         "n04.puml": _text('@startuml\n!includeurl https://example.invalid/synthetic.puml\ncomponent "LOCAL-ONLY-401"\n@enduml\n'),
-        "n05.drawio": b'<mxfile><diagram id="bad">not-valid-base64!</diagram></mxfile>',
+        "n05.drawio": b'<mxfile compressed="true"><diagram id="bad">not-valid-base64!</diagram></mxfile>',
         "n06.drawio": b'<mxfile><diagram><mxGraphModel><root></mxGraphModel></diagram></mxfile>',
         "n07.drawio": _text('<mxfile compressed="false"><diagram id="p1"><mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/><mxCell id="n1" vertex="1" parent="1" value="LOCAL-ONLY-402"/><mxCell id="e1" edge="1" source="n1" target="missing" parent="1" value="LOCAL-EDGE-402"/></root></mxGraphModel></diagram></mxfile>'),
         "n08.drawio": _text("not a diagram\n"),
