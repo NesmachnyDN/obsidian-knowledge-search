@@ -54,6 +54,27 @@
   try {
     for (const kind of ['create', 'modify', 'rename', 'delete'])
       refs.push(vault.on(kind, (owner, oldPath) => event(kind, owner, oldPath)));
+    // Separate identity/path: delayed events from the counterexample cannot
+    // satisfy the normal native modify observation below.
+    const probeName = 'event-counterexample.md';
+    const probeFile = await vault.create(probeName, 'Synthetic event original.\n');
+    await waitEvent('create', probeFile, probeName);
+    requireThat(vault.getAbstractFileByPath(probeName) === probeFile, 'PROBE_OWNER');
+    const original = await reader.readLifecycleProof(probeName);
+    const notificationCount = events.length;
+    vault.trigger('modify', probeFile);
+    requireThat(events.slice(notificationCount).some(e => e.kind === 'modify'
+      && e.owner === probeFile && e.path === probeName), 'PUBLIC_NOTIFICATION');
+    assert.deepEqual(await reader.readLifecycleProof(probeName), original);
+    const externalEventCount = events.length;
+    require('node:fs').writeFileSync(path.join(root, probeName), 'Synthetic external edit.\n');
+    const beforeEventLoop = events.length === externalEventCount;
+    const external = await reader.readLifecycleProof(probeName);
+    requireThat(beforeEventLoop && external.version.sha256 !== original.version.sha256
+      && external.version.versionId !== original.version.versionId, 'EXTERNAL_WRITE_BOUNDARY');
+    await vault.delete(probeFile);
+    await waitEvent('delete', probeFile, probeName);
+    await checkInventory(['first.md', 'second.md']);
     const file = await vault.create(fileName, 'Synthetic lifecycle original.\n');
     await waitEvent('create', file, fileName);
     requireThat(vault.getAbstractFileByPath(fileName) === file, 'CREATE_OWNER');
@@ -106,7 +127,7 @@
     await waitEvent('delete', folder, movedFolder);
     await checkInventory(['first.md', 'second.md']);
     observations = 'descriptorProof=PASS; sampleNativeEvents=PASS; sameByteReplacement=PASS; folderEvents=PASS; fixtureInventory=PASS; modifyStable='
-      + String(modifyContinuity) + '; eventAuthenticity=UNPROVEN; eventCompleteness=UNPROVEN; folderContinuity=UNPROVEN';
+      + String(modifyContinuity) + '; publicNotificationWithoutWrite=OBSERVED; externalWriteBeforeCallback=OBSERVED; eventAuthenticity=UNPROVEN; eventCompleteness=UNPROVEN; folderContinuity=UNPROVEN';
     stage = 'LEDGER';
     const [tmpOwner, usrOwner, binOwner, flockOwner] = await Promise.all(
       ['/tmp', '/usr', '/usr/bin', '/usr/bin/flock'].map(async name => (await fs.lstat(name)).uid));
