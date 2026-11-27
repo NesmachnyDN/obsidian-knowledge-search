@@ -61,11 +61,31 @@
     const created = await reader.readLifecycleProof(fileName);
     assert.deepEqual(created.version, await reader.readVersionProof(fileName));
     requireThat(/^[a-f0-9]{64}$/.test(created.stableIdentity), 'IDENTITY');
+    // A public event notification alone does not establish a filesystem mutation.
+    const notificationCount = events.length;
+    vault.trigger('modify', file);
+    requireThat(events.slice(notificationCount).some(e => e.kind === 'modify'
+      && e.owner === file && e.path === fileName), 'PUBLIC_NOTIFICATION');
+    assert.deepEqual(await reader.readLifecycleProof(fileName), created);
+    const externalEventCount = events.length;
+    require('node:fs').writeFileSync(path.join(root, fileName), 'Synthetic external edit.\n');
+    const beforeEventLoop = events.length === externalEventCount;
+    const external = await reader.readLifecycleProof(fileName);
+    requireThat(beforeEventLoop && external.version.sha256 !== created.version.sha256
+      && external.version.versionId !== created.version.versionId, 'EXTERNAL_WRITE_BOUNDARY');
+    const modificationCount = events.length;
     await vault.modify(file, 'Synthetic lifecycle modified.\n');
-    await waitEvent('modify', file, fileName);
+    const deadline = Date.now() + 2000;
+    while (!events.slice(modificationCount).some(e => e.kind === 'modify'
+      && e.owner === file && e.path === fileName)) {
+      requireThat(!overflow && Date.now() < deadline, 'MODIFY_AFTER_EXTERNAL');
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
     const modified = await reader.readLifecycleProof(fileName);
     requireThat(created.version.sha256 !== modified.version.sha256
-      && created.version.versionId !== modified.version.versionId, 'MODIFY_PROOF');
+      && external.version.sha256 !== modified.version.sha256
+      && created.version.versionId !== modified.version.versionId
+      && external.version.versionId !== modified.version.versionId, 'MODIFY_PROOF');
     const modifyContinuity = created.stableIdentity === modified.stableIdentity;
     await vault.rename(file, movedName);
     await waitEvent('rename', file, movedName, fileName);
@@ -106,7 +126,7 @@
     await waitEvent('delete', folder, movedFolder);
     await checkInventory(['first.md', 'second.md']);
     observations = 'descriptorProof=PASS; sampleNativeEvents=PASS; sameByteReplacement=PASS; folderEvents=PASS; fixtureInventory=PASS; modifyStable='
-      + String(modifyContinuity) + '; eventAuthenticity=UNPROVEN; eventCompleteness=UNPROVEN; folderContinuity=UNPROVEN';
+      + String(modifyContinuity) + '; publicNotificationWithoutWrite=OBSERVED; externalWriteBeforeCallback=OBSERVED; eventAuthenticity=UNPROVEN; eventCompleteness=UNPROVEN; folderContinuity=UNPROVEN';
     stage = 'LEDGER';
     const [tmpOwner, usrOwner, binOwner, flockOwner] = await Promise.all(
       ['/tmp', '/usr', '/usr/bin', '/usr/bin/flock'].map(async name => (await fs.lstat(name)).uid));
