@@ -57,7 +57,8 @@ test('AC-18.1 deterministic hard exclusions use exact folders, extension, typed 
   const d=resolve(front,config(rules));assert.equal(d.reason,'hard-exclusion');assert.deepEqual(d.matchedRuleIds,['folder','compound']);
   assert.equal(d.requestedMode,'full');assert.equal(d.effectiveMode,'none');assert.equal(d.attachmentIntent,true);
   assert.equal(d.noteEligible,false);assert.equal(d.attachmentEligible,false);
-  assert.equal(resolve(front,config([rules[2],rules[3]])).noteEligible,true);
+  assert.equal(resolve(front,config([rules[2]])).noteEligible,true);
+  assert.equal(resolve(front,config([rules[2],rules[3]])).reason,'rule-input-unresolved');
   assert.equal(resolve(front,config([{id:'file',when:{fileTypes:['pdf']}}])).noteEligible,true);
   assert.equal(resolve('ai_indexing: none',config([{id:'other',when:{folderSegments:['other']}}],'full')).noteEligible,false);
 });
@@ -130,4 +131,21 @@ test('AC-18.1 aggregate typed values and sparse malformed selectors cannot excee
   const sourceId='a.md',bytes=note(''),sha256=hash(bytes),proof=parsePolicyMetadata(sourceId,bytes,rootId,sha256);
   const props=Array.from({length:BOUNDS.propertiesPerSource},(_,i)=>({key:'p'+i,valueType:'list' as const,value:large}));
   assert.equal(resolveCorpusNote(config(),{sourceId,sha256,rootId},{...proof,properties:props}).noteEligible,false);
+});
+
+test('AC-18.1 typed exclusion never treats incompatible present metadata as a verified nonmatch',()=>{
+  const pred={key:'count',valueType:'number',operator:'eq',value:7};
+  const rules=config([{id:'typed',when:{properties:[pred]}}],'full');
+  for(const value of ['"7"','null','true','[7]']){
+    const d=resolve('count: '+value,rules);
+    assert.equal(d.reason,'rule-input-unresolved',value);
+    assert.equal(d.noteEligible,false,value);
+  }
+  assert.equal(resolve('count: 8',rules).noteEligible,true);
+  assert.equal(resolve('',rules).noteEligible,true);
+  assert.equal(resolve('count: 7',rules).reason,'hard-exclusion');
+  assert.equal(resolve('count: "7"',config([{id:'typed',when:{properties:[pred],folderSegments:['elsewhere']}}])).noteEligible,true);
+  const listPred={key:'tags',valueType:'list',operator:'contains',value:'raw'};
+  assert.equal(resolve('tags: raw',config([{id:'list',when:{properties:[listPred]}}])).reason,'rule-input-unresolved');
+  assert.equal(resolve('tags: ["raw"]',config([{id:'list',when:{properties:[listPred]}}])).reason,'hard-exclusion');
 });

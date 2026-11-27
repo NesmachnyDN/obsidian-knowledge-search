@@ -113,7 +113,11 @@ function ruleMatch(when:When,path:string,properties:TypedProperty[]):Match{
     results.push(!p?'no':p.valueType!=='list'||!Array.isArray(p.value)||!p.value.every(x=>typeof x==='string')
       ?'unknown':when.tags.every(x=>(p.value as string[]).includes(x))?'yes':'no');
   }
-  for(const predicate of when.properties??[])results.push(matches(properties,[predicate])?'yes':'no');
+  for(const predicate of when.properties??[]){
+    const found=properties.find(p=>p.key===predicate.key);
+    results.push(!found?'no':found.valueType!==predicate.valueType?'unknown':
+      matches(properties,[predicate])?'yes':'no');
+  }
   return results.includes('no')?'no':results.includes('unknown')?'unknown':'yes';
 }
 function resolve(config:CorpusConfig,expected:Original,proof:unknown):CorpusNoteDecision{
