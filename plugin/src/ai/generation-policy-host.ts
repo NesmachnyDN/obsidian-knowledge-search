@@ -10,6 +10,7 @@ import { matchesEmbeddingPolicyScope,type EmbeddingPolicyScope } from './embeddi
 import { POLICY_VERSION, type PolicySnapshot, type TrustedProfile, type Restriction, type PolicyEnvelope } from './processing-policy';
 import { decideNewMaterialMarking, validNewMaterialRuleConfig, type MaterialLifecycle, type TrustedImportProvenance,
   type NewMaterialRuleConfig } from './new-material-policy';
+import { decideEffectivePolicy, validEffectivePolicyConfig, type EffectivePolicyConfig, type VerifiedOrigin } from './effective-policy';
 import type { LifecycleObservation } from './new-material-tracker';
 
 type PolicyStateInput<R extends AiRole> = Pick<ProcessingPolicyInput<R>,'role'|'config'|'scopeId'|'scopeBinding'|'scopeSources'|'sources'|'embedding'>;
@@ -25,6 +26,10 @@ export type FreshLifecycleObserver=Readonly<{
 export type GenerationPolicyHostState=Readonly<{
   config:ProviderConfig;profile:TrustedProfile|null;adapter:string;policyRevision:string;configRevision:string;
   restrictions:readonly Restriction[];rules?:NewMaterialRuleConfig;materials:readonly PolicyMaterial[];complete:boolean;
+  /** Omitted is the historical marking authority, retained byte-for-byte. */
+  mode?:'effective';
+  /** Read-only current-original decisions; intentionally incompatible with marking rules. */
+  effective?:Readonly<{config:EffectivePolicyConfig;origins:readonly (VerifiedOrigin|null)[]}>;
 }>;
 /** Trusted native adapter. No credential, network, grant or second parser.
  * A profile must come from independently admitted host authority, never a note,
@@ -49,6 +54,12 @@ export class ProcessingPolicyHost<R extends AiRole> implements ProcessingPolicyP
     if(!value||!value.complete||configDigest(this.role,value.config)!==configDigest(this.role,input.config)
       ||!Array.isArray(value.materials)||value.materials.length>originals.length
       ||value.rules!==undefined&&!validNewMaterialRuleConfig(value.rules))return null;
+    const effective=value.mode==='effective';
+    if((value.mode!==undefined&&!effective)||(effective!==(value.effective!==undefined))
+      ||(effective&&(value.rules!==undefined||value.materials.length!==0
+        ||!value.effective||!validEffectivePolicyConfig(value.effective.config)||!Array.isArray(value.effective.origins)||value.effective.origins.length!==originals.length
+        ||value.effective!.origins.some((origin,i)=>origin!==null&&(!origin||origin.sourceId!==originals[i]!.sourceId
+          ||origin.sha256!==originals[i]!.sourceSha256||origin.rootId!==input.scopeId)))))return null;
     if(value.rules!==undefined&&(value.materials.length!==originals.length||originals.some((x,i)=>{
       const m=value.materials[i]?.lifecycle;
       return !m||m.sourceId!==x.sourceId||m.sha256!==x.sourceSha256||m.rootId!==input.scopeId;
@@ -58,12 +69,14 @@ export class ProcessingPolicyHost<R extends AiRole> implements ProcessingPolicyP
   private snapshot(input:ProcessingPolicyInput<R>,value:GenerationPolicyHostState,revision?:string):PolicySnapshot{
     return {subjects:policyOriginals(input).map(x=>({sourceId:x.sourceId,expectedSha256:x.sourceSha256,kind:'original',ownerIds:[x.sourceId]})),
       profile:value.profile,role:this.role,config:input.config,adapter:value.adapter,ownerId:input.ownerId,hostId:input.hostId,
-      scopeId:input.scopeId,policyRevision:hash(JSON.stringify([value.policyRevision,input.scopeBinding,value.rules??null,value.materials,...(revision===undefined?[]:[revision])])),
+      scopeId:input.scopeId,policyRevision:hash(JSON.stringify([value.policyRevision,input.scopeBinding,value.rules??null,value.materials,
+        ...(value.mode==='effective'?[value.mode,value.effective]:[]),...(revision===undefined?[]:[revision])])),
       configRevision:value.configRevision,credentialEpoch:input.credentialEpoch,deadlineUnixMs:input.deadlineUnixMs,
       payloadDigest:input.payloadDigest,restrictions:value.restrictions,evaluationComplete:true};
   }
   /** Only external admitted profiles with marking rules need fresh lifecycle evidence. */
   protected observationRevision(scopeId:string,value:GenerationPolicyHostState):string|null|undefined{
+    if(value.mode==='effective')return undefined;
     if(!this.lifecycleObserver||value.rules===undefined||value.profile?.classification!=='external')return undefined;
     const revision=this.lifecycleObserver.revision(scopeId);
     return isDigest(revision)?revision:null;
@@ -144,7 +157,16 @@ export class ProcessingPolicyHost<R extends AiRole> implements ProcessingPolicyP
         proof,lifecycle:material.lifecycle,provenance:material.provenance});
       return result.complete&&!result.externalBlocked;
     };
-    const evaluation=engine.evaluateProcessingPolicy({snapshot,current:live,marking},context);
+    const effective=(proof:PolicyMetadataProof):boolean=>{
+      const value=state();if(!value||value.mode!=='effective'||!value.effective)return false;
+      const source=policyOriginals(input).findIndex(x=>x.sourceId===proof.sourceId&&x.sourceSha256===proof.sha256);
+      if(source<0)return false;
+      const decision=decideEffectivePolicy(value.effective.config,{sourceId:proof.sourceId,sha256:proof.sha256,
+        rootId:input.scopeId,proof,origin:value.effective.origins[source]??null});
+      return decision.complete&&decision.decision==='eligible';
+    };
+    const evaluation=engine.evaluateProcessingPolicy({snapshot,current:live,
+      marking:initial.mode==='effective'?effective:marking},context);
     const physical=engine.processingPolicyDrain?.();
     let envelope:PolicyEnvelope;
     try{envelope=await evaluation;}finally{await physical;}

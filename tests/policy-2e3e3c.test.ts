@@ -15,6 +15,7 @@ import {NativeLifecycleOwner} from '../plugin/src/ai/native-lifecycle-owner';
 import {ProcessingPolicyHost,type FreshLifecycleObserver,type GenerationPolicyHostState} from '../plugin/src/ai/generation-policy-host';
 import {GenerationPolicyGate,generationPolicyPayload,policyOriginals,sameGenerationPolicy,type ProcessingPolicyInput} from '../plugin/src/ai/generation-policy';
 import {NEW_MATERIAL_RULE_CONFIG_VERSION,type NewMaterialRuleConfig} from '../plugin/src/ai/new-material-policy';
+import {EFFECTIVE_POLICY_CONFIG_VERSION,type EffectivePolicyConfig} from '../plugin/src/ai/effective-policy';
 import {embeddingPolicyPayload,resolveEmbeddingPolicyScope} from '../plugin/src/ai/embedding-policy';
 import {embeddingSpaceId} from '../plugin/src/ai/embedding-space';
 import {VerifiedEvidenceOperation,type EvidenceApproval} from '../plugin/src/ai/verified-evidence';
@@ -91,7 +92,7 @@ async function fixture(role:AiRole,use:(f:{
       return result.ok?alter(result.observations,calls):null;
     }};
     const host=new ProcessingPolicyHost<AiRole>(()=>true,()=>engine,i=>({...value,
-      materials:policyOriginals(i).map(source=>({lifecycle:{state:'unresolved',sourceId:source.sourceId,sha256:source.sourceSha256,rootId:scopeId},provenance:null}))}),
+      materials:value.mode==='effective'?value.materials:policyOriginals(i).map(source=>({lifecycle:{state:'unresolved',sourceId:source.sourceId,sha256:source.sourceSha256,rootId:scopeId},provenance:null}))}),
       role,()=>resolved,observer);
     const gate=new GenerationPolicyGate();
     const evaluate=(signal=new AbortController().signal)=>gate.evaluate(host,input,{signal,deadlineUnixMs:input.deadlineUnixMs},()=>true);
@@ -133,6 +134,35 @@ for(const role of ['generation','reranking','embedding'] as const){
       assert.equal(f.host.current(f.input,binding),true); // structural, not physical freshness
       await assert.rejects(run());assert.equal(wire,1);
     });
+  });
+}
+
+for(const role of ['generation','reranking','embedding'] as const){
+  test('effective policy '+role+' requires an accepted current decision without lifecycle observation',async()=>{
+    await fixture(role,async f=>{
+      const effective:EffectivePolicyConfig={version:EFFECTIVE_POLICY_CONFIG_VERSION,verifiedAbsent:'denied',rules:[]};
+      f.state({mode:'effective',rules:undefined,materials:[],effective:{config:effective,
+        origins:policyOriginals(f.input).map(()=>null)}});
+      await assert.rejects(f.evaluate(),{message:'DISCLOSURE_DENIED'});
+      assert.equal(f.observeCount(),0);
+
+      const allowed:EffectivePolicyConfig={...effective,verifiedAbsent:'eligible'};
+      f.state({effective:{config:allowed,origins:policyOriginals(f.input).map(()=>null)}});
+      const binding=await f.evaluate();
+      assert.equal(binding.lifecycleDigest,undefined);assert.equal(f.observeCount(),0);
+      assert.equal(f.host.current(f.input,binding),true);
+
+      // A restrictive policy revision retires the exact binding.
+      f.state({effective:{config:effective,
+        origins:policyOriginals(f.input).map(()=>null)}});
+      assert.equal(f.host.current(f.input,binding),false);
+      await assert.rejects(f.evaluate(),{message:'DISCLOSURE_DENIED'});
+
+      // Effective and historical marking state cannot coexist in one authority.
+      f.state({rules,materials:policyOriginals(f.input).map(source=>({lifecycle:{state:'unresolved' as const,
+        sourceId:source.sourceId,sha256:source.sourceSha256,rootId:f.input.scopeId},provenance:null}))});
+      await assert.rejects(f.evaluate(),{message:'DISCLOSURE_DENIED'});
+    },role==='embedding'?'query':'document');
   });
 }
 
