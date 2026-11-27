@@ -14,6 +14,13 @@ await build({ entryPoints: ['plugin/src/main.ts'], outfile: '.test-build/plugin-
 await build({ entryPoints: ['plugin/src/standalone/worker-entry.ts'],
   outfile: '.test-build/standalone-worker.js', bundle: true,
   platform: 'browser', format: 'iife', target: 'es2022' });
+// The aggregate suite grows independently of per-test and product deadlines.
+// Keep a finite process boundary with headroom for sequential CI execution.
 const run = spawnSync(process.execPath, ['--test', '--test-concurrency=1', ...files.map(file => `.test-build/${file.replace(/\.ts$/, '.js')}`)],
-  { stdio: 'inherit', timeout: 60000 });
-process.exitCode = run.status ?? 1;
+  { stdio: 'inherit', timeout: 180000 });
+if (run.error || run.signal) {
+  console.error('Full Node regression process did not complete:', run.error?.code ?? run.signal);
+  process.exitCode = 1;
+} else {
+  process.exitCode = run.status ?? 1;
+}

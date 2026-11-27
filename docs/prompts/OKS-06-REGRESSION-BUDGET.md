@@ -1,0 +1,5 @@
+# OKS-06 — full regression orchestration budget
+
+Base: b18dd1bceb6fb02ea8d820628978028c233593f4. Traceability: AGENTS.md, SDD standard cycle, CAP-08/09/10, #105, #150. Validation-only remediation: the existing 60-second aggregate Node runner limit has repeatedly terminated the unchanged full suite before its summary, without observed assertion failures; a complete sequential run took 82.3 seconds (843 pass, four skip). The same exact-head CI retry completed.
+
+Change only the finite aggregate test-process budget from 60 to 180 seconds, explicitly diagnose process termination or spawn error and preserve nonzero exit for any such outcome. Do not change individual test/production timeouts, assertions, coverage, concurrency, entry points, CI requirements, branch protection, product code or dependencies. The finite runner budget remains a hard failure boundary. Validate the unchanged complete Node, Python and package suites, typecheck, build and standard CI. Independent exact-head review required. This is not a feature or acceptance-gate waiver.
