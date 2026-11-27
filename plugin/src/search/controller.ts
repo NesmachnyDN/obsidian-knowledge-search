@@ -74,7 +74,12 @@ type RetirementObligation = {
 };
 // One shared controller owns admission; obligations do not confer authority.
 // A bounded overflow is terminal-only: never silently discard freshness work.
-const MAX_RETIREMENT_OBLIGATIONS = 4096;
+const MAX_SOURCE_RETIREMENT_OBLIGATIONS = 4096;
+// Concrete abort owners must not compete with source-event capacity. The
+// graph/scoped slots, two active evidence roles, one policy preparation and
+// two role-local pins bound these owners; failed pins fence new admission.
+// Reserve a small independent capacity in the same ledger, not a second queue.
+const MAX_CONCRETE_RETIREMENT_OWNERS = 8;
 /** Host-internal source constituent only. No listener, operation grant, or
  * provider authority. The frozen seal reads a private, irreversible local bit. */
 export type SourceRevisionSeal = Readonly<{revision:number; retired:boolean}>;
@@ -202,7 +207,7 @@ export class SearchController {
    * A rejected drain is terminal-only; rebuild cannot prove process exit. */
   trackSourceDrain(work:Promise<void>):void {
     if(this.disposed){void work.catch(()=>{});return;}
-    if(this.sourceDrains.size>=MAX_RETIREMENT_OBLIGATIONS){
+    if(this.sourceDrains.size>=MAX_SOURCE_RETIREMENT_OBLIGATIONS){
       this.markRetirementOverflow();void work.catch(()=>{});return;
     }
     const inWave=this.retirement.running||this.retirement.sourceRunning;
@@ -239,12 +244,17 @@ export class SearchController {
   }
   /** Advanced source authorization is independent of ordinary lexical revisions. */
   sourceAuthorityRevision(): number { return this.sourceRevision; }
+  /** Observational source identity for presentation only. This is not an
+   * admission, read or disclosure grant; ordinary lexical publication can
+   * close admission without changing the existing source identity. */
+  sourceIdentityCurrent(revision: number): boolean {
+    return !this.disposed && revision === this.sourceRevision && !this.sourceRetirementPending;
+  }
   sourceAuthorityCurrent(revision: number): boolean {
-    // Currency is not a new operation grant. Do not expose a fresh revision
-    // inside synchronous retirement, shared host callbacks or publication.
-    // Ordinary lexical waves temporarily fence admission without advancing
-    // source identity. The runtime settings transaction has its own gate.
-    return !this.sharedRetirementTransition() && !this.retirement.running && revision === this.sourceRevision;
+    // Do not expose a fresh revision for admission inside synchronous
+    // retirement, shared host callbacks or publication. The runtime
+    // settings transaction retains its own independent gate.
+    return this.sourceIdentityCurrent(revision) && !this.sharedRetirementTransition() && !this.retirement.running;
   }
   /** Capture the existing revision only outside retirement and shared
    * transitions. This passive constituent is deliberately not an AbortSignal:
@@ -554,7 +564,12 @@ export class SearchController {
   invalidateSource(obligations: readonly (() => void)[]): void {
     if (this.disposed) return;
     const revision = this.advanceSourceAuthority();
-    for (const run of obligations) this.enqueueRetirement({kind:'source',revision,run,attempted:false});
+    for (const run of obligations) {
+      // Capacity cannot recover before this synchronous enqueue completes.
+      // Overflow is already latched; do not scan the full ledger again for
+      // every remaining source callback in an oversized batch.
+      if (!this.enqueueRetirement({kind:'source',revision,run,attempted:false})) break;
+    }
     // Nested source work joins the running wave. If the wave belongs to an
     // ordinary shared reset, revoke any lexical reservation made in its callbacks.
     if (this.retirement.sourceRunning) return;
@@ -567,13 +582,23 @@ export class SearchController {
     }
     this.transitionSourceRetirement(false);
   }
-  private enqueueRetirement(obligation: RetirementObligation): void {
-    if (obligation.owner && this.retirement.obligations.some(item => item.owner === obligation.owner)) return;
-    if (this.retirement.obligations.length >= MAX_RETIREMENT_OBLIGATIONS) {
+  private enqueueRetirement(obligation: RetirementObligation): boolean {
+    if (obligation.owner) {
+      // Keep any failed or running pin for its owning retry/return. Once a
+      // native abort completed successfully, an asynchronous operation may
+      // still hold that slot but it must not consume another retirement
+      // reservation or another attempt from the current source wave.
+      if (this.retirement.obligations.some(item => item.owner === obligation.owner) || obligation.owner.signal.aborted) return false;
+    }
+    const source = obligation.kind === 'source';
+    const capacity = source ? MAX_SOURCE_RETIREMENT_OBLIGATIONS : MAX_CONCRETE_RETIREMENT_OWNERS;
+    if (this.retirement.obligations.length >= capacity &&
+        this.retirement.obligations.filter(item => (item.kind === 'source') === source).length >= capacity) {
       this.markRetirementOverflow();
-      return;
+      return false;
     }
     this.retirement.obligations.push(obligation);
+    return true;
   }
   private drainRetirements(): boolean {
     if (this.retirement.running) return false;
@@ -583,11 +608,21 @@ export class SearchController {
     try {
       // Each concrete obligation is attempted at most once per bounded wave.
       // Nested work may join it, but cannot recursively retry a failure.
-      for (let count = 0; count < MAX_RETIREMENT_OBLIGATIONS; count++) {
-        const obligation = this.retirement.obligations.find(item => !item.attempted && !item.running && (item.kind !== 'role' || this.disposed));
+      let sourceAttempts = 0;
+      // Preserve the source-wave budget, while reserving attempts for every
+      // concrete owner, including one terminal retry of previously failed
+      // owners. A running owner is never retried by nested disposal.
+      for (let count = 0; count < MAX_SOURCE_RETIREMENT_OBLIGATIONS + 2 * MAX_CONCRETE_RETIREMENT_OWNERS; count++) {
+        const obligation = this.retirement.obligations.find(item => !item.attempted && !item.running
+          && (item.kind !== 'role' || this.disposed)
+          && (item.kind !== 'source' || sourceAttempts < MAX_SOURCE_RETIREMENT_OBLIGATIONS));
         if (!obligation) break;
         obligation.attempted = true;
-        if (this.disposed && obligation.kind === 'source') continue;
+        if (obligation.kind === 'source') {
+          sourceAttempts++;
+          if (this.disposed) continue;
+        }
+        obligation.running = true;
         try {
           obligation.run();
           const index = this.retirement.obligations.indexOf(obligation);
@@ -595,7 +630,7 @@ export class SearchController {
         } catch {
           obligation.failed = true;
           console.warn('SEARCH_RETIREMENT_OBLIGATION_FAILED',obligation.kind);
-        }
+        } finally { obligation.running = false; }
       }
     } finally {
       promoted = !sourceRunningAtEntry && this.retirement.sourceRunning;
@@ -623,7 +658,7 @@ export class SearchController {
     if(retry&&!this.sourceRetirementPending)this.advanceSourceAuthority();
     this.retirement.sourceRunning = true;
     try {
-      if (retry) for (const obligation of this.retirement.obligations) obligation.attempted = false;
+      if (retry) for (const obligation of this.retirement.obligations) if (!obligation.running) obligation.attempted = false;
       this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null},undefined,true);
     } finally {
       this.retirement.sourceRunning = false;
@@ -1946,7 +1981,9 @@ export class SearchController {
       if (this.retirement.obligations.some(obligation => obligation.owner === active.abort)) return;
       const owner = active.abort;
       item = {kind:'role',role,revision:active.revision,owner,run:()=>owner.abort(),attempted:false};
-      this.enqueueRetirement(item);
+      // Only a ledger-owned callback may execute: terminal publication
+      // observes that exact owner until its synchronous callback returns.
+      if (!this.enqueueRetirement(item)) return;
     }
     if (!item || item.running || this.retirement.running ||
         (item.attempted && (!explicit || this.notifying || this.revokingSharedAuthority))) return;
@@ -2205,7 +2242,7 @@ export class SearchController {
     // Terminal disposal stops source-owner processing but must still attempt
     // both pinned evidence aborts, even if unload reenters an active wave.
     this.retirement.obligations = this.retirement.obligations.filter(item => item.kind !== 'source');
-    for (const item of this.retirement.obligations) item.attempted = false;
+    for (const item of this.retirement.obligations) if (!item.running) item.attempted = false;
     try { this.revokeEvidence(); }
     finally { this.emit(true); }
   }

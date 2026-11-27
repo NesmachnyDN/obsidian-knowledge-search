@@ -186,3 +186,177 @@ test('B-02 terminal publication attempts a pinned failed host obligation without
     assert.equal(c.captureSourceAuthority(),null);assert.equal(c.sourceAuthorityCurrent(c.sourceAuthorityRevision()),false);
   }finally{armed=false;off();f.read.resolve();c.dispose();}
 });
+
+for(const role of ['generation','reranking'] as const)
+for(const fail of [false,true])test('B-04 source saturation retains and drains concrete '+role+' owner, throw='+fail,async t=>{
+  let armed=false,attempted=0,abortCalls=0;
+  const events:string[]=[],f=fixture(()=>{},()=>{if(armed)events.push('hook');}),c=f.c;
+  const old=c.captureSourceAuthority()!,abort=new AbortController(),physical=gate();
+  const context=bindActiveDeadline({signal:abort.signal,deadlineUnixMs:Date.now()+10000},10000);
+  const internals=c as unknown as {revision:number;activeEvidence:Partial<Record<typeof role,{abort:AbortController;context:CallContext;revision:number}>>};
+  internals.activeEvidence[role]={abort,context,revision:internals.revision};
+  const real=abort.abort.bind(abort);
+  abort.abort=()=>{abortCalls++;real();if(fail)throw Error('synthetic late abort failure');};
+  const off=c.subscribe(()=>{if(armed)events.push('observer');});
+  t.mock.method(console,'warn',()=>{});
+  try{
+    abort.signal.addEventListener('abort',()=>{
+      events.push('abort-enter');c.trackSourceDrain(physical.promise);c.dispose();c.dispose();events.push('abort-return');
+    },{once:true});
+    armed=true;
+    c.invalidateSource(Array.from({length:4096},()=>()=>{attempted++;throw Error('synthetic source failure');}));
+    assert.equal(attempted,4096);assert.equal(abort.signal.aborted,true);assert.equal(abortCalls,1);
+    assert.deepEqual(events,['abort-enter','abort-return','hook','observer']);
+    assert.equal(old.retired,true);assert.equal(c.captureSourceAuthority(),null);
+    assert.equal(c.sourceAuthorityCurrent(c.sourceAuthorityRevision()),false);
+    c.dispose();if(fail)physical.reject(Error('synthetic late source failure'));else physical.resolve();
+    await physical.promise.catch(()=>{});await tick();c.dispose();
+    assert.deepEqual(events,['abort-enter','abort-return','hook','observer']);assert.equal(abortCalls,1);
+  }finally{armed=false;off();physical.resolve();f.read.resolve();c.dispose();}
+});
+
+for(const role of ['generation','reranking'] as const)
+test('B-04 role-local retirement retains ownership at full source capacity: '+role,async t=>{
+  let armed=false,attempted=0,abortCalls=0;
+  const events:string[]=[],f=fixture(()=>{},()=>{if(armed)events.push('hook');}),c=f.c;
+  const old=c.captureSourceAuthority()!,abort=new AbortController();
+  const context=bindActiveDeadline({signal:abort.signal,deadlineUnixMs:Date.now()+10000},10000);
+  const internals=c as unknown as {revision:number;activeEvidence:Partial<Record<typeof role,{abort:AbortController;context:CallContext;revision:number}>>};
+  const off=c.subscribe(()=>{if(armed)events.push('observer');});
+  t.mock.method(console,'warn',()=>{});
+  try{
+    c.invalidateSource(Array.from({length:4096},()=>()=>{attempted++;throw Error('synthetic source failure');}));
+    assert.equal(attempted,4096);assert.equal(old.retired,true);
+    // Model an already owned role whose abort has not been registered yet.
+    // No new public role admission is permitted under the source fault.
+    internals.activeEvidence[role]={abort,context,revision:internals.revision};
+    const real=abort.abort.bind(abort);abort.abort=()=>{abortCalls++;real();};
+    abort.signal.addEventListener('abort',()=>{
+      events.push('abort-enter');c.dispose();c.dispose();events.push('abort-return');
+    },{once:true});
+    armed=true;
+    if(role==='generation')c.cancelGeneration();else c.cancelRerank();
+    assert.deepEqual(events,['abort-enter','abort-return','hook','observer']);
+    assert.equal(abortCalls,1);assert.equal(c.captureSourceAuthority(),null);
+    assert.equal(c.sourceAuthorityCurrent(c.sourceAuthorityRevision()),false);
+    c.dispose();await tick();assert.equal(abortCalls,1);
+    assert.deepEqual(events,['abort-enter','abort-return','hook','observer']);
+  }finally{armed=false;off();f.read.resolve();c.dispose();}
+});
+
+for(const role of ['generation','reranking'] as const)
+test('B-04 full source wave cannot displace either nested role owner: '+role,async t=>{
+  let armed=false,attempted=0;
+  const events:string[]=[],f=fixture(()=>{},()=>{if(armed)events.push('hook');}),c=f.c;
+  const other=role==='generation'?'reranking':'generation';
+  const internals=c as unknown as {revision:number;activeEvidence:Partial<Record<typeof role,{abort:AbortController;context:CallContext;revision:number}>>};
+  const calls={generation:0,reranking:0};
+  const make=(key:typeof role)=>{
+    const abort=new AbortController(),real=abort.abort.bind(abort);
+    abort.abort=()=>{calls[key]++;real();};
+    internals.activeEvidence[key]={abort,context:bindActiveDeadline({signal:abort.signal,deadlineUnixMs:Date.now()+10000},10000),revision:internals.revision};
+    return abort;
+  };
+  const old=c.captureSourceAuthority()!,outer=make(role),inner=make(other);
+  const off=c.subscribe(()=>{if(armed)events.push('observer');});
+  t.mock.method(console,'warn',()=>{});
+  try{
+    outer.signal.addEventListener('abort',()=>{
+      events.push('outer-enter');
+      c.invalidateSource(Array.from({length:4096},()=>()=>{attempted++;throw Error('synthetic source failure');}));
+      events.push('outer-return');
+    },{once:true});
+    inner.signal.addEventListener('abort',()=>{
+      events.push('inner-enter');c.dispose();c.dispose();events.push('inner-return');
+    },{once:true});
+    armed=true;
+    if(role==='generation')c.cancelGeneration();else c.cancelRerank();
+    assert.equal(attempted,4096);assert.deepEqual(calls,{generation:1,reranking:1});
+    assert.deepEqual(events,['outer-enter','inner-enter','inner-return','outer-return','hook','observer']);
+    assert.equal(old.retired,true);assert.equal(c.captureSourceAuthority(),null);
+    c.dispose();await tick();assert.deepEqual(calls,{generation:1,reranking:1});
+    assert.equal(events.length,6);
+  }finally{armed=false;off();f.read.resolve();c.dispose();}
+});
+
+for(const route of ['graph','scoped'] as const)
+test('B-04 full source queue preserves '+route+' physical retirement after logical cancellation',async t=>{
+  let callback=()=>{},armed=false,attempted=0;
+  const events:string[]=[],f=fixture(()=>callback(),()=>{if(armed)events.push('hook');}),c=f.c;
+  const old=c.captureSourceAuthority()!,off=c.subscribe(()=>{if(armed)events.push('observer');});
+  t.mock.method(console,'warn',()=>{});
+  try{
+    const pending=route==='graph'?c.graphSearch(request):c.startScopedChatRetrieval(scope,{requestId:'synthetic',query:'synthetic',limit:1}).result;
+    callback=()=>{events.push('abort-enter');c.dispose();events.push('abort-return');};
+    armed=true;
+    c.invalidateSource(Array.from({length:4096},()=>()=>{attempted++;throw Error('synthetic source failure');}));
+    assert.equal(attempted,4096);assert.equal((await pending).ok,false);
+    assert.deepEqual(events,['abort-enter','abort-return','hook','observer']);
+    assert.equal(old.retired,true);assert.equal(c.captureSourceAuthority(),null);
+    f.read.resolve();await tick();c.dispose();
+    assert.deepEqual(events,['abort-enter','abort-return','hook','observer']);
+    assert.equal(f.dispatches(),0);
+  }finally{armed=false;off();f.read.resolve();c.dispose();}
+});
+
+for(const overflow of [false,true])test('B-04 source capacity is independently recoverable until actual overflow: '+overflow,async t=>{
+  let callback=()=>{},attempted=0,fail=true,aborts=0;
+  const f=fixture(()=>callback(),()=>{}),c=f.c,old=c.captureSourceAuthority()!;
+  t.mock.method(console,'warn',()=>{});
+  try{
+    const pending=c.graphSearch(request);
+    callback=()=>{aborts++;};
+    c.invalidateSource(Array.from({length:4096+Number(overflow)},()=>()=>{attempted++;if(fail)throw Error('synthetic source failure');}));
+    assert.equal(attempted,4096);assert.equal(aborts,1);assert.equal((await pending).ok,false);
+    assert.equal(old.retired,true);assert.equal(c.captureSourceAuthority(),null);
+    f.read.resolve();await tick();fail=false;
+    const recovery=c.control('rebuild');
+    assert.equal(recovery.ok,!overflow);
+    if(overflow){assert.equal(attempted,4096);assert.equal(c.captureSourceAuthority(),null);}
+    else{assert.equal(attempted,8192);assert.ok(c.captureSourceAuthority()!.revision>old.revision);}
+    assert.equal(aborts,1);assert.equal(old.retired,true);
+  }finally{f.read.resolve();c.dispose();}
+});
+
+test('B-04 completed concrete owner cannot consume source wave budget through repeated resets',async()=>{
+  let armed=false,sourceCalls=0,abortCalls=0;
+  const events:string[]=[],f=fixture(()=>{},()=>{if(armed)events.push('hook');}),c=f.c;
+  const abort=new AbortController(),real=abort.abort.bind(abort);
+  abort.abort=()=>{abortCalls++;real();};
+  const internals=c as unknown as {revision:number;activeEvidence:{generation?:{abort:AbortController;context:CallContext;revision:number}}};
+  internals.activeEvidence.generation={abort,context:bindActiveDeadline({signal:abort.signal,deadlineUnixMs:Date.now()+10000},10000),revision:internals.revision};
+  abort.signal.addEventListener('abort',()=>events.push('abort'),{once:true});
+  const off=c.subscribe(()=>{if(armed)events.push('observer');});
+  const advance=()=>{
+    sourceCalls++;
+    if(sourceCalls===4096){c.dispose();return;}
+    c.invalidate();c.invalidateSource([advance]);
+  };
+  try{
+    armed=true;
+    c.invalidateSource([()=>{sourceCalls++;c.invalidateSource([advance]);}]);
+    assert.equal(sourceCalls,4096);assert.equal(abortCalls,1);
+    assert.deepEqual(events,['abort','hook','observer']);assert.equal(c.captureSourceAuthority(),null);
+    c.dispose();await tick();assert.equal(abortCalls,1);assert.equal(events.length,3);
+  }finally{armed=false;off();f.read.resolve();c.dispose();}
+});
+
+
+test('B-04 failed concrete pin remains retryable after native signal retirement',async t=>{
+  let callback=()=>{},abortCalls=0,callbacks=0;
+  const f=fixture(()=>callback(),()=>{}),c=f.c,old=c.captureSourceAuthority()!;
+  t.mock.method(console,'warn',()=>{});
+  try{
+    const pending=c.graphSearch(request);
+    callback=()=>{callbacks++;};
+    const {abort}=(c as unknown as {graphOperation:{abort:AbortController}}).graphOperation;
+    const real=abort.abort.bind(abort);
+    abort.abort=()=>{abortCalls++;real();if(abortCalls===1)throw Error('synthetic completion failure');};
+    c.invalidate();assert.equal((await pending).ok,false);
+    assert.equal(abort.signal.aborted,true);assert.equal(abortCalls,1);assert.equal(callbacks,1);
+    assert.equal(c.captureSourceAuthority(),null);
+    assert.equal(c.control('rebuild').ok,true);assert.equal(abortCalls,2);assert.equal(callbacks,1);
+    assert.ok(c.captureSourceAuthority()!.revision>old.revision);assert.equal(old.retired,true);
+    f.read.resolve();await tick();
+  }finally{f.read.resolve();c.dispose();}
+});

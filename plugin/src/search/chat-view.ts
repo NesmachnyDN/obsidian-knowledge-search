@@ -86,9 +86,12 @@ export class ChatView extends ItemView {
   private pin():void {
     this.revision=this.controller.sourceAuthorityRevision();this.generationId=this.controller.status().generationId;this.configKey=this.fingerprint();this.settingsKey=String(this.settings().propertiesEnabled);
   }
-  private authorityCurrent():boolean {
-    return this.controller.sourceAuthorityCurrent(this.revision)&&this.generationId===this.controller.status().generationId
+  private contextCurrent():boolean {
+    return this.generationId===this.controller.status().generationId
       &&this.configKey===this.fingerprint()&&this.settingsKey===String(this.settings().propertiesEnabled)&&this.settings().enabled&&!this.settings().paused;
+  }
+  private authorityCurrent():boolean {
+    return this.controller.sourceAuthorityCurrent(this.revision)&&this.contextCurrent();
   }
   private live(generation:number,session:RetainedChatSessionOwner):boolean {
     return !this.disposed&&this.state.current(generation)&&this.session===session&&this.authorityCurrent();
@@ -146,7 +149,9 @@ export class ChatView extends ItemView {
     this.work=this.add(root,'section');this.transcript=this.add(root,'section');
     this.unsubscribe=this.controller.subscribe(()=>{
       if(this.disposed)return;
-      if(!this.authorityCurrent()){this.resetSession(true);this.pin();this.tell(t('Source or configuration changed. Reapply scope.','Источники или конфигурация изменились. Примените область заново.'));return;}
+      // A lifecycle observer cannot admit source work, but its temporary
+      // admission fence must not erase a still-current chat selection.
+      if(!this.controller.sourceIdentityCurrent(this.revision)||!this.contextCurrent()){this.resetSession(true);this.pin();this.tell(t('Source or configuration changed. Reapply scope.','Источники или конфигурация изменились. Примените область заново.'));return;}
       if(this.session&&this.history.length)try {
         const ids=this.controller.readRetainedChatHistory(this.session).map(turn=>turn.id);
         if(ids.length!==this.history.length||ids.some((id,i)=>id!==this.history[i]?.id)){

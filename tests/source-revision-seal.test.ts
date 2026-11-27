@@ -249,3 +249,21 @@ for(const drainOnly of [false,true])test('standalone retirement drain publishes 
     assert.ok(capture(c).revision>old.revision);
   }finally{armed=false;unsubscribe();read.resolve();physical.resolve();c.dispose();}
 });
+
+test('B-03 source identity survives ordinary lifecycle observation but admission stays fenced',async()=>{
+  const {c}=fixture();
+  const old=capture(c),seen:{identity:boolean;admission:boolean;capture:boolean}[]=[];
+  const identity=()=>c.sourceIdentityCurrent(old.revision);
+  const off=c.subscribe(()=>seen.push({identity:identity(),admission:c.sourceAuthorityCurrent(old.revision),capture:c.captureSourceAuthority()!==null}));
+  try{
+    c.invalidate();assert.equal((await c.search(uiRequest('synthetic',1))).ok,true);
+    assert.ok(seen.length>=2);
+    assert.ok(seen.every(item=>item.identity&&!item.admission&&!item.capture));
+    assert.equal(identity(),true);assert.equal(capture(c),old);
+    seen.length=0;c.invalidateSource([]);
+    assert.ok(seen.length>0&&seen.every(item=>!item.identity&&!item.admission&&!item.capture));
+    assert.equal(identity(),false);assert.equal(old.retired,true);
+    const fresh=capture(c);c.sealTerminal();
+    assert.equal(c.sourceIdentityCurrent(fresh.revision),false);assert.equal(fresh.retired,true);
+  }finally{off();c.dispose();}
+});
