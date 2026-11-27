@@ -192,6 +192,7 @@ export class SearchController {
   private readonly retirement: {
     host?: RetirementTarget; sharedHookFault: boolean; obligations: RetirementObligation[];
     running: boolean; sourceRunning: boolean; overflow: boolean;
+    terminalPublication?: 'hook-pending' | 'hook-owned';
   } = {sharedHookFault:false,obligations:[],running:false,sourceRunning:false,overflow:false};
   private sourceRevision = 0;
   private sourceSeal?: {seal:SourceRevisionSeal; state:{retired:boolean}};
@@ -369,6 +370,7 @@ export class SearchController {
   }
   private drainNotifications(continueWave = false): void {
     if (this.notifying || this.revokingSharedAuthority || this.retirement.running || this.retirement.sourceRunning) return;
+    if (this.terminalPublicationBlocked()) return;
     // A trusted synchronous policy callback may itself request publication.
     // Finish the preview read/retirement before exposing any observer state.
     if(this.generationPreviewReading){
@@ -383,6 +385,7 @@ export class SearchController {
     const mutations = new Map<() => void, number>();
     try {
       while (this.lifecyclePending || this.evidencePending !== undefined) {
+        if (this.terminalPublicationBlocked()) break;
         const lifecycle = this.lifecyclePending;
         const revision = this.evidencePending;
         const evidence = revision === undefined ? [] : [...this.evidenceListeners];
@@ -419,9 +422,13 @@ export class SearchController {
       }
     } finally {
       this.notifying = false;
-      this.lifecyclePending = undefined;
-      this.evidencePending = undefined;
-      if (this.disposed) { this.listeners.clear(); this.evidenceListeners.clear(); }
+      // A role-local callback may still own retirement outside this
+      // notification wave. Do not consume its deferred terminal publication.
+      if (!this.terminalPublicationBlocked()) {
+        this.lifecyclePending = undefined;
+        this.evidencePending = undefined;
+        if (this.disposed) { this.listeners.clear(); this.evidenceListeners.clear(); }
+      }
     }
     // A search submitted by an observer is already queued; start only after
     // the wave has settled, so a later listener can supersede it first.
@@ -443,6 +450,22 @@ export class SearchController {
   private queueLifecycle(): void {
     this.lifecyclePending = {revision:this.revision,final:this.disposed,listeners:[...this.listeners]};
   }
+  private terminalRetirementBusy(): boolean {
+    return this.sharedResetDepth > 0 || this.retirement.running || this.retirement.sourceRunning
+      || this.retirement.obligations.some(item => item.running);
+  }
+  private terminalPublicationBlocked(): boolean {
+    return this.disposed && (this.retirement.terminalPublication !== 'hook-owned' || this.terminalRetirementBusy());
+  }
+  /** Complete the existing final publication at the owning synchronous cut.
+   * A nested dispose may reserve it while an outer drain still owns callbacks.
+   * Logical seal alone has not reserved a physical publication. */
+  private finishTerminalPublication(): void {
+    if (!this.terminalRetired || !this.lifecyclePending?.final || this.revokingSharedAuthority
+      || this.terminalRetirementBusy()) return;
+    if (this.retirement.terminalPublication === 'hook-pending') this.emit(true);
+    else if (this.retirement.terminalPublication === 'hook-owned') this.drainNotifications();
+  }
   private emit(final = false, retireHost?: RetirementTarget, requireRetirement = false): void {
     if (this.disposed && !final) return;
     if (!this.disposed && this.explicitRetirementPending && !this.retirement.running && !this.retirement.sourceRunning)
@@ -459,7 +482,12 @@ export class SearchController {
     if (!this.notifying && !this.revokingSharedAuthority) this.waveAdditions = 0;
     this.queueLifecycle();
     this.notificationVersion++;
-    if (this.revokingSharedAuthority || this.retirement.running || this.retirement.sourceRunning || (this.sharedAuthorityFault && this.pendingHostRetirement && this.notifying)) return;
+    // A final emit inside an already executing host hook joins that hook.
+    // Otherwise retain its obligation until the last synchronous owner exits.
+    if (final) this.retirement.terminalPublication = this.revokingSharedAuthority ? 'hook-owned' : 'hook-pending';
+    if (this.revokingSharedAuthority || this.retirement.running || this.retirement.sourceRunning
+      || (final ? this.terminalRetirementBusy() : this.sharedAuthorityFault && this.pendingHostRetirement && this.notifying)) return;
+    if (final) this.retirement.terminalPublication = 'hook-owned';
     this.revokingSharedAuthority = true;
     try {
       this.revokeSharedAuthority?.();
@@ -579,8 +607,11 @@ export class SearchController {
       if (this.disposed) {
         // Terminal owners are drained independently by the plugin's existing
         // storage, persistence and bounded operation barriers.
-        this.retirement.obligations.length = 0;
+        // Preserve a role-local owner whose callback has not returned yet;
+        // it, rather than this nested drain, owns the final synchronous cut.
+        this.retirement.obligations = this.retirement.obligations.filter(item => item.running);
         this.retirement.overflow = false;
+        this.finishTerminalPublication();
       }
     }
     return promoted;
@@ -597,7 +628,7 @@ export class SearchController {
     } finally {
       this.retirement.sourceRunning = false;
       if (!this.disposed) this.emit();
-      else this.drainNotifications();
+      else this.finishTerminalPublication();
     }
   }
   private resetSharedState(state: UiState, reserve?: (revision: number) => void, invalidateHistory = false): number {
@@ -627,7 +658,7 @@ export class SearchController {
       // for the outermost abort wave to finish.
       if (this.revision !== revision && !this.sharedResetDepth && !this.retirement.running && !this.retirement.sourceRunning) {
         // Nested publication was reserved while callbacks were still running.
-        if (this.disposed) this.drainNotifications();
+        if (this.disposed) this.finishTerminalPublication();
         else this.emit();
       }
     }
@@ -1927,7 +1958,13 @@ export class SearchController {
     } catch {
       item.failed = true;
       console.warn('SEARCH_RETIREMENT_OBLIGATION_FAILED','role');
-    } finally { item.running = false; }
+    } finally {
+      item.running = false;
+      if (this.disposed) {
+        this.retirement.obligations = this.retirement.obligations.filter(obligation => obligation !== item);
+        this.finishTerminalPublication();
+      }
+    }
   }
   // Role-local revocation and explicit cancellation use the same deadline
   // authority as the worker. A new pending preview is a distinct operation.
