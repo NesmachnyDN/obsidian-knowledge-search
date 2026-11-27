@@ -2,6 +2,8 @@
 
 Base for design: `f45ee9da6f689d97b517775fee49fff1e31a4f65` (#77 merged, synthetic history substrate). Authority: AGENTS, SECURITY, SDD, SPEC AC-06/07/09/10/11 and AC-11-CHAT-01–04, ADR-0015/0018/0019, ROADMAP POLICY.1–3, #78/#79; preserve accepted 05P/06H, LIFE-01–17 and SYS-01–07 evidence and exact consent boundaries. #80 deferred; #70 operational acceptance. DOCS_ONLY rebaseline first, then standard sequential bounded implementation PRs. No aggregate exception.
 
+**Prospective scope update:** [ADR-0023](../adr/0023-standalone-consumer-reuse.md) and [rebaseline contract](OKS-06-REBASELINE.md) replace the mandatory new-material marking workflow in slice 3 with read-only effective policy. Historical slice descriptions and accepted evidence below remain unchanged for traceability. No new marking/import/writer/baseline prerequisite; current original, scope, lineage, credential, policy, role admission and retirement remain required. Do not relax current pilot until independent replacement acceptance.
+
 ## Slices and gates
 
 1. POLICY.1a (DOCS_ONLY): reconcile authority and scope; independent exact-HEAD review, applicable CI, guarded merge and document verification. No functional or provider admission claim.

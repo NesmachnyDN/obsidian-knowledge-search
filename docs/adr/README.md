@@ -28,3 +28,7 @@ Use states Proposed, Accepted, Superseded or Rejected. Do not mark an experiment
 - [ADR-0019 — Note processing policy and provider trust boundary](0019-note-processing-policy.md) — Proposed prospective eligibility, shared authority and local marking decision; strict pilot remains operative until accepted implementation.
 
 - [ADR-0020 — Source-aware graph projection](0020-source-aware-graph-projection.md) — Proposed optional local graph, configurable typed relations, exact provenance and bounded scope-preserving expansion; 06B.1 design acceptance before implementation.
+
+- [ADR-0021 — Durable material lifecycle](0021-durable-material-lifecycle.md) — Historical marking lifecycle design; prospective consumer dependency narrowed by ADR-0023.
+- [ADR-0022 — Semantic corpus](0022-semantic-corpus-policy.md) — Independent automatic AI corpus eligibility; preserved by ADR-0023.
+- [ADR-0023 — Standalone consumer, reuse and unified retrieval](0023-standalone-consumer-reuse.md) — Proposed 2026-11-27 rebaseline; independent review required; no runtime claim.
