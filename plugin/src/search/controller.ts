@@ -207,11 +207,11 @@ export class SearchController {
     const inWave=this.retirement.running||this.retirement.sourceRunning;
     // A first source drain inside an ordinary evidence-abort wave still
     // loses source currency. Do not let the old revision revive after drain.
-    if(inWave&&!this.sourceRetirementPending)this.advanceSourceAuthority();
+    const firstSourceInWave=inWave&&!this.sourceRetirementPending;
     this.sourceDrains.add(work);
-    // An independently detected stale source may start retirement outside a
-    // Vault-event callback. Invalidate existing publication rights as well.
-    if(!inWave)this.invalidateSource([]);
+    // A standalone drain or the first source drain inside an ordinary
+    // retirement wave must also retire the shared publication rights.
+    if(!inWave||firstSourceInWave)this.invalidateSource([]);
     void work.then(()=>{
       this.sourceDrains.delete(work);
       if(!this.disposed)this.emit();
@@ -239,7 +239,11 @@ export class SearchController {
   /** Advanced source authorization is independent of ordinary lexical revisions. */
   sourceAuthorityRevision(): number { return this.sourceRevision; }
   sourceAuthorityCurrent(revision: number): boolean {
-    return !this.disposed && !this.sourceRetirementPending && revision === this.sourceRevision;
+    // Currency is not a new operation grant. Do not expose a fresh revision
+    // inside synchronous retirement, shared host callbacks or publication.
+    // Ordinary lexical waves temporarily fence admission without advancing
+    // source identity. The runtime settings transaction has its own gate.
+    return !this.sharedRetirementTransition() && !this.retirement.running && revision === this.sourceRevision;
   }
   /** Capture the existing revision only outside retirement and shared
    * transitions. This passive constituent is deliberately not an AbortSignal:
@@ -496,8 +500,11 @@ export class SearchController {
       &&!this.generationCredential.exclusiveBusy&&!this.scopedRetrieval&&!this.graphOperation?.inFlight
       &&!this.prepared.generation&&!this.prepared.reranking&&!this.activeEvidence.generation&&!this.activeEvidence.reranking;
   }
+  private sharedRetirementTransition(): boolean {
+    return this.disposed || this.sharedAuthorityFault || this.sharedResetDepth > 0 || this.revokingSharedAuthority || this.deliveringLifecycle || !!this.lifecyclePending;
+  }
   sharedAuthorityTransition(): boolean {
-    return this.disposed || this.runtimeSettingsChanging || this.sharedAuthorityFault || this.sharedResetDepth > 0 || this.revokingSharedAuthority || this.deliveringLifecycle || !!this.lifecyclePending;
+    return this.runtimeSettingsChanging || this.sharedRetirementTransition();
   }
   /** Fence admission before observers or persistence can yield. Failed retirement
    * remains latched independently of the settings transaction's lifetime. */
@@ -524,6 +531,9 @@ export class SearchController {
     // ordinary shared reset, revoke any lexical reservation made in its callbacks.
     if (this.retirement.sourceRunning) return;
     if (this.retirement.running) {
+      // Promote the existing wave to source retirement even if there is no
+      // concrete obligation. Its outer drain owns release of this barrier.
+      this.retirement.sourceRunning = true;
       this.resetSharedState({phase:'idle',message:'Results cleared; search to verify current sources.',response:null},undefined,true);
       return;
     }
@@ -537,8 +547,10 @@ export class SearchController {
     }
     this.retirement.obligations.push(obligation);
   }
-  private drainRetirements(): void {
-    if (this.retirement.running) return;
+  private drainRetirements(): boolean {
+    if (this.retirement.running) return false;
+    const sourceRunningAtEntry = this.retirement.sourceRunning;
+    let promoted = false;
     this.retirement.running = true;
     try {
       // Each concrete obligation is attempted at most once per bounded wave.
@@ -558,7 +570,11 @@ export class SearchController {
         }
       }
     } finally {
+      promoted = !sourceRunningAtEntry && this.retirement.sourceRunning;
       this.retirement.running = false;
+      // A nested source event may promote an ordinary drain. Restore only
+      // the outer source owner's state; never clear its active barrier.
+      this.retirement.sourceRunning = sourceRunningAtEntry;
       this.releaseRetiredScopedRetrieval();
       if (this.disposed) {
         // Terminal owners are drained independently by the plugin's existing
@@ -567,6 +583,7 @@ export class SearchController {
         this.retirement.overflow = false;
       }
     }
+    return promoted;
   }
   private transitionSourceRetirement(retry: boolean): void {
     if (this.disposed || this.retirement.running || this.retirement.sourceRunning) return;
@@ -691,7 +708,10 @@ export class SearchController {
       }catch(error){
         value=failure(operation.retired||this.graphOperation!==operation?'SUPERSEDED':
           error instanceof StandaloneError?error.code:'INTERNAL_FAILURE');
-        if(this.graphOperation===operation){this.revokeGraphOperation(operation,value.error);this.drainRetirements();}
+        if(this.graphOperation===operation){
+          this.revokeGraphOperation(operation,value.error);
+          if(this.drainRetirements())this.emit();
+        }
       }
       operation.inFlight=false;
       operation.finish(value);
@@ -1505,7 +1525,7 @@ export class SearchController {
   private retireScopedRetrieval(operation: ActiveScopedRetrieval, code: string): void {
     if (this.scopedRetrieval !== operation || operation.retired) return;
     this.revokeScopedRetrieval(operation,code);
-    this.drainRetirements();
+    if(this.drainRetirements())this.emit();
   }
   private revokeScopedRetrieval(operation = this.scopedRetrieval, code = 'SUPERSEDED'): void {
     if (!operation || this.scopedRetrieval !== operation || operation.retired) return;

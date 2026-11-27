@@ -167,3 +167,85 @@ test('evidence-only retirement recovery fences the old source revision before it
     assert.ok(capture(c).revision>old.revision);assert.equal(old.retired,true);
   }finally{read.resolve();c.dispose();}
 });
+
+// A fresh numeric revision must not become admissible inside a still-running
+// source retirement, even when the nested event has no concrete obligation.
+for(const concrete of [false,true])test('nested source revision waits for the full synchronous wave: '+concrete,async()=>{
+  const read=deferred();let callback=()=>{};let hook=()=>{};
+  const {c,reads}=fixture(()=>hook(),(_input,signal)=>{
+    signal.addEventListener('abort',()=>callback(),{once:true});
+    return {current:()=>!signal.aborted,read:async()=>{await read.promise;throw Error('synthetic retired graph');},verify:async()=>{}};
+  });
+  const old=capture(c),seen:string[]=[],admitted:boolean[]=[];
+  let nested:ReturnType<typeof c.search>|undefined,armed=false;
+  const observe=(label:string)=>{seen.push(label);admitted.push(c.sourceAuthorityCurrent(c.sourceAuthorityRevision()));
+    assert.equal(old.retired,true);assert.equal(c.sourceAuthorityCurrent(old.revision),false);assert.equal(c.captureSourceAuthority(),null);};
+  const unsubscribe=c.subscribe(()=>{if(armed){observe('observer');armed=false;}});
+  try{
+    const graph=c.graphSearch(graphRequest);
+    callback=()=>{c.invalidateSource(concrete?[()=>observe('obligation')]:[]);observe('callback');
+      c.invalidateSource([]);observe('repeat');nested=c.search(uiRequest('nested',1));};
+    hook=()=>{if(armed)observe('hook');};armed=true;
+    c.invalidate();assert.equal((await graph).ok,false);assert.ok(nested);assert.equal((await nested).ok,false);assert.equal(reads(),0);
+    assert.deepEqual(seen,concrete?['callback','repeat','obligation','hook','observer']:['callback','repeat','hook','observer']);
+    assert.deepEqual(admitted,seen.map(()=>false));
+    const fresh=capture(c);assert.ok(fresh.revision>old.revision);assert.equal(c.sourceAuthorityCurrent(fresh.revision),true);
+    assert.equal((await c.search(uiRequest('fresh',1))).ok,true);assert.equal(reads(),1);
+  }finally{armed=false;unsubscribe();read.resolve();c.dispose();}
+});
+
+test('nested source invalidation in trusted hook waits for host and observer retirement',()=>{
+  let hook=()=>{};const {c}=fixture(()=>hook());const old=capture(c);let armed=true;
+  const seen:boolean[]=[];const observe=()=>seen.push(c.sourceAuthorityCurrent(c.sourceAuthorityRevision()));
+  const unsubscribe=c.subscribe(()=>{if(armed)observe();});
+  try{
+    hook=()=>{c.invalidateSource([]);observe();};c.invalidate();armed=false;
+    assert.deepEqual(seen,[false,false]);assert.equal(old.retired,true);assert.ok(capture(c).revision>old.revision);
+  }finally{armed=false;hook=()=>{};unsubscribe();c.dispose();}
+});
+
+test('ordinary lexical callbacks fence admission without retiring source identity',async()=>{
+  const read=deferred();let callback=()=>{};
+  const {c}=fixture(undefined,(_input,signal)=>{
+    signal.addEventListener('abort',()=>callback(),{once:true});
+    return {current:()=>!signal.aborted,read:async()=>{await read.promise;throw Error('synthetic retired graph');},verify:async()=>{}};
+  });
+  const seal=capture(c),seen:boolean[]=[];
+  try{
+    const graph=c.graphSearch(graphRequest);
+    callback=()=>seen.push(!seal.retired,c.sourceAuthorityRevision()===seal.revision,
+      !c.sourceAuthorityCurrent(seal.revision),c.captureSourceAuthority()===null);
+    c.invalidate();assert.equal((await graph).ok,false);assert.deepEqual(seen,[true,true,true,true]);
+    assert.equal(capture(c),seal);assert.equal(c.sourceAuthorityCurrent(seal.revision),true);
+  }finally{read.resolve();c.dispose();}
+});
+
+test('failed shared host hook keeps a new source revision fenced until recovery',()=>{
+  let hook=()=>{};const {c}=fixture(()=>hook());const old=capture(c);let attempts=0;
+  try{
+    hook=()=>{attempts++;if(attempts===1)c.invalidateSource([]);throw Error('synthetic hook failure');};
+    c.invalidate();assert.equal(old.retired,true);const revision=c.sourceAuthorityRevision();
+    assert.equal(c.sourceAuthorityCurrent(revision),false);assert.equal(c.captureSourceAuthority(),null);
+    hook=()=>{};c.invalidate();assert.equal(capture(c).revision,revision);
+    assert.equal(c.sourceAuthorityCurrent(old.revision),false);assert.equal(c.sourceAuthorityCurrent(revision),true);
+  }finally{hook=()=>{};c.dispose();}
+});
+
+for(const drainOnly of [false,true])test('standalone retirement drain publishes nested source invalidation exactly once: '+drainOnly,async()=>{
+  const read=deferred(),physical=deferred();let callback=()=>{};let hookCalls=0,observerCalls=0,armed=false;
+  const {c}=fixture(()=>{if(armed)hookCalls++;},(_input,signal)=>{
+    signal.addEventListener('abort',()=>callback(),{once:true});
+    return {current:()=>!signal.aborted,read:async()=>{await read.promise;throw Error('synthetic graph failure');},verify:async()=>{}};
+  });
+  const old=capture(c);const unsubscribe=c.subscribe(()=>{if(armed)observerCalls++;});
+  try{
+    const graph=c.graphSearch(graphRequest);armed=true;
+    callback=()=>{if(drainOnly)c.trackSourceDrain(physical.promise);else c.invalidateSource([]);
+      assert.equal(old.retired,true);assert.equal(c.captureSourceAuthority(),null);};
+    read.resolve();assert.equal((await graph).ok,false);
+    // Logical host retirement and publication do not wait for physical drain.
+    assert.equal(hookCalls,1);assert.equal(observerCalls,1);
+    if(drainOnly){assert.equal(c.captureSourceAuthority(),null);physical.resolve();await physical.promise;await tick();}
+    assert.ok(capture(c).revision>old.revision);
+  }finally{armed=false;unsubscribe();read.resolve();physical.resolve();c.dispose();}
+});
