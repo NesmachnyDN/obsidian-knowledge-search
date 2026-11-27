@@ -60,6 +60,8 @@ for(const setup of ['fresh','uninitialized'] as const)test('native baseline '+se
     assert.deepEqual(await f.owner.confirmBaselinePreview(view),{outcome:'admitted'});
     assert.equal(f.owner.readiness(),'admitted');assert.equal(f.owner.exactAuthorityActive(),true);
     assert.equal(f.tracker.lifecycleState(f.context,file,proof),'existing');
+    const evidence=await f.owner.observeCommittedLifecycle([{sourceId:'a.md',expectedSha256:proof.version.sha256}]);
+    assert.ok(evidence.ok);assert.equal(evidence.observations[0]!.state,'existing');
     assert.equal((await f.owner.confirmBaselinePreview(view)).outcome,'denied');
     await f.owner.close();const ledger=await f.open();
     try{const state=await ledger.read();assert.equal(state?.snapshot.baselineAdmitted,true);assert.equal(state?.snapshot.entries.length,1);}

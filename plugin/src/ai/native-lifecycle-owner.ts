@@ -1,7 +1,8 @@
 import { DurableLifecycleLedger, LifecycleLedgerStateError } from './lifecycle-ledger';
-import { NewMaterialTracker, type LifecycleContext, type BaselinePreview, type BaselineCandidate,
+import { NewMaterialTracker, captureLifecycleObservationRequests, type LifecycleContext, type BaselinePreview, type BaselineCandidate,
   type InitialBaselineAdmissionOutcome, type LiveTransitionAdmission,
-  type LiveTransitionAdmissionOutcome } from './new-material-tracker';
+  type LiveTransitionAdmissionOutcome, type LifecycleObservationRequest,
+  type LifecycleObservation } from './new-material-tracker';
 import { BoundedVaultReader } from '../standalone/source';
 
 type NativeLifecycleBinding<T extends object> = Readonly<{
@@ -24,6 +25,9 @@ export type NativeBaselineCancellation=Readonly<{outcome:'cancelled'|'cancel-req
 /** Host-private future native-event boundary; no production callback invokes it yet. */
 export type NativeLiveTransition<T extends object>=LiveTransitionAdmission<T>;
 export type NativeLiveTransitionResult=Readonly<{outcome:LiveTransitionAdmissionOutcome}>;
+export type NativeLifecycleObservationRequest=LifecycleObservationRequest;
+export type NativeLifecycleObservationResult=Readonly<{ok:true;observations:readonly LifecycleObservation[]}|
+  {ok:false;reason:'denied'|'unavailable'|'retired'}>;
 const monotonicNow=()=>Math.floor(performance.now());
 
 /** A cancelled wait never starts a replacement ledger transaction. */
@@ -199,6 +203,46 @@ export class NativeLifecycleOwner<T extends object> {
   /** Compatibility predicate for host callers that only need cancellation ownership. */
   cancelBaselinePreview(view:NativeBaselinePreview):boolean {
     return this.cancelBaselinePreviewOutcome(view).outcome!=='denied';
+  }
+
+  /**
+   * Host-private fresh evidence only. A successful result is deliberately not
+   * retained and does not make this owner a processing-policy authority.
+   */
+  async observeCommittedLifecycle(requests:readonly NativeLifecycleObservationRequest[]):Promise<NativeLifecycleObservationResult> {
+    if(this.operation||this.preview||this.confirming){this.retireAndDrain();return {ok:false,reason:'retired'};}
+    if(this.state!=='restored'&&this.state!=='admitted')return {ok:false,reason:this.retired?'retired':'unavailable'};
+    const binding=this.binding,ledger=this.ledger;
+    if(!binding||!ledger)return {ok:false,reason:'unavailable'};
+    // Reserve synchronously before caller accessors or any native callback.
+    let complete!:(result:NativeLifecycleObservationResult)=>void;
+    const operation=new Promise<NativeLifecycleObservationResult>(resolve=>{complete=resolve;});
+    this.operation=operation;
+    const intact=()=>!this.retired&&!this.controller.signal.aborted&&this.operation===operation
+      &&this.binding===binding&&this.ledger===ledger&&(this.state==='restored'||this.state==='admitted')
+      &&this.tracker.durableAuthorityActive(binding.context)&&ledger.rootAvailable(binding.context.rootId);
+    const current=()=>intact()&&this.fence?.()===true&&intact();
+    const denied=():NativeLifecycleObservationResult=>({ok:false,reason:this.retired?'retired':'denied'});
+    const run=async():Promise<NativeLifecycleObservationResult>=>{
+      try{
+        const captured=captureLifecycleObservationRequests(requests);
+        if(!captured||!current())return denied();
+        const observations=await this.tracker.observeCommittedLifecycle(binding.context,ledger,binding.reader,{
+          signal:this.controller.signal,current,resolveNativeOwner:binding.resolveNativeOwner,
+        },captured);
+        // No reentrant host callback after the tracker's last exact fence.
+        if(!observations||!intact()){
+          if(!ledger.rootAvailable(binding.context.rootId))this.retireAndDrain();
+          return denied();
+        }
+        return Object.freeze({ok:true,observations});
+      }catch{this.retireAndDrain();return denied();}
+    };
+    try{
+      void run().then(complete,()=>{this.retireAndDrain();complete(denied());});
+      const result=await operation;
+      return result.ok&&!intact()?denied():result;
+    }finally{if(this.operation===operation)this.operation=undefined;}
   }
 
   /**

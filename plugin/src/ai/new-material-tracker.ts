@@ -30,6 +30,13 @@ export type LifecycleRestoreHost<T extends object> = Readonly<{
   signal:AbortSignal; current:()=>boolean; resolveNativeOwner:(sourceId:string)=>T|null;
 }>;
 export type LifecycleRestoreEvidence = Readonly<{baselineAdmitted:boolean;entries:readonly LedgerEntry[]}>;
+/** A caller may name only an exact expected original version, never its proof or owner. */
+export type LifecycleObservationRequest = Readonly<{sourceId:string;expectedSha256:string}>;
+/** Point-in-time host-private evidence; it is neither a grant nor a cache. */
+export type LifecycleObservation = Readonly<{
+  sourceId:string; sha256:string; state:Exclude<LifecycleState,'unresolved'>;
+  origin:Origin; originVersionId:string; proof:DescriptorLifecycleProof;
+}>;
 /**
  * Native-only admission hooks.  They deliberately expose neither a grant nor
  * a classification decision: the tracker remains the sole lifecycle state
@@ -86,6 +93,24 @@ function sameLedgerEntry<T extends object>(entry:Entry<T>|undefined,record:Ledge
 }
 function admitted<T extends object>(entry:Entry<T>|undefined):entry is Admitted<T> {
   return !!entry&&typeof entry==='object';
+}
+
+/** Snapshot once, bound before allocation, and reject malformed or unordered requests. */
+export function captureLifecycleObservationRequests(input:unknown):readonly LifecycleObservationRequest[]|null {
+  try {
+    if(!Array.isArray(input))return null;
+    const length=input.length;
+    if(!Number.isSafeInteger(length)||length<1||length>BOUNDS.sources)return null;
+    const captured:LifecycleObservationRequest[]=[];let previous='';
+    for(let i=0;i<length;i++){
+      const request=input[i];
+      if(!request||typeof request!=='object')return null;
+      const sourceId=request.sourceId,expectedSha256=request.expectedSha256;
+      if(!validPath(sourceId)||!isDigest(expectedSha256)||sourceId<=previous)return null;
+      previous=sourceId;captured.push(Object.freeze({sourceId,expectedSha256}));
+    }
+    return Object.freeze(captured);
+  }catch{return null;}
 }
 
 /**
@@ -246,6 +271,72 @@ export class NewMaterialTracker<T extends object> {
     if(this.restorePending||this.admissionPending||!this.current(context)||!validProof(proof,context.rootId))return 'unresolved';
     const current=this.exact.get(proof.version.sourceId);
     return admitted(current)&&current.owner===owner&&sameProof(current.proof,proof)?current.state:'unresolved';
+  }
+  /**
+   * Re-read a bounded set of already-admitted originals under the native
+   * owner's exclusive operation. This intentionally does not install state,
+   * advance an epoch, or make any future-use assertion.
+   */
+  async observeCommittedLifecycle(context:LifecycleContext,ledger:DurableLifecycleLedger,reader:BoundedVaultReader,
+      host:LifecycleRestoreHost<T>,requests:readonly LifecycleObservationRequest[]):Promise<readonly LifecycleObservation[]|null> {
+    const capturedContext=this.context,expectedAnchor=this.durableAnchor,signal=this.durableSignal;
+    if(!this.durableEpoch||!capturedContext||!expectedAnchor||!signal||this.restorePending||this.admissionPending
+      ||!this.baselineDone||!(ledger instanceof DurableLifecycleLedger)||!(reader instanceof BoundedVaultReader)
+      ||reader.rootId!==capturedContext.rootId||!host||host.signal!==signal||!(signal instanceof AbortSignal)
+      ||typeof host.current!=='function'||typeof host.resolveNativeOwner!=='function'
+      ||!sameContext(context,capturedContext))return null;
+    const copied=captureLifecycleObservationRequests(requests);
+    if(!copied)return null;
+    const revision=this.lifecycleRevision;
+    const intact=()=>this.durableEpoch&&!this.restorePending&&!this.admissionPending&&!signal.aborted
+      &&this.current(capturedContext)&&this.lifecycleRevision===revision&&this.durableAnchor===expectedAnchor
+      &&this.durableSignal===signal&&!this.legacyTouched&&!this.overflow&&this.entries.size===0
+      &&ledger.rootAvailable(capturedContext.rootId);
+    const current=():boolean=>{
+      if(!intact())return false;
+      try{return host.current()===true&&intact();}catch{return false;}
+    };
+    const observe=async():Promise<readonly LifecycleObservation[]|null>=>{
+      if(!current())return null;
+      const loaded=await ledger.read();
+      if(!loaded||!sameLedgerAnchor(loaded.anchor,expectedAnchor)||loaded.snapshot.rootId!==capturedContext.rootId
+        ||!loaded.snapshot.baselineAdmitted||!current())return null;
+      const records=new Map(loaded.snapshot.entries.map(record=>[record.sourceId,record]));
+      const observations:LifecycleObservation[]=[];
+      for(const request of copied){
+        if(!current())return null;
+        const entry=this.exact.get(request.sourceId),record=records.get(request.sourceId);
+        if(!admitted(entry)||!sameLedgerEntry(entry,record)||entry.proof.version.sha256!==request.expectedSha256)return null;
+        const first=host.resolveNativeOwner(request.sourceId);
+        if(!objectIdentity(first)||first!==entry.owner||!current())return null;
+        let proof:DescriptorLifecycleProof;
+        try{proof=await reader.readLifecycleProof(request.sourceId);}catch{return null;}
+        if(!current()||!sameProof(entry.proof,proof)||proof.version.sha256!==request.expectedSha256
+          ||host.resolveNativeOwner(request.sourceId)!==first||!current())return null;
+        observations.push(Object.freeze({sourceId:request.sourceId,sha256:request.expectedSha256,state:entry.state,
+          origin:entry.origin,originVersionId:entry.originVersionId,proof:copyProof(proof)}));
+      }
+      return current()?Object.freeze(observations):null;
+    };
+    try{
+      const first=await observe();
+      if(!first||!current())return null;
+      const final=await observe();
+      if(!final||final.length!==first.length||!first.every((value,index)=>{
+        const next=final[index]!;
+        return value.sourceId===next.sourceId&&value.sha256===next.sha256&&value.state===next.state
+          &&value.origin===next.origin&&value.originVersionId===next.originVersionId&&sameProof(value.proof,next.proof);
+      }))return null;
+      const anchor=await ledger.read();
+      if(!anchor||!sameLedgerAnchor(anchor.anchor,expectedAnchor)||!current())return null;
+      // The anchor read is asynchronous, so resolve every native owner once
+      // more before publishing the point-in-time result.
+      for(const request of copied){
+        const entry=this.exact.get(request.sourceId);
+        if(!admitted(entry)||host.resolveNativeOwner(request.sourceId)!==entry.owner||!current())return null;
+      }
+      return intact()&&ledger.committedAnchorCurrent(expectedAnchor)?final:null;
+    }catch{return null;}
   }
   private inventory(context:LifecycleContext,input:BaselineInventory<T>,allowEmpty=false):readonly BaselineCandidate<T>[]|null {
     if(!input||input.complete!==true||!Array.isArray(input.candidates)
