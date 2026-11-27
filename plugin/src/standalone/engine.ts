@@ -69,6 +69,7 @@ export class StandaloneEngine {
   private versionHints: string[] | null = null;
   private verifiedAt = 0;
   private readonly hardSearchScope: HardSearchScope|undefined;
+  private scopeRetired = false;
   constructor(private readonly provider: SourceProvider, private readonly store: GenerationStore,
     private readonly parser: MarkdownParser,
     private readonly yieldJob: () => Promise<void> = yieldToHost,
@@ -76,12 +77,32 @@ export class StandaloneEngine {
     if (provider.rootId !== store.rootId) throw new StandaloneError('VAULT_IDENTITY_CHANGED');
     this.hardSearchScope = provider.hardSearchScope;
   }
-  status(): EngineState { return { ...this.state }; }
+  status(): EngineState { this.scopeCurrent(); return { ...this.state }; }
+  /** The source owner is the only scope authority. Retirement is irreversible. */
+  private scopeCurrent(): boolean {
+    if (this.scopeRetired) return false;
+    const scope = this.hardSearchScope;
+    if (!scope || !('current' in scope)) return true;
+    try { if (typeof scope.current === 'function' && scope.current() === true && !this.scopeRetired) return true; }
+    catch { /* malformed or unavailable host authority denies */ }
+    if (!this.scopeRetired) {
+      this.scopeRetired = true;
+      this.generation = null;
+      this.versionHints = null;
+      this.pending.clear(); this.all = false;
+      this.recordState('unavailable', 'SEARCH_SCOPE_INVALID');
+    }
+    return false;
+  }
+  private requireScope(): void {
+    if (!this.scopeCurrent()) throw new StandaloneError('SEARCH_SCOPE_INVALID');
+  }
   private retireGraph(): void {
     this.graphRevision++;
     this.graphCache = null;
   }
   private recordState(status: EngineState['status'], error: string | null): void {
+    if (this.scopeRetired) { status = 'unavailable'; error = 'SEARCH_SCOPE_INVALID'; }
     if (status !== 'ready') this.retireGraph();
     this.state = {
       status, error, maintenanceWarning: this.maintenanceWarning,
@@ -94,14 +115,20 @@ export class StandaloneEngine {
   /** Reuse the source owner's immutable predicate, including for recovered data. */
   private generationAllowed(generation: IndexGeneration): boolean {
     const scope = this.hardSearchScope;
-    return !scope?.hasExclusions || generation.documents.every(doc => scope.allows(doc.sourceId));
+    this.requireScope();
+    const allowed = !scope || (!scope.hasExclusions && !('current' in scope))
+      || generation.documents.every(doc => scope.allows(doc.sourceId));
+    this.requireScope();
+    return allowed;
   }
   async start(): Promise<void> {
     if (this.stopped || this.initialized) throw new StandaloneError('LIFECYCLE_INVALID');
+    this.requireScope();
     this.initialized = true;
     this.recordState('initializing', null);
     try {
       const result = await this.store.load();
+      this.requireScope();
       if (this.stopped) return;
       // An authenticated rollback may still be inadmissible in the current
       // scope. Never expose it or reuse its parsed documents while rebuilding.
@@ -115,6 +142,7 @@ export class StandaloneEngine {
       if (!result.generation && result.error) return;
       this.reconcile();
     } catch (error) {
+      this.requireScope();
       this.recordState('failed', code(error));
       throw error;
     }
@@ -122,7 +150,7 @@ export class StandaloneEngine {
   // Event mutation immediately invalidates a pending publication. Search rehashes
   // the current source whether or not an Obsidian event has arrived.
   changed(path?: string): void {
-    if (this.stopped) return;
+    if (this.stopped || !this.scopeCurrent()) return;
     this.revision++;
     this.retireGraph();
     this.enqueueChange(path);
@@ -166,7 +194,7 @@ export class StandaloneEngine {
     this.reconcile();
   }
   private schedule(): void {
-    if (!this.initialized || this.stopped || this.paused || this.work || this.localRead) return;
+    if (!this.scopeCurrent() || !this.initialized || this.stopped || this.paused || this.work || this.localRead) return;
     this.work = this.run().catch(error => {
       this.recordState(this.generation ? 'degraded' : 'failed', code(error));
     }).finally(() => {
@@ -185,11 +213,12 @@ export class StandaloneEngine {
    * through late read/parser completion; a timeout never publishes a proof. */
   previewPolicyMetadata(path:string,current:()=>boolean,requireOriginalProof=false):Promise<PolicyMetadataProof> {
     const parser=this.parser as MarkdownParser & Partial<PolicyMetadataParser>;
+    if(!this.scopeCurrent())return Promise.reject(new StandaloneError('SEARCH_SCOPE_INVALID'));
     if(this.stopped||!this.initialized||this.paused||this.work||this.localRead||!validPath(path)||!parser.policyMetadata)
       return Promise.reject(new StandaloneError('PARSER_BUSY'));
     const revision=this.revision,root=this.provider.rootId;
     let expired=false;
-    const live=()=>!expired&&!this.stopped&&!this.paused&&this.revision===revision;
+    const live=()=>this.scopeCurrent()&&!expired&&!this.stopped&&!this.paused&&this.revision===revision;
     const check=()=>{if(!live()||!current()||!live())throw new StandaloneError('SOURCE_CHANGED');};
     const read=async()=>{
       if(!requireOriginalProof)return {bytes:await this.provider.read(path),digest:null};
@@ -218,10 +247,11 @@ export class StandaloneEngine {
   /** One existing worker/source owner, shared with lexical indexing and dry-run. */
   evaluateProcessingPolicy(host:PolicyHost,context:CallContext):Promise<PolicyEnvelope>{
     const parser=this.parser as MarkdownParser & Partial<PolicyMetadataParser>;
+    if(!this.scopeCurrent())return Promise.reject(new ProviderFailure('CANCELLED'));
     if(this.stopped||!this.initialized||this.paused||this.work||this.localRead||!parser.policyMetadata)
       return Promise.reject(new ProviderFailure('BUSY'));
     const revision=this.revision;
-    const live=()=>!this.stopped&&!this.paused&&this.revision===revision;
+    const live=()=>this.scopeCurrent()&&!this.stopped&&!this.paused&&this.revision===revision;
     const current=()=>live()&&host.current()&&live();
     const evaluator=new EligibilityEvaluator(this.provider,{policyMetadata:(path,bytes,root)=>parser.policyMetadata!(path,bytes,root)},
       {snapshot:()=>host.snapshot(),current,...(host.requireOriginalProof?{requireOriginalProof:true as const}:{}),
@@ -234,7 +264,7 @@ export class StandaloneEngine {
     void physical.then(release,release);
     return result.then(async envelope=>{
       if(!evaluator.physicallyPending)await physical;
-      if(envelope.allowed&&!current())throw new ProviderFailure('CANCELLED');
+      if(!this.scopeCurrent()||envelope.allowed&&!current())throw new ProviderFailure('CANCELLED');
       return envelope;
     });
   }
@@ -261,12 +291,12 @@ export class StandaloneEngine {
       throw new StandaloneError('GRAPH_SCOPE_UNSUPPORTED');
     const gen = this.generation, mapping = this.graphMapping, revision = this.graphRevision;
     if (!mapping) throw new StandaloneError('GRAPH_DISABLED');
-    if (!gen || this.stopped || this.paused || this.state.status!=='ready'
+    if (!this.scopeCurrent() || !gen || this.stopped || this.paused || this.state.status!=='ready'
       || this.work || this.all || this.pending.size || this.store.isPublicationUncertain())
       throw new StandaloneError('GRAPH_UNAVAILABLE');
     let retired = false;
     const current = (): boolean => {
-      if (!retired && (signal.aborted || this.stopped || this.paused || this.graphRevision!==revision
+      if (!retired && (!this.scopeCurrent() || signal.aborted || this.stopped || this.paused || this.graphRevision!==revision
         || this.generation!==gen || this.graphMapping!==mapping || this.state.status!=='ready'
         || this.work || this.all || this.pending.size || this.store.isPublicationUncertain())) retired=true;
       return !retired;
@@ -380,9 +410,12 @@ export class StandaloneEngine {
     const changes = new Set(this.pending);
     this.pending.clear();
     try {
+      this.requireScope();
       const paths = await this.provider.list();
+      this.requireScope();
       if (this.stopped || this.paused || revision !== this.revision) return;
       const beforeHints = await this.provider.versionHints(paths);
+      this.requireScope();
       if (this.stopped || this.paused || revision !== this.revision) return;
       const live = new Set(paths);
       const prior = new Map((this.generation?.documents ?? []).map(doc => [doc.sourceId, doc]));
@@ -392,13 +425,16 @@ export class StandaloneEngine {
       for (const path of targets) {
         if (this.stopped || this.paused || revision !== this.revision) return;
         const previous = prior.get(path);
+        this.requireScope();
         const bytes = await this.provider.read(path);
+        this.requireScope();
         if (previous && hash(bytes) === previous.sha256) {
           await this.yieldJob();
           continue; // Full audit reuses unchanged, already authenticated documents.
         }
         if (previous) blocks -= previous.blocks.length;
         const doc = await this.parser.parse(path, bytes, this.provider.rootId);
+        this.requireScope();
         blocks += doc.blocks.length;
         if (blocks > BOUNDS.blocks) throw new StandaloneError('INDEX_LIMIT');
         prior.set(path, doc);
@@ -408,15 +444,20 @@ export class StandaloneEngine {
       // Recheck all participating source versions before publication; missed file
       // events cannot introduce a known-inconsistent generation.
       for (const [path, doc] of prior) {
+        this.requireScope();
         if (hash(await this.provider.read(path)) !== doc.sha256)
           throw new StandaloneError('SOURCE_CHANGED');
+        this.requireScope();
         if (this.stopped || this.paused || revision !== this.revision) return;
         await this.yieldJob();
       }
+      this.requireScope();
       const currentPaths = await this.provider.list();
+      this.requireScope();
       if (paths.length !== currentPaths.length || paths.some((p, i) => p !== currentPaths[i]))
         throw new StandaloneError('SOURCE_CHANGED');
       const afterHints = await this.provider.versionHints(currentPaths);
+      this.requireScope();
       if (beforeHints.some((hint, i) => hint !== afterHints[i]))
         throw new StandaloneError('SOURCE_CHANGED');
       if (this.stopped || this.paused || revision !== this.revision) return;
@@ -428,6 +469,8 @@ export class StandaloneEngine {
       if (publish) {
         try {
           const outcome = await this.store.commit(next, () => {
+            // Use the store's authenticated pre-rename cancellation/cleanup path.
+            if (!this.scopeCurrent()) throw new StandaloneError('CANCELLED');
             if (this.stopped || this.paused || revision !== this.revision)
               throw new StandaloneError('CANCELLED');
             // The rename is about to start. A later cancel is deferred.
@@ -435,10 +478,12 @@ export class StandaloneEngine {
           }, published => {
             // No await between successful rename and memory publication.
             // Failure or delay of the following fsync/GC cannot strand old state.
+            if (!this.scopeCurrent()) return;
             this.generation = published;
             this.recoveryNeedsPublication = false;
             this.recordState('degraded', 'COMMIT_FINALIZING');
           });
+          this.requireScope();
           this.generation = outcome.generation;
           this.maintenanceWarning = outcome.maintenanceWarning;
         } finally {
@@ -460,6 +505,7 @@ export class StandaloneEngine {
     } catch (error) {
       // An unknowable CURRENT must never expose an old in-memory generation as
       // searchable. Stop writes until a fresh authenticated store is opened.
+      if (!this.scopeCurrent()) return;
       if (code(error) === 'INDEX_PUBLICATION_UNCERTAIN') {
         this.generation = null;
         this.versionHints = null;
@@ -488,7 +534,7 @@ export class StandaloneEngine {
       throw new StandaloneError('INVALID_REQUEST');
     const selected = new Set(paths);
     const gen = this.generation, revision = this.revision;
-    const current = (): boolean => !signal.aborted && !this.stopped && !this.paused
+    const current = (): boolean => this.scopeCurrent() && !signal.aborted && !this.stopped && !this.paused
       && this.revision === revision && this.generation === gen && gen !== null
       && this.state.status === 'ready' && !this.work && !this.store.isPublicationUncertain();
     const check = (): void => {
@@ -551,7 +597,7 @@ export class StandaloneEngine {
     const gen=this.generation, revision=this.revision;
     let retired=false, searching=false, verifying=false;
     const current=():boolean=>{
-      if(!retired&&(signal.aborted||this.stopped||this.paused||this.revision!==revision
+      if(!retired&&(!this.scopeCurrent()||signal.aborted||this.stopped||this.paused||this.revision!==revision
         ||gen===null||this.generation!==gen||this.state.status!=='ready'||this.work||this.store.isPublicationUncertain()))retired=true;
       return !retired;
     };
@@ -639,10 +685,11 @@ export class StandaloneEngine {
     // Snapshot pinning is valid for an ordinary A->B publication, but an
     // unauthenticated CURRENT or unload irrevocably revokes ALL in-flight hits.
     // Recheck after asynchronous reads and immediately before returning evidence.
-    const visibilityFailure = (): string | null => this.stopped ? 'LIFECYCLE_INVALID'
+    const visibilityFailure = (): string | null => !this.scopeCurrent() ? 'SEARCH_SCOPE_INVALID' : this.stopped ? 'LIFECYCLE_INVALID'
       : this.store.isPublicationUncertain() ? 'INDEX_PUBLICATION_UNCERTAIN'
       : this.generation === null ? this.state.error ?? 'INDEX_UNAVAILABLE' : null;
     const denied = (reason: string): SearchResponse => response('failed', reason, [], 0, null);
+    if (!this.scopeCurrent()) return denied('SEARCH_SCOPE_INVALID');
     if (this.stopped) return denied('LIFECYCLE_INVALID');
     if (req.requestedMode !== 'lexical') return response('failed', 'CAPABILITY_UNAVAILABLE', [], 0);
     if (!gen) return denied(this.state.error ?? 'INDEX_UNAVAILABLE');
@@ -651,7 +698,9 @@ export class StandaloneEngine {
       // list AND cheap filesystem version hints, including when there are no
       // lexical candidates. Only a drift/aged audit invokes full content reads.
       const paths = await this.provider.list();
+      this.requireScope();
       const hints = await this.provider.versionHints(paths);
+      this.requireScope();
       const drift = this.versionHints === null || paths.length !== gen.documents.length
         || paths.some((path, i) => path !== gen.documents[i]?.sourceId)
         || hints.length !== this.versionHints.length
@@ -735,6 +784,7 @@ export class StandaloneEngine {
             const candidate = await this.provider.read(row.doc.sourceId);
             bytes = hash(candidate) === row.doc.sha256 ? candidate : null;
           } catch { bytes = null; }
+          this.requireScope();
           freshness.set(row.doc.sourceId, bytes);
           if (!bytes) stale++;
         }
