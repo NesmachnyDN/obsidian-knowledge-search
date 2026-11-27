@@ -1026,7 +1026,7 @@ for(const held of [true,false])test('policy admission reentry '+accessor+' held=
 
 for(const outerRoute of ['policy','preview'] as const)
 for(const innerRoute of ['policy','preview','graph'] as const)
-test('parser accessor admission '+outerRoute+' versus '+innerRoute,async()=>{
+test('parser accessor admission '+outerRoute+' versus '+innerRoute,{timeout:5000},async()=>{
   const f=await fixture();let release=()=>{};try{
     const {engine,reader,parser,previews}=await f.open();await engine.start();await engine.whenIdle();
     engine.configureGraph({schemaVersion:'oks-06b-mapping-v1',rules:[]});
@@ -1035,8 +1035,9 @@ test('parser accessor admission '+outerRoute+' versus '+innerRoute,async()=>{
     const graph=engine.captureGraphScope({mode:'vault-wide'},context.signal);
     const host={snapshot:()=>snapshot,current:()=>true,authority:new AbortController().signal};
     const gate=new Promise<void>(r=>{release=r;});
-    const read=reader.read.bind(reader);let entered=false,idle=false;
-    reader.read=async path=>{entered=true;await gate;return read(path);};
+    const read=reader.read.bind(reader);let entered=false,idle=false,enter=()=>{};
+    const started=new Promise<void>(r=>{enter=r;});
+    reader.read=async path=>{entered=true;enter();await gate;return read(path);};
     const invoke=(route:typeof innerRoute)=>route==='policy'?engine.evaluateProcessingPolicy(host,context):
       route==='preview'?preview(engine,'two.md',()=>true):graph.read();
     const method=parser.policyMetadata;
@@ -1048,7 +1049,10 @@ test('parser accessor admission '+outerRoute+' versus '+innerRoute,async()=>{
     const outer=invoke(outerRoute);await assert.rejects(outer,outerRoute==='policy'?/BUSY/:/PARSER_BUSY/);
     assert.ok(nested);assert.ok(claimed);
     const waiting=engine.whenIdle().then(()=>{idle=true;});
-    for(let i=0;i<30&&!entered;i++)await new Promise<void>(r=>setImmediate(r));
+    // A real graph read performs asynchronous catalog I/O before reaching
+    // this gate. Wait for the observable dispatch, not a fixed microtask/
+    // event-loop count that can expire under full-suite filesystem load.
+    await Promise.race([started,nested.then(()=>{throw Error('expected gated read before completion');})]);
     assert.equal(entered,true);assert.equal(idle,false);assert.equal(owner.localRead,claimed);
     release();await nested;await waiting;
     assert.equal(previews(),innerRoute==='graph'?0:1);
@@ -1287,4 +1291,95 @@ test('B-15 admission callback exception '+callback+' '+stage,async()=>{
     await engine.processingPolicyDrain();
     assert.equal(owner.localRead,null);assert.equal(owner.localSettlement,null);
   }finally{await f.cleanup();}
+});
+
+// B-16: exceptional admission precedes evaluator/slot creation but still
+// has the original bound budget. Use observable typed codes, not regexes.
+for(const accessor of ['authority','requireOriginalProof','marking','parser'] as const)
+for(const stage of ['unbound','live','expired','cancelled','expire-throw','cancel-throw','expire-cancel','cancel-expire'] as const)
+test('B-16 exceptional policy admission '+accessor+' '+stage,async()=>{
+  const f=await fixture();try{
+    const {engine,reader,parser,previews}=await f.open();await engine.start();await engine.whenIdle();
+    const owner=ownerState(engine),abort=new AbortController(),authority=new AbortController();
+    const raw={signal:abort.signal,deadlineUnixMs:Date.now()+5000};
+    const context=stage==='unbound'?raw:bindActiveDeadline(raw,5000);
+    const snapshot=terminalPolicyFixture(reader.rootId,context.deadlineUnixMs);
+    let calls=0,reads=0,callbacks=0;
+    const read=reader.read.bind(reader);reader.read=async path=>{reads++;return read(path);};
+    if(stage==='expired')expireActiveDeadline(context);
+    if(stage==='cancelled')abort.abort();
+    const fail=()=>{
+      calls++;
+      if(stage==='expire-throw'||stage==='expire-cancel')expireActiveDeadline(context);
+      if(stage==='cancel-throw'||stage==='expire-cancel'||stage==='cancel-expire')abort.abort();
+      if(stage==='cancel-expire')expireActiveDeadline(context);
+      throw Error('synthetic admission accessor');
+    };
+    const host:PolicyHost={authority:authority.signal,current:()=>{callbacks++;return true;},snapshot:()=>{callbacks++;return snapshot;}};
+    Object.defineProperty(accessor==='parser'?parser:host,accessor==='parser'?'policyMetadata':accessor,{get:fail});
+    const expected=stage==='unbound'||stage==='live'?'CONFIG_INVALID':stage.startsWith('expire')?'TIMEOUT':'CANCELLED';
+    await assert.rejects(engine.evaluateProcessingPolicy(host,context),{code:expected});
+    assert.equal(calls,1);assert.equal(callbacks,0);assert.equal(reads,0);assert.equal(previews(),0);
+    assert.equal(owner.localRead,null);assert.equal(owner.localSettlement,null);
+    assert.equal(owner.scopeRetired,false);assert.equal(authority.signal.aborted,false);
+  }finally{await f.cleanup();}
+});
+
+for(const route of ['policy','preview'] as const)
+for(const mode of ['ordinary','host-revoke','source-revoke','pause','revision','close'] as const)
+test('B-16 exceptional admission lifecycle '+route+' '+mode,async()=>{
+  const f=await fixture();try{
+    const {engine,reader,parser,previews}=await f.open();await engine.start();await engine.whenIdle();
+    const owner=ownerState(engine),authority=new AbortController();
+    const context=bindActiveDeadline({signal:new AbortController().signal,deadlineUnixMs:Date.now()+5000},5000);
+    const snapshot=terminalPolicyFixture(reader.rootId,context.deadlineUnixMs);
+    const method=parser.policyMetadata;let calls=0,closing:Promise<void>|undefined;
+    Object.defineProperty(parser,'policyMetadata',{configurable:true,get:()=>{
+      calls++;
+      if(route==='policy'&&mode!=='ordinary')expireActiveDeadline(context);
+      if(mode==='host-revoke')authority.abort();
+      if(mode==='source-revoke')f.change(['one.md'],false);
+      if(mode==='pause')engine.cancel();
+      if(mode==='revision')engine.changed('one.md');
+      if(mode==='close')closing=engine.close();
+      throw Error('synthetic parser accessor');
+    }});
+    const result=route==='policy'?engine.evaluateProcessingPolicy({authority:authority.signal,snapshot:()=>snapshot,current:()=>true},context):
+      engine.previewPolicyMetadata('one.md',()=>true,false,authority.signal);
+    const expected=route==='policy'?(mode==='ordinary'?'CONFIG_INVALID':'CANCELLED'):
+      mode==='ordinary'?'PARSER_BUSY':mode==='source-revoke'?'SEARCH_SCOPE_INVALID':'SOURCE_CHANGED';
+    await assert.rejects(result,{code:expected});
+    assert.equal(calls,1);assert.equal(previews(),0);
+    assert.equal(owner.localRead,null);assert.equal(owner.localSettlement,null);
+    assert.equal(owner.scopeRetired,mode==='source-revoke');
+    Object.defineProperty(parser,'policyMetadata',{value:method});
+    await closing;await engine.whenIdle();
+  }finally{await f.cleanup();}
+});
+
+for(const stage of ['expire','cancel'] as const)
+test('B-16 terminal exceptional admission preserves competing physical drain '+stage,async()=>{
+  const f=await fixture();let release=()=>{};try{
+    const {engine,reader,previews}=await f.open();await engine.start();await engine.whenIdle();
+    const owner=ownerState(engine),abort=new AbortController(),authority=new AbortController();
+    const context=bindActiveDeadline({signal:abort.signal,deadlineUnixMs:Date.now()+5000},5000);
+    const snapshot=terminalPolicyFixture(reader.rootId,context.deadlineUnixMs);
+    let nested:Promise<unknown>|undefined,claimed:Promise<unknown>|null=null,entered=false,idle=false;
+    const gate=new Promise<void>(r=>{release=r;});
+    const read=reader.read.bind(reader);reader.read=async path=>{entered=true;await gate;return read(path);};
+    const host:PolicyHost={authority:authority.signal,current:()=>true,snapshot:()=>snapshot,get marking():never{
+      nested=preview(engine,'two.md',()=>true);void nested.catch(()=>{});claimed=owner.localRead;
+      if(stage==='expire')expireActiveDeadline(context);else abort.abort();
+      throw Error('synthetic reentrant accessor');
+    }};
+    const outer=engine.evaluateProcessingPolicy(host,context);
+    await assert.rejects(outer,{code:stage==='expire'?'TIMEOUT':'CANCELLED'});
+    assert.ok(nested);assert.ok(claimed);assert.equal(owner.localRead,claimed);
+    const waiting=engine.whenIdle().then(()=>{idle=true;});
+    await new Promise<void>(r=>setImmediate(r));assert.equal(entered,true);assert.equal(idle,false);
+    await assert.rejects(engine.evaluateProcessingPolicy(host,context),{code:'BUSY'});
+    assert.equal(owner.localRead,claimed);
+    release();await nested;await waiting;
+    assert.equal(previews(),1);assert.equal(owner.localRead,null);assert.equal(owner.localSettlement,null);
+  }finally{release();await f.cleanup();}
 });

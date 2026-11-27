@@ -12,7 +12,7 @@ import { verifySpan } from '../search/navigation';
 import type { MarkdownParser, PolicyMetadataParser } from './worker';
 import { EligibilityEvaluator, type PolicyHost, type PolicyEnvelope } from '../ai/processing-policy';
 import { ProviderFailure, type CallContext } from '../ai/contracts';
-import { captureCallContext } from '../ai/active-deadline';
+import { captureCallContext, deadlineFailure } from '../ai/active-deadline';
 import type { PolicyMetadataProof } from './shared';
 import { verifiedOriginalDigest, type SourceProvider } from './source';
 import type { GenerationStore } from './storage';
@@ -315,10 +315,15 @@ export class StandaloneEngine {
     if(!this.scopeCurrent())return Promise.reject(new StandaloneError('SEARCH_SCOPE_INVALID'));
     if(this.localAdmissionBusy()||!validPath(path))return Promise.reject(new StandaloneError('PARSER_BUSY'));
     const revision=this.revision;
+    const localLive=()=>this.scopeSealCurrent()&&!this.stopped&&!this.paused&&this.revision===revision
+      &&(authority===undefined||liveRevocationSignal(authority));
     let policyMetadata:PolicyMetadataParser['policyMetadata']|undefined,root:string;
     try{policyMetadata=parser.policyMetadata;root=this.provider.rootId;}
     catch{
-      return Promise.reject(new StandaloneError(this.scopeCurrent()?'PARSER_BUSY':'SEARCH_SCOPE_INVALID'));
+      // Preview has not acquired its deadline or slots yet. Preserve the
+      // ordinary admission error, but observe already-known lifecycle loss.
+      return Promise.reject(this.localSettlementError(new StandaloneError('PARSER_BUSY'),localLive,
+        ()=>undefined,()=>new StandaloneError(this.scopeSealCurrent()?'SOURCE_CHANGED':'SEARCH_SCOPE_INVALID')));
     }
     // A parser/source accessor may already have admitted another operation.
     // The following observation is the last effectful admission input.
@@ -332,8 +337,6 @@ export class StandaloneEngine {
       return Promise.reject(new StandaloneError('SOURCE_CHANGED'));
     let expired=false;
     const deadline=performance.now()+5000;
-    const localLive=()=>this.scopeSealCurrent()&&!this.stopped&&!this.paused&&this.revision===revision
-      &&(authority===undefined||liveRevocationSignal(authority));
     const terminal=()=>expired||performance.now()>=deadline?new StandaloneError('PARSER_TIMEOUT'):undefined;
     const revoked=()=>new StandaloneError('SOURCE_CHANGED');
     const confirm=()=>{
@@ -398,11 +401,22 @@ export class StandaloneEngine {
     const revision=this.revision;
     let authority:AbortSignal|undefined,operation:CallContext,requireOriginalProof:PolicyHost['requireOriginalProof'],
       marking:PolicyHost['marking'],policyMetadata:PolicyMetadataParser['policyMetadata']|undefined;
+    // A throwing authority accessor has not supplied a seal. Do not retry
+    // it; preserve ordinary configuration failure unless a known authority
+    // or the incoming bound operation has already terminated.
+    let authorityCaptured=false;
+    const localLive=()=>this.scopeSealCurrent()&&!this.stopped&&!this.paused&&this.revision===revision
+      &&(!authorityCaptured||(!this.revocableScope&&authority===undefined)
+        ||authority!==this.sourceRetirementSignal&&liveRevocationSignal(authority));
+    const revoked=()=>new ProviderFailure('CANCELLED');
     try{
-      authority=host.authority;operation=captureCallContext(context);
+      authority=host.authority;authorityCaptured=true;operation=captureCallContext(context);
       requireOriginalProof=host.requireOriginalProof;marking=host.marking;policyMetadata=parser.policyMetadata;
     }catch{
-      return Promise.reject(new ProviderFailure(this.scopeCurrent()?'CONFIG_INVALID':'CANCELLED'));
+      // No evaluator or reservation exists yet. The incoming context is
+      // already the canonical bound identity when a budget exists.
+      return Promise.reject(this.localSettlementError(new ProviderFailure('CONFIG_INVALID'),localLive,
+        ()=>deadlineFailure(context),revoked));
     }
     // All accessor-bearing inputs are captured before this final claim.
     // Reentrant admission wins the slot; never overwrite its reservations.
@@ -413,8 +427,6 @@ export class StandaloneEngine {
     if((this.revocableScope||authority!==undefined)&&(!liveRevocationSignal(authority)
       ||authority===this.sourceRetirementSignal))
       return Promise.reject(new ProviderFailure('CANCELLED'));
-    const localLive=()=>this.scopeSealCurrent()&&!this.stopped&&!this.paused&&this.revision===revision
-      &&(authority===undefined||liveRevocationSignal(authority));
     const live=()=>this.scopeCurrent()&&localLive();
     const callback=<T>(call:()=>T,denied:T):T=>{
       if(!live())return denied;
@@ -461,7 +473,7 @@ export class StandaloneEngine {
       observe();confirm(envelope);
       if(envelope.allowed&&!current())throw new ProviderFailure('CANCELLED');
     },observePublication,confirm,error=>this.localSettlementError(error,localLive,
-      ()=>evaluator.publicationDeadlineFailure(operation),()=>new ProviderFailure('CANCELLED')));
+      ()=>evaluator.publicationDeadlineFailure(operation),revoked));
   }
   processingPolicyDrain():Promise<void>{
     const observe=()=>{this.scopeCurrent();};
