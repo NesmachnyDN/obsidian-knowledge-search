@@ -1174,3 +1174,117 @@ test('early bound policy denial '+reason+' '+stage,async()=>{
     assert.equal(owner.localRead,null);assert.equal(owner.localSettlement,null);
   }finally{await f.cleanup();}
 });
+
+// B-15: a final callback cannot replace an already-terminal operation budget.
+for(const route of ['policy','preview'] as const)
+for(const stage of ['live','timeout','cancel','timeout-then-cancel','cancel-then-timeout','timeout-source-revoke','timeout-host-revoke'] as const)
+for(const behavior of ['true','false','throw'] as const){
+  if(route==='preview'&&stage.includes('cancel'))continue;
+  test('B-15 terminal classification '+route+' '+stage+' '+behavior,async t=>{
+    const f=await fixture();try{
+      const {engine,reader,previews}=await f.open();await engine.start();await engine.whenIdle();
+      const owner=ownerState(engine),abort=new AbortController(),authority=new AbortController();
+      const context=bindActiveDeadline({signal:abort.signal,deadlineUnixMs:Date.now()+5000},5000);
+      const snapshot=terminalPolicyFixture(reader.rootId,context.deadlineUnixMs);
+      if(route==='preview'&&stage.startsWith('timeout'))t.mock.timers.enable({apis:['setTimeout']});
+      let finalCalls=0;
+      const expire=()=>{if(route==='policy')expireActiveDeadline(context);else t.mock.timers.tick(5001);};
+      const current=()=>{
+        if(owner.localRead!==null)return true;
+        assert.ok(owner.localSettlement);finalCalls++;
+        if(stage.startsWith('timeout'))expire();
+        if(stage.includes('cancel'))abort.abort();
+        if(stage==='cancel-then-timeout')expire();
+        if(stage==='timeout-source-revoke')f.change(['one.md']);
+        if(stage==='timeout-host-revoke')authority.abort();
+        if(behavior==='throw')throw Error('synthetic final failure');
+        return behavior==='true';
+      };
+      const pending=route==='policy'?engine.evaluateProcessingPolicy({snapshot:()=>snapshot,current,authority:authority.signal},context):
+        engine.previewPolicyMetadata('one.md',current,false,authority.signal);
+      const revoked=stage.endsWith('revoke');
+      const denied=route==='policy'?/CANCELLED/:/SOURCE_CHANGED/;
+      const expected=revoked?denied:stage.startsWith('timeout')?/TIMEOUT/:stage.startsWith('cancel')?denied:
+        behavior==='throw'?/synthetic final failure/:behavior==='false'?denied:null;
+      if(expected)await assert.rejects(pending,expected);
+      else assert.ok(await pending);
+      await engine.processingPolicyDrain();await engine.whenIdle();
+      assert.equal(finalCalls,1);assert.equal(previews(),1);
+      assert.equal(owner.localRead,null);assert.equal(owner.localSettlement,null);
+      assert.equal(owner.scopeRetired,stage==='timeout-source-revoke');
+    }finally{t.mock.restoreAll();t.mock.timers.reset();await f.cleanup();}
+  });
+}
+
+// A terminal logical denial is immutable across late physical success/error,
+// but the original physical reservation and owner observation survive it.
+for(const route of ['policy','preview'] as const)
+for(const stage of ['timeout','cancel'] as const)
+for(const late of ['return','throw'] as const){
+  if(route==='preview'&&stage==='cancel')continue;
+  test('B-15 terminal late physical '+route+' '+stage+' '+late,async t=>{
+    const f=await fixture();let release=()=>{};try{
+      const {engine,reader,previews}=await f.open();await engine.start();await engine.whenIdle();
+      const owner=ownerState(engine),abort=new AbortController(),authority=new AbortController();
+      const context=bindActiveDeadline({signal:abort.signal,deadlineUnixMs:Date.now()+5000},5000);
+      const snapshot=terminalPolicyFixture(reader.rootId,context.deadlineUnixMs);
+      const read=reader.read.bind(reader);
+      let entered=()=>{},reads=0,idle=false;
+      const started=new Promise<void>(r=>{entered=r;});
+      const gate=new Promise<void>(r=>{release=r;});
+      reader.read=async path=>{reads++;entered();await gate;
+        if(late==='throw')throw Error('synthetic late read failure');
+        return read(path);
+      };
+      t.mock.timers.enable({apis:['setTimeout']});
+      const host={snapshot:()=>snapshot,current:()=>true,authority:authority.signal};
+      const pending=route==='policy'?engine.evaluateProcessingPolicy(host,context):
+        engine.previewPolicyMetadata('one.md',()=>true,false,authority.signal);
+      const settled=route==='preview'?assert.rejects(pending,/PARSER_TIMEOUT/):pending.then(value=>{
+        assert.ok('allowed' in value);assert.equal(value.allowed,false);assert.equal(value.reason,stage==='timeout'?'timeout':'cancelled');
+      });
+      await started;const claimed=owner.localRead;assert.ok(claimed);
+      if(stage==='timeout')t.mock.timers.tick(5001);else abort.abort();
+      await settled;
+      assert.equal(owner.localRead,claimed);assert.equal(owner.localSettlement,null);
+      await assert.rejects(engine.evaluateProcessingPolicy(host,context),/BUSY/);
+      await assert.rejects(preview(engine,'two.md',()=>true),/PARSER_BUSY/);
+      const waiting=engine.whenIdle().then(()=>{idle=true;});
+      await new Promise<void>(r=>setImmediate(r));assert.equal(idle,false);
+      // Retirement is still observed after an already published denial.
+      f.change(['one.md'],false);
+      release();await waiting;
+      assert.equal(owner.scopeRetired,true);
+      assert.equal(owner.localRead,null);assert.equal(owner.localSettlement,null);
+      assert.equal(reads,1);assert.equal(previews(),0);
+    }finally{release();t.mock.timers.reset();await f.cleanup();}
+  });
+}
+
+for(const callback of ['current','snapshot'] as const)
+for(const stage of ['unbound','bound-live','bound-timeout','bound-cancel'] as const)
+test('B-15 admission callback exception '+callback+' '+stage,async()=>{
+  const f=await fixture();try{
+    const {engine,reader,previews}=await f.open();await engine.start();await engine.whenIdle();
+    const owner=ownerState(engine),abort=new AbortController();
+    const raw={signal:abort.signal,deadlineUnixMs:Date.now()+5000};
+    const context=stage==='unbound'?raw:bindActiveDeadline(raw,5000);
+    const snapshot=terminalPolicyFixture(reader.rootId,context.deadlineUnixMs);
+    let calls=0;
+    const failure=():never=>{
+      calls++;
+      if(stage==='bound-timeout')expireActiveDeadline(context);
+      if(stage==='bound-cancel')abort.abort();
+      throw Error('synthetic admission failure');
+    };
+    const envelope=await evaluate(engine,{
+      snapshot:()=>callback==='snapshot'?failure():snapshot,
+      current:()=>callback==='current'?failure():true
+    },context);
+    assert.equal(envelope.allowed,false);
+    assert.equal(envelope.reason,stage==='bound-timeout'?'timeout':stage==='bound-cancel'?'cancelled':'source-unresolved');
+    assert.equal(calls,1);assert.equal(previews(),0);
+    await engine.processingPolicyDrain();
+    assert.equal(owner.localRead,null);assert.equal(owner.localSettlement,null);
+  }finally{await f.cleanup();}
+});

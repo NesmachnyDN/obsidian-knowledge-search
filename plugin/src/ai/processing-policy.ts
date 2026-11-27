@@ -104,8 +104,14 @@ export class EligibilityEvaluator {
     // Owner observation is the engine's responsibility before its final
     // callback-free publication cut. No host callback is permitted here.
     if(!this.publicationContext)throw new ProviderFailure('CANCELLED');
-    const terminal=deadlineFailure(this.publicationContext);
+    const terminal=this.publicationDeadlineFailure();
     if(terminal)throw terminal;
+  }
+  /** Exceptional publication uses the same budget without replacing an
+   * ordinary error from an unbound context or an early evaluator failure. */
+  publicationDeadlineFailure(fallback?:CallContext):ProviderFailure|undefined {
+    const context=this.publicationContext??fallback;
+    return context?deadlineFailure(context):undefined;
   }
   get physicallyPending():boolean{return this.pending;}
   async drain():Promise<void>{await this.dependency;}

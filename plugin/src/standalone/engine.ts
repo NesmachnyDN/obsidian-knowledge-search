@@ -297,6 +297,14 @@ export class StandaloneEngine {
     this.localSettlement=logical;
     return logical;
   }
+  /** Observe the source owner on every exceptional exit, then classify
+   * using the same lifecycle seals and terminal budget as success. A live
+   * budget must not mask ordinary callback errors. No callback after the cut. */
+  private localSettlementError(error:unknown,localLive:()=>boolean,
+    terminal:()=>unknown,revoked:()=>Error):unknown{
+    if(!this.scopeCurrent()||!localLive())return revoked();
+    return terminal()??error;
+  }
   private schedulePendingLocalWork():void{
     if(this.scopeCurrent()&&!this.stopped&&!this.paused&&(this.all||this.pending.size))this.schedule();
   }
@@ -326,10 +334,12 @@ export class StandaloneEngine {
     const deadline=performance.now()+5000;
     const localLive=()=>this.scopeSealCurrent()&&!this.stopped&&!this.paused&&this.revision===revision
       &&(authority===undefined||liveRevocationSignal(authority));
+    const terminal=()=>expired||performance.now()>=deadline?new StandaloneError('PARSER_TIMEOUT'):undefined;
+    const revoked=()=>new StandaloneError('SOURCE_CHANGED');
     const confirm=()=>{
-      if(!localLive())throw new StandaloneError('SOURCE_CHANGED');
-      if(expired||performance.now()>=deadline)throw new StandaloneError('PARSER_TIMEOUT');
-      if(!localLive())throw new StandaloneError('SOURCE_CHANGED');
+      if(!localLive())throw revoked();
+      const failure=terminal();if(failure)throw failure;
+      if(!localLive())throw revoked();
     };
     const observe=()=>{
       if(!this.scopeCurrent())throw new StandaloneError('SOURCE_CHANGED');
@@ -341,8 +351,7 @@ export class StandaloneEngine {
         observe();confirm();
         if(!allowed)throw new StandaloneError('SOURCE_CHANGED');
       }catch(error){
-        observe();
-        throw error;
+        throw this.localSettlementError(error,localLive,terminal,revoked);
       }
     };
     const observePublication=()=>{
@@ -376,7 +385,7 @@ export class StandaloneEngine {
       void physical.then(resolve,reject);
     });
     const logical=this.settleLocalPolicy(physical,outcome,check,observePublication,confirm,
-      error=>this.scopeCurrent()?error:new StandaloneError('SOURCE_CHANGED'));
+      error=>this.localSettlementError(error,localLive,terminal,revoked));
     const clear=()=>clearTimeout(timer);
     void logical.then(clear,clear);
     return logical;
@@ -451,7 +460,8 @@ export class StandaloneEngine {
     return this.settleLocalPolicy(physical,outcome,envelope=>{
       observe();confirm(envelope);
       if(envelope.allowed&&!current())throw new ProviderFailure('CANCELLED');
-    },observePublication,confirm,error=>this.scopeCurrent()?error:new ProviderFailure('CANCELLED'));
+    },observePublication,confirm,error=>this.localSettlementError(error,localLive,
+      ()=>evaluator.publicationDeadlineFailure(operation),()=>new ProviderFailure('CANCELLED')));
   }
   processingPolicyDrain():Promise<void>{
     const observe=()=>{this.scopeCurrent();};
