@@ -7,6 +7,12 @@ type Budget = { readonly limitMs: number; remaining(): number; expire(): void; c
 const budgets = new WeakMap<CallContext, Budget>();
 const timeout = (): never => { throw new ProviderFailure('TIMEOUT'); };
 
+/** Capture accessor-bearing input before local admission, without renewing an
+ * already-bound operation or losing its elapsed-time budget identity. */
+export function captureCallContext(context:CallContext):CallContext {
+  return budgets.has(context)?context:Object.freeze({signal:context.signal,deadlineUnixMs:context.deadlineUnixMs});
+}
+
 export function bindActiveDeadline(context: CallContext, maxMs: number,
   grantExpiresUnixMs = context.deadlineUnixMs): CallContext {
   if (!Number.isSafeInteger(context.deadlineUnixMs) || !Number.isSafeInteger(maxMs)

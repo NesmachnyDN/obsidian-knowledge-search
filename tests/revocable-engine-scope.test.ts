@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {Hash} from 'node:crypto';
 import {configDigest} from '../plugin/src/ai/disclosure';
 import type {ProviderConfig,CallContext} from '../plugin/src/ai/contracts';
+import {bindActiveDeadline,captureCallContext,expireActiveDeadline} from '../plugin/src/ai/active-deadline';
 import type {PolicySnapshot,PolicyHost} from '../plugin/src/ai/processing-policy';
 import {mkdtemp,writeFile,rm,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -52,7 +53,7 @@ async function fixture(files:Record<string,string>={'one.md':'# unique one.md','
       policyMetadata:async(path:string,bytes:Uint8Array,id:string)=>{previews++;onPreview();return parsePolicyMetadata(path,bytes,id,hash(bytes));},close:async()=>{}};
     const engine=new StandaloneEngine(reader,store,parser);
     engines.push(engine);
-    return {engine,reader,store,parses:()=>parses,onParse:(cb:()=>void)=>{onParse=cb;},previews:()=>previews,onPreview:(cb:()=>void)=>{onPreview=cb;}};
+    return {engine,reader,store,parser,parses:()=>parses,onParse:(cb:()=>void)=>{onParse=cb;},previews:()=>previews,onPreview:(cb:()=>void)=>{onPreview=cb;}};
   };
   return {open,change,onConfigRead:(cb:()=>void)=>{configHook=cb;},write:(path:string,text:string)=>writeFile(join(root,path),text),cleanup:async()=>{for(const e of engines)await e.close();for(const l of leases)l.dispose();await rm(root,{recursive:true,force:true});}};
 }
@@ -941,4 +942,188 @@ test('host seal revoked at physical read settlement '+route,async t=>{
     // Host-only invalidation never retires the independent source owner.
     assert.equal(owner.scopeRetired,false);assert.ok(owner.generation);
   }finally{await f.cleanup();}
+});
+
+// B-12: a typed denial is still source-bearing evidence, not an exemption
+// from the existing authority at the final direct publication cut.
+for(const reason of ['source-stale','private','marking-denied','restricted'] as const)
+for(const retire of [true,false])test('denied policy publication '+reason+' retired='+retire,async()=>{
+  const text=reason==='private'?'---\nllm_processing: private\n---\n# unique one.md':'# unique one.md';
+  const f=await fixture({'one.md':text});try{
+    const {engine,reader}=await f.open();await engine.start();await engine.whenIdle();
+    const owner=ownerState(engine),authority=new AbortController();
+    const context={signal:new AbortController().signal,deadlineUnixMs:Date.now()+5000};
+    const base=terminalPolicyFixture(reader.rootId,context.deadlineUnixMs);
+    const snapshot:PolicySnapshot={...base,subjects:[{...base.subjects[0]!,expectedSha256:hash(text)}],
+      profile:{...base.profile!,classification:'external'},
+      restrictions:reason==='restricted'?[{scope:'all'}]:[]};
+    let reads=0,observed=false,held=false;
+    const read=reader.read.bind(reader);
+    reader.read=async path=>{
+      reads++;const bytes=await read(path);
+      return reason==='source-stale'&&reads===2?Buffer.from('changed synthetic bytes'):bytes;
+    };
+    f.onConfigRead(()=>{
+      if(observed||!(new Error().stack??'').includes('observePublication'))return;
+      observed=true;held=owner.localSettlement!==null;
+      if(retire)authority.abort();
+    });
+    const result=engine.evaluateProcessingPolicy({snapshot:()=>snapshot,current:()=>!authority.signal.aborted,
+      marking:()=>reason!=='marking-denied',authority:authority.signal},context);
+    if(retire)await assert.rejects(result,/CANCELLED/);
+    else{
+      const envelope=await result;
+      assert.equal(envelope.allowed,false);assert.equal(envelope.reason,reason);
+      assert.equal(envelope.rootId,reader.rootId);assert.ok(envelope.bindingDigest);
+      assert.equal(envelope.sourceVersions.length,reason==='restricted'?0:1);
+    }
+    assert.equal(observed,true);assert.equal(held,true);
+    assert.equal(owner.scopeRetired,false);assert.ok(owner.generation);
+    await engine.processingPolicyDrain();assert.equal(owner.localRead,null);assert.equal(owner.localSettlement,null);
+  }finally{await f.cleanup();}
+});
+
+// B-13: accessors run before policy admission. A reentrant operation may
+// claim the existing slot first; the outer operation must not overwrite it.
+for(const accessor of ['authority','signal','deadlineUnixMs','requireOriginalProof','marking'] as const)
+for(const held of [true,false])test('policy admission reentry '+accessor+' held='+held,async()=>{
+  const f=await fixture();let release=()=>{};try{
+    const {engine,reader,previews}=await f.open();await engine.start();await engine.whenIdle();
+    const owner=ownerState(engine),authority=new AbortController();
+    const context={signal:new AbortController().signal,deadlineUnixMs:Date.now()+5000};
+    const snapshot=terminalPolicyFixture(reader.rootId,context.deadlineUnixMs);
+    const read=reader.read.bind(reader);let entered=false,finished=false,idle=false;
+    const gate=new Promise<void>(r=>{release=r;});
+    reader.read=async path=>{
+      if(path==='two.md'){entered=true;if(held)await gate;finished=true;}
+      return read(path);
+    };
+    let nested:Promise<unknown>|undefined,claimed:Promise<unknown>|null=null;
+    const reenter=()=>{
+      if(nested)return;
+      nested=preview(engine,'two.md',()=>true);void nested.catch(()=>{});
+      claimed=owner.localRead;
+    };
+    const host:PolicyHost={snapshot:()=>snapshot,current:()=>true,authority:authority.signal};
+    if(accessor==='signal')Object.defineProperty(context,'signal',{get:()=>{reenter();return new AbortController().signal;}});
+    else if(accessor==='deadlineUnixMs')Object.defineProperty(context,'deadlineUnixMs',{get:()=>{reenter();return snapshot.deadlineUnixMs;}});
+    else Object.defineProperty(host,accessor,{get:()=>{reenter();return accessor==='authority'?authority.signal:undefined;}});
+    const outer=engine.evaluateProcessingPolicy(host,context);void outer.catch(()=>{});
+    await assert.rejects(outer,/BUSY/);
+    assert.ok(nested);assert.ok(claimed);
+    if(held){
+      const waiting=engine.whenIdle().then(()=>{idle=true;});
+      await new Promise<void>(r=>setImmediate(r));
+      assert.equal(entered,true);assert.equal(finished,false);assert.equal(idle,false);
+      assert.equal(owner.localRead,claimed);
+      release();await waiting;
+    }
+    const proof=await nested;assert.ok(proof);
+    assert.equal(previews(),1);assert.equal(finished,true);
+    await engine.whenIdle();assert.equal(owner.localRead,null);assert.equal(owner.localSettlement,null);
+  }finally{release();await f.cleanup();}
+});
+
+for(const outerRoute of ['policy','preview'] as const)
+for(const innerRoute of ['policy','preview','graph'] as const)
+test('parser accessor admission '+outerRoute+' versus '+innerRoute,async()=>{
+  const f=await fixture();let release=()=>{};try{
+    const {engine,reader,parser,previews}=await f.open();await engine.start();await engine.whenIdle();
+    engine.configureGraph({schemaVersion:'oks-06b-mapping-v1',rules:[]});
+    const owner=ownerState(engine),context={signal:new AbortController().signal,deadlineUnixMs:Date.now()+5000};
+    const snapshot=terminalPolicyFixture(reader.rootId,context.deadlineUnixMs);
+    const graph=engine.captureGraphScope({mode:'vault-wide'},context.signal);
+    const host={snapshot:()=>snapshot,current:()=>true,authority:new AbortController().signal};
+    const gate=new Promise<void>(r=>{release=r;});
+    const read=reader.read.bind(reader);let entered=false,idle=false;
+    reader.read=async path=>{entered=true;await gate;return read(path);};
+    const invoke=(route:typeof innerRoute)=>route==='policy'?engine.evaluateProcessingPolicy(host,context):
+      route==='preview'?preview(engine,'two.md',()=>true):graph.read();
+    const method=parser.policyMetadata;
+    let fired=false,nested:Promise<unknown>|undefined,claimed:Promise<unknown>|null=null;
+    Object.defineProperty(parser,'policyMetadata',{get:()=>{
+      if(!fired){fired=true;nested=invoke(innerRoute);void nested.catch(()=>{});claimed=owner.localRead;}
+      return method;
+    }});
+    const outer=invoke(outerRoute);await assert.rejects(outer,outerRoute==='policy'?/BUSY/:/PARSER_BUSY/);
+    assert.ok(nested);assert.ok(claimed);
+    const waiting=engine.whenIdle().then(()=>{idle=true;});
+    for(let i=0;i<30&&!entered;i++)await new Promise<void>(r=>setImmediate(r));
+    assert.equal(entered,true);assert.equal(idle,false);assert.equal(owner.localRead,claimed);
+    release();await nested;await waiting;
+    assert.equal(previews(),innerRoute==='graph'?0:1);
+    assert.equal(owner.localRead,null);assert.equal(owner.localSettlement,null);
+  }finally{release();await f.cleanup();}
+});
+
+for(const mode of ['throw','pause','revision','close','host-revoke','source-revoke'] as const)
+test('policy accessor invalidation '+mode,async()=>{
+  const f=await fixture();try{
+    const {engine,reader,previews}=await f.open();await engine.start();await engine.whenIdle();
+    const context={signal:new AbortController().signal,deadlineUnixMs:Date.now()+5000};
+    const snapshot=terminalPolicyFixture(reader.rootId,context.deadlineUnixMs);
+    const authority=new AbortController();let closing:Promise<void>|undefined;
+    const host={snapshot:()=>snapshot,current:()=>!authority.signal.aborted,get authority(){
+      if(mode==='throw')throw Error('synthetic getter failure');
+      if(mode==='pause')engine.cancel();
+      if(mode==='revision')engine.changed('one.md');
+      if(mode==='close')closing=engine.close();
+      if(mode==='host-revoke')authority.abort();
+      if(mode==='source-revoke')f.change(['one.md']);
+      return authority.signal;
+    }};
+    await assert.rejects(engine.evaluateProcessingPolicy(host,context),
+      mode==='throw'?/CONFIG_INVALID/:/BUSY|CANCELLED/);
+    await closing;await engine.whenIdle();assert.equal(previews(),0);
+    const owner=ownerState(engine);assert.equal(owner.localRead,null);assert.equal(owner.localSettlement,null);
+    if(mode==='source-revoke')assert.equal(owner.scopeRetired,true);
+    if(mode==='throw'||mode==='host-revoke')assert.equal((await preview(engine,'one.md',()=>true)).sourceId,'one.md');
+  }finally{await f.cleanup();}
+});
+
+test('throwing accessor cannot release a nested physical reservation',async()=>{
+  const f=await fixture();let release=()=>{};try{
+    const {engine,reader}=await f.open();await engine.start();await engine.whenIdle();
+    const owner=ownerState(engine),context={signal:new AbortController().signal,deadlineUnixMs:Date.now()+5000};
+    const snapshot=terminalPolicyFixture(reader.rootId,context.deadlineUnixMs);
+    const gate=new Promise<void>(r=>{release=r;});
+    const read=reader.read.bind(reader);let entered=false,idle=false,nested:Promise<unknown>|undefined;
+    reader.read=async path=>{entered=true;await gate;return read(path);};
+    const host:PolicyHost={snapshot:()=>snapshot,current:()=>true,get authority():AbortSignal{
+      nested=preview(engine,'two.md',()=>true);void nested.catch(()=>{});
+      throw Error('synthetic getter failure');
+    }};
+    await assert.rejects(engine.evaluateProcessingPolicy(host,context),/CONFIG_INVALID/);
+    assert.ok(nested);assert.ok(owner.localRead);
+    const waiting=engine.whenIdle().then(()=>{idle=true;});
+    await new Promise<void>(r=>setImmediate(r));
+    assert.equal(entered,true);assert.equal(idle,false);assert.ok(owner.localRead);
+    release();await nested;await waiting;assert.equal(owner.localRead,null);
+  }finally{release();await f.cleanup();}
+});
+
+test('bound context capture retains identity and terminal budget',async()=>{
+  const context=bindActiveDeadline({signal:new AbortController().signal,deadlineUnixMs:Date.now()+5000},5000);
+  assert.equal(captureCallContext(context),context);
+  expireActiveDeadline(context);
+  assert.throws(()=>bindActiveDeadline(captureCallContext(context),5000),/TIMEOUT/);
+  const mutable={signal:new AbortController().signal,deadlineUnixMs:Date.now()+5000};
+  const captured=captureCallContext(mutable);
+  assert.notEqual(captured,mutable);assert.equal(captured.signal,mutable.signal);
+  assert.equal(captured.deadlineUnixMs,mutable.deadlineUnixMs);assert.ok(Object.isFrozen(captured));
+});
+
+test('ordinary denied envelope does not outlive original publication deadline',async t=>{
+  const f=await fixture();try{
+    const {engine,reader}=await f.open();await engine.start();await engine.whenIdle();
+    const context={signal:new AbortController().signal,deadlineUnixMs:Date.now()+5000};
+    const snapshot={...terminalPolicyFixture(reader.rootId,context.deadlineUnixMs),restrictions:[{scope:'all' as const}]};
+    let observed=false;
+    f.onConfigRead(()=>{
+      if(observed||!(new Error().stack??'').includes('observePublication'))return;
+      observed=true;t.mock.method(Date,'now',()=>context.deadlineUnixMs+1);
+    });
+    await assert.rejects(evaluate(engine,{snapshot:()=>snapshot,current:()=>true},context),/TIMEOUT/);
+    assert.equal(observed,true);
+  }finally{t.mock.restoreAll();await f.cleanup();}
 });

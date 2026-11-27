@@ -12,6 +12,7 @@ import { verifySpan } from '../search/navigation';
 import type { MarkdownParser, PolicyMetadataParser } from './worker';
 import { EligibilityEvaluator, type PolicyHost, type PolicyEnvelope } from '../ai/processing-policy';
 import { ProviderFailure, type CallContext } from '../ai/contracts';
+import { captureCallContext } from '../ai/active-deadline';
 import type { PolicyMetadataProof } from './shared';
 import { verifiedOriginalDigest, type SourceProvider } from './source';
 import type { GenerationStore } from './storage';
@@ -242,6 +243,12 @@ export class StandaloneEngine {
       await pending.catch(()=>{});
     }
   }
+  /** Callback-free admission predicate shared by parser-backed routes.
+   * Observe all effectful inputs before the final test and reserve without
+   * invoking a port between that test and the promise assignments. */
+  private localAdmissionBusy():boolean {
+    return this.stopped||!this.initialized||this.paused||!!(this.work||this.localRead||this.localSettlement);
+  }
   /** A logical denial does not release an outstanding physical operation. */
   private releaseLocalRead(physical:Promise<unknown>):void {
     const live=this.scopeCurrent();
@@ -276,7 +283,7 @@ export class StandaloneEngine {
             }
           }catch(error){reject(normalize(error));}
           finally{
-            this.localSettlement=null;
+            if(this.localSettlement===logical)this.localSettlement=null;
             // Do not call another host port between the terminal fence and
             // publication. Schedule pending work only after direct settlement.
             queueMicrotask(()=>this.schedulePendingLocalWork());
@@ -298,14 +305,23 @@ export class StandaloneEngine {
   previewPolicyMetadata(path:string,current:()=>boolean,requireOriginalProof=false,authority?:AbortSignal):Promise<PolicyMetadataProof> {
     const parser=this.parser as MarkdownParser & Partial<PolicyMetadataParser>;
     if(!this.scopeCurrent())return Promise.reject(new StandaloneError('SEARCH_SCOPE_INVALID'));
-    if(this.stopped||!this.initialized||this.paused||this.work||this.localRead||this.localSettlement||!validPath(path)||!parser.policyMetadata)
-      return Promise.reject(new StandaloneError('PARSER_BUSY'));
+    if(this.localAdmissionBusy()||!validPath(path))return Promise.reject(new StandaloneError('PARSER_BUSY'));
+    const revision=this.revision;
+    let policyMetadata:PolicyMetadataParser['policyMetadata']|undefined,root:string;
+    try{policyMetadata=parser.policyMetadata;root=this.provider.rootId;}
+    catch{
+      return Promise.reject(new StandaloneError(this.scopeCurrent()?'PARSER_BUSY':'SEARCH_SCOPE_INVALID'));
+    }
+    // A parser/source accessor may already have admitted another operation.
+    // The following observation is the last effectful admission input.
+    if(!this.scopeCurrent())return Promise.reject(new StandaloneError('SEARCH_SCOPE_INVALID'));
+    if(this.localAdmissionBusy()||!policyMetadata)return Promise.reject(new StandaloneError('PARSER_BUSY'));
+    if(this.revision!==revision)return Promise.reject(new StandaloneError('SOURCE_CHANGED'));
     // Callback-only legacy callers have no native scope. They cannot acquire
     // a revocable engine lease without an actual host retirement signal.
     if((this.revocableScope||authority!==undefined)&&(!liveRevocationSignal(authority)
       ||authority===this.sourceRetirementSignal))
       return Promise.reject(new StandaloneError('SOURCE_CHANGED'));
-    const revision=this.revision,root=this.provider.rootId;
     let expired=false;
     const deadline=performance.now()+5000;
     const localLive=()=>this.scopeSealCurrent()&&!this.stopped&&!this.paused&&this.revision===revision
@@ -348,7 +364,7 @@ export class StandaloneEngine {
     const physical=Promise.resolve().then(async()=>{
       check();const {bytes,digest}=await read();check();
       if(bytes.byteLength>BOUNDS.fileBytes)throw new StandaloneError('SOURCE_LIMIT');
-      const sha=hash(bytes),proof=await parser.policyMetadata!(path,bytes,root);check();
+      const sha=hash(bytes),proof=await Reflect.apply(policyMetadata,parser,[path,bytes,root]);check();
       const renewed=await read();check();
       if(proof.sourceId!==path||proof.sha256!==sha||proof.scopeId!==root||hash(renewed.bytes)!==sha||renewed.digest!==digest)
         throw new StandaloneError('SOURCE_CHANGED');
@@ -369,13 +385,25 @@ export class StandaloneEngine {
   evaluateProcessingPolicy(host:PolicyHost,context:CallContext):Promise<PolicyEnvelope>{
     const parser=this.parser as MarkdownParser & Partial<PolicyMetadataParser>;
     if(!this.scopeCurrent())return Promise.reject(new ProviderFailure('CANCELLED'));
-    if(this.stopped||!this.initialized||this.paused||this.work||this.localRead||this.localSettlement||!parser.policyMetadata)
-      return Promise.reject(new ProviderFailure('BUSY'));
-    const authority=host.authority,operationSignal=context.signal;
+    if(this.localAdmissionBusy())return Promise.reject(new ProviderFailure('BUSY'));
+    const revision=this.revision;
+    let authority:AbortSignal|undefined,operation:CallContext,requireOriginalProof:PolicyHost['requireOriginalProof'],
+      marking:PolicyHost['marking'],policyMetadata:PolicyMetadataParser['policyMetadata']|undefined;
+    try{
+      authority=host.authority;operation=captureCallContext(context);
+      requireOriginalProof=host.requireOriginalProof;marking=host.marking;policyMetadata=parser.policyMetadata;
+    }catch{
+      return Promise.reject(new ProviderFailure(this.scopeCurrent()?'CONFIG_INVALID':'CANCELLED'));
+    }
+    // All accessor-bearing inputs are captured before this final claim.
+    // Reentrant admission wins the slot; never overwrite its reservations.
+    if(!this.scopeCurrent())return Promise.reject(new ProviderFailure('CANCELLED'));
+    if(this.localAdmissionBusy()||!policyMetadata)return Promise.reject(new ProviderFailure('BUSY'));
+    if(this.revision!==revision)return Promise.reject(new ProviderFailure('CANCELLED'));
+    const operationSignal=operation.signal;
     if((this.revocableScope||authority!==undefined)&&(!liveRevocationSignal(authority)
       ||authority===this.sourceRetirementSignal))
       return Promise.reject(new ProviderFailure('CANCELLED'));
-    const revision=this.revision;
     const localLive=()=>this.scopeSealCurrent()&&!this.stopped&&!this.paused&&this.revision===revision
       &&(authority===undefined||liveRevocationSignal(authority));
     const live=()=>this.scopeCurrent()&&localLive();
@@ -389,9 +417,9 @@ export class StandaloneEngine {
       return live()?value:denied;
     };
     const current=()=>callback(()=>host.current(),false);
-    const evaluator=new EligibilityEvaluator(this.provider,{policyMetadata:(path,bytes,root)=>parser.policyMetadata!(path,bytes,root)},
-      {snapshot:()=>callback(()=>host.snapshot(),null),current,...(host.requireOriginalProof?{requireOriginalProof:true as const}:{}),
-        ...(host.marking?{marking:(proof,original)=>callback(()=>host.marking!(proof,original),false)}:{})},
+    const evaluator=new EligibilityEvaluator(this.provider,{policyMetadata:(path,bytes,root)=>Reflect.apply(policyMetadata,parser,[path,bytes,root])},
+      {snapshot:()=>callback(()=>host.snapshot(),null),current,...(requireOriginalProof?{requireOriginalProof:true as const}:{}),
+        ...(marking?{marking:(proof,original)=>callback(()=>Reflect.apply(marking,host,[proof,original]),false)}:{})},
       ()=>{
         // Host revocation is independent of source retirement. Observe the
         // source even on host-denied paths; never process a returned proof
@@ -399,13 +427,17 @@ export class StandaloneEngine {
         if(!this.scopeCurrent()||authority!==undefined&&!liveRevocationSignal(authority))
           throw new ProviderFailure('CANCELLED');
       });
-    const result=Promise.resolve().then(()=>evaluator.evaluate(context));
+    const result=Promise.resolve().then(()=>evaluator.evaluate(operation));
     const physical=result.then(()=>evaluator.drain(),()=>evaluator.drain());
     const outcome=result.then(envelope=>evaluator.physicallyPending?envelope:physical.then(()=>envelope));
     const confirm=(envelope:PolicyEnvelope)=>{
-      if(!this.scopeSealCurrent())throw new ProviderFailure('CANCELLED');
-      if(envelope.allowed){
-        evaluator.assertPublicationDeadline();
+      // Denied envelopes also contain source identity and policy evidence.
+      // Host/source retirement or a local lifecycle change fences them too.
+      if(!localLive())throw new ProviderFailure('CANCELLED');
+      // Keep already-terminal typed cancellation/timeout denials. Every
+      // other bound outcome must still fit its original operation budget.
+      if(envelope.reason!=='cancelled'&&envelope.reason!=='timeout'){
+        if(envelope.bindingDigest!==null)evaluator.assertPublicationDeadline();
         if(!localLive()||!liveRevocationSignal(operationSignal))throw new ProviderFailure('CANCELLED');
       }
     };
@@ -470,6 +502,12 @@ export class StandaloneEngine {
     const read = async (): Promise<T> => {
       check();
       if (this.localRead||this.localSettlement) throw new StandaloneError('GRAPH_BUSY');
+      // check() may execute a host/store callback, including on its last
+      // observation. Recheck local lifecycle after it and claim without a port.
+      if (!this.scopeSealCurrent()||!liveRevocationSignal(signal)||this.stopped||this.paused
+        ||this.graphRevision!==revision||this.generation!==gen||this.graphMapping!==mapping
+        ||this.state.status!=='ready'||this.work||this.all||this.pending.size)
+        throw new StandaloneError(liveRevocationSignal(signal)?'GRAPH_SOURCE_STALE':'GRAPH_CANCELLED');
       // Reserve synchronously before starting any asynchronous source read.
       const physical = Promise.resolve().then(async () => {
         try {
