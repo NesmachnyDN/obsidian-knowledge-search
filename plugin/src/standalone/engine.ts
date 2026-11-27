@@ -240,11 +240,11 @@ export class StandaloneEngine {
       check();return proof;
     });
     this.localRead=physical;
-    const drain=()=>{if(this.localRead===physical){this.localRead=null;
+    const drain=()=>{this.scopeCurrent();if(this.localRead===physical){this.localRead=null;
       if(!this.stopped&&!this.paused&&(this.all||this.pending.size))this.schedule();}};
     void physical.then(drain,drain);
     return new Promise((resolve,reject)=>{
-      const timer=setTimeout(()=>{expired=true;reject(new StandaloneError('PARSER_TIMEOUT'));},5000);
+      const timer=setTimeout(()=>{expired=true;reject(new StandaloneError(this.scopeCurrent()?'PARSER_TIMEOUT':'SOURCE_CHANGED'));},5000);
       physical.then(value=>{clearTimeout(timer);if(!expired){try{check();resolve(value);}catch(error){reject(error);}}},error=>{
         clearTimeout(timer);reject(this.scopeCurrent()?error:new StandaloneError('SOURCE_CHANGED'));
       });
@@ -265,14 +265,14 @@ export class StandaloneEngine {
     const result=Promise.resolve().then(()=>evaluator.evaluate(context));
     const physical=result.then(()=>evaluator.drain(),()=>evaluator.drain());
     this.localRead=physical;
-    const release=()=>{if(this.localRead===physical){this.localRead=null;
+    const release=()=>{this.scopeCurrent();if(this.localRead===physical){this.localRead=null;
       if(!this.stopped&&!this.paused&&(this.all||this.pending.size))this.schedule();}};
     void physical.then(release,release);
     return result.then(async envelope=>{
       if(!evaluator.physicallyPending)await physical;
       if(!this.scopeCurrent()||envelope.allowed&&!current())throw new ProviderFailure('CANCELLED');
       return envelope;
-    },error=>{
+    }).catch(error=>{
       if(!this.scopeCurrent())throw new ProviderFailure('CANCELLED');
       throw error;
     });
@@ -305,12 +305,15 @@ export class StandaloneEngine {
       throw new StandaloneError('GRAPH_UNAVAILABLE');
     let retired = false;
     const current = (): boolean => {
-      if (!retired && (!this.scopeCurrent() || signal.aborted || this.stopped || this.paused || this.graphRevision!==revision
+      if (!this.scopeCurrent()) retired=true;
+      if (!retired && (signal.aborted || this.stopped || this.paused || this.graphRevision!==revision
         || this.generation!==gen || this.graphMapping!==mapping || this.state.status!=='ready'
         || this.work || this.all || this.pending.size || this.store.isPublicationUncertain())) retired=true;
       return !retired;
     };
     const check = (): void => {
+      // Observe owner retirement even if a deadline or a local lease has expired.
+      if (!this.scopeCurrent()) throw new StandaloneError(signal.aborted?'GRAPH_CANCELLED':'GRAPH_SOURCE_STALE');
       deadline?.check();
       if (!current()) throw new StandaloneError(signal.aborted?'GRAPH_CANCELLED':'GRAPH_SOURCE_STALE');
     };
@@ -347,7 +350,9 @@ export class StandaloneEngine {
           check(); this.graphCache = graph;
           return result;
         } catch (error) {
+          const scopeLive=this.scopeCurrent();
           retired = true;
+          if (!scopeLive) throw new StandaloneError(signal.aborted?'GRAPH_CANCELLED':'GRAPH_SOURCE_STALE');
           if (this.graphRevision===revision) {
             this.retireGraph();
             if (error instanceof StandaloneError && error.code==='GRAPH_SOURCE_STALE'
@@ -358,14 +363,20 @@ export class StandaloneEngine {
       });
       this.localRead = physical;
       const release = () => {
+        this.scopeCurrent();
         if (this.localRead===physical) {
           this.localRead=null;
           if (!this.stopped && !this.paused && (this.all || this.pending.size)) this.schedule();
         }
       };
       void physical.then(release,release);
-      const result = await (deadline?deadline.wait(physical):physical);
-      check(); return result;
+      try {
+        const result = await (deadline?deadline.wait(physical):physical);
+        check(); return result;
+      } catch(error) {
+        if (!this.scopeCurrent()) throw new StandaloneError(signal.aborted?'GRAPH_CANCELLED':'GRAPH_SOURCE_STALE');
+        throw error;
+      }
     };
     return Object.freeze({current,read});
   }
@@ -392,12 +403,12 @@ export class StandaloneEngine {
       return result;
     },deadline);
     let result:LocalGraphResult|undefined, started=false, retired=false;
-    const current=()=>!retired&&lease.current();
+    const current=()=>lease.current()&&!retired;
     const read=async():Promise<LocalGraphResult>=>{
       if(started||!current())throw new StandaloneError('GRAPH_SOURCE_STALE');
       started=true;
       try { result=await lease.read(); if(!current())throw new StandaloneError('GRAPH_SOURCE_STALE'); return result; }
-      catch(error){retired=true;throw error;}
+      catch(error){retired=true;if(!this.scopeCurrent())throw new StandaloneError(signal.aborted?'GRAPH_CANCELLED':'GRAPH_SOURCE_STALE');throw error;}
     };
     const verify=async():Promise<void>=>{
       if(!result||!current())throw new StandaloneError('GRAPH_SOURCE_STALE');
@@ -409,7 +420,7 @@ export class StandaloneEngine {
         },graphDeadline(signal));
         await fresh.read();
         if(!current())throw new StandaloneError('GRAPH_SOURCE_STALE');
-      }catch(error){retired=true;throw error;}
+      }catch(error){retired=true;if(!this.scopeCurrent())throw new StandaloneError(signal.aborted?'GRAPH_CANCELLED':'GRAPH_SOURCE_STALE');throw error;}
     };
     return Object.freeze({current,read,verify});
   }
@@ -618,7 +629,8 @@ export class StandaloneEngine {
     const gen=this.generation, revision=this.revision;
     let retired=false, searching=false, verifying=false;
     const current=():boolean=>{
-      if(!retired&&(!this.scopeCurrent()||signal.aborted||this.stopped||this.paused||this.revision!==revision
+      if(!this.scopeCurrent())retired=true;
+      if(!retired&&(signal.aborted||this.stopped||this.paused||this.revision!==revision
         ||gen===null||this.generation!==gen||this.state.status!=='ready'||this.work||this.store.isPublicationUncertain()))retired=true;
       return !retired;
     };
@@ -652,7 +664,9 @@ export class StandaloneEngine {
         }
         await membership();check();
       }catch(error){
+        const scopeLive=this.scopeCurrent();
         if(signal.aborted)retire('CANCELLED');
+        if(!scopeLive)retire('SCOPE_CHANGED');
         if(error instanceof StandaloneError&&error.code==='INVALID_REQUEST')retire('SCOPE_INVALID');
         retire('SCOPE_CHANGED');
       }
@@ -678,14 +692,23 @@ export class StandaloneEngine {
           retire('SCOPE_CHANGED');
         await verify(response.hits);check();
         return structuredClone(response);
+      }catch(error){
+        if(!this.scopeCurrent())retire(signal.aborted?'CANCELLED':'SCOPE_CHANGED');
+        throw error;
       }finally{searching=false;}
     };
-    await verify();check();
+    try{await verify();check();}catch(error){
+      if(!this.scopeCurrent())retire(signal.aborted?'CANCELLED':'SCOPE_CHANGED');
+      throw error;
+    }
     return {snapshot,current,search,verify:async()=>{
       check();
       if(searching||verifying)throw new StandaloneError('BUSY');
       verifying=true;
-      try{await verify();check();}finally{verifying=false;}
+      try{await verify();check();}catch(error){
+        if(!this.scopeCurrent())retire(signal.aborted?'CANCELLED':'SCOPE_CHANGED');
+        throw error;
+      }finally{verifying=false;}
     }};
   }
   async search(input: unknown): Promise<SearchResponse> {

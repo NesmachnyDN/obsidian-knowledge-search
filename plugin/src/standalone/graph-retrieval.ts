@@ -125,7 +125,8 @@ export async function materializeGraph(gen:IndexGeneration, graph:ScopedGraphSna
     const loc=seed.sourceLocators[0]!, block=docs.get(seed.sourceId)?.blocks[loc.blockOrder];
     if(!block||JSON.stringify(block.locator)!==JSON.stringify(loc)||block.originalText!==seed.originalExcerpt)
       throw new StandaloneError('GRAPH_EVIDENCE_INVALID');
-    candidates.push({...await evidence(seed.sourceId,seed.sourceSha256,block),kind:'lexical',rank:candidates.length+1,
+    const excerpt=await evidence(seed.sourceId,seed.sourceSha256,block);check();
+    candidates.push({...excerpt,kind:'lexical',rank:candidates.length+1,
       lexicalRank:seed.lexicalRank,seedSourceId:seed.sourceId,seedLexicalRank:seed.lexicalRank,path:[]});
   }
   for(const expanded of plan.expanded){
@@ -139,11 +140,13 @@ export async function materializeGraph(gen:IndexGeneration, graph:ScopedGraphSna
         const authored=docs.get(anchor.sourceId)?.blocks[anchor.locator.blockOrder];
         if(!authored||authored.blockId!==anchor.blockId||JSON.stringify(authored.locator)!==JSON.stringify(anchor.locator))
           throw new StandaloneError('GRAPH_EVIDENCE_INVALID');
-        anchorEvidence.push(await evidence(anchor.sourceId,anchor.sourceSha256,authored));
+        const excerpt=await evidence(anchor.sourceId,anchor.sourceSha256,authored);check();
+        anchorEvidence.push(excerpt);
       }
       path.push({...step,anchorEvidence});
     }
-    candidates.push({...await evidence(expanded.sourceId,expanded.sourceSha256,block),kind:'expanded',rank:candidates.length+1,
+    const excerpt=await evidence(expanded.sourceId,expanded.sourceSha256,block);check();
+    candidates.push({...excerpt,kind:'expanded',rank:candidates.length+1,
       lexicalRank:null,seedSourceId:expanded.seedSourceId,seedLexicalRank:expanded.seedLexicalRank,path});
   }
   check();

@@ -15,13 +15,16 @@ import {parsePolicyMetadata} from '../plugin/src/standalone/markdown-parse';
 import {hash,PROTOCOL,StandaloneError} from '../plugin/src/standalone/contracts';
 import {captureNativeExclusions} from '../plugin/src/search/native-exclusions';
 import {authenticateGraphCatalog} from '../plugin/src/standalone/graph-lifecycle';
+import {materializeGraph} from '../plugin/src/standalone/graph-retrieval';
+import {parseGraphQuery} from '../plugin/src/standalone/graph-expansion';
+import {validateGraphMapping} from '../plugin/src/standalone/graph-mapping';
 import type {RevocableHardSearchScope} from '../plugin/src/standalone/hard-search-scope';
 
 const request={protocolVersion:PROTOCOL,requestId:'synthetic-scope',query:'unique',requestedMode:'lexical',limit:10} as const;
-async function fixture(){
+async function fixture(files:Record<string,string>={'one.md':'# unique one.md','two.md':'# unique two.md'}){
   const root=await realpath(await mkdtemp(join(tmpdir(),'oks-engine-scope-')));
-  const paths=['one.md','two.md'];
-  for(const path of paths)await writeFile(join(root,path),'# unique '+path);
+  const paths=Object.keys(files).sort();
+  for(const path of paths)await writeFile(join(root,path),files[path]!);
   let raw: string[]|null=null;
   const callbacks=new Set<()=>void>();
   const metadata={userIgnoreFilters:null as object[]|null,isUserIgnored:(path:string)=>raw?.includes(path)??false};
@@ -246,6 +249,142 @@ test('revoked settlement discards bytes before processing: '+stage,async t=>{
     assert.equal(parses()-beforeParses,stage==='generation'?2:0);
     assert.equal(previews()-beforePreviews,stage.includes('renewal')?1:0);
     assert.equal(byteHashes,0,'post-revocation processing of returned bytes');
+    await denied(engine);
+  }finally{await f.cleanup();}
+});
+
+// Inspect owner state before status()/current() can repair the missing fence.
+const ownerState=(engine:StandaloneEngine)=>engine as unknown as {scopeRetired:boolean;generation:unknown;graphCache:unknown};
+const graphRequest={requestId:'synthetic-graph',query:'unique',limit:10,scope:{mode:'vault-wide'},
+  expansion:{depth:0,direction:'outgoing',fanOut:16,maxExpanded:32}};
+for(const route of ['chat-capture','chat-verify','chat-search','graph-read','local-graph-read','local-graph-verify'] as const)
+for(const revoke of [true,false])test('owner settlement '+route+' revoked='+revoke,async t=>{
+  const f=await fixture();try{
+    const {engine,reader,parses}=await f.open();await engine.start();await engine.whenIdle();
+    const signal=new AbortController().signal;
+    engine.configureGraph({schemaVersion:'oks-06b-mapping-v1',rules:[]});
+    const chat=route.startsWith('chat')&&route!=='chat-capture'?await engine.captureChatScope({mode:'vault-wide'},signal):null;
+    const graph=route==='graph-read'?engine.captureGraphScope({mode:'vault-wide'},signal):null;
+    const local=route.startsWith('local')?engine.captureLocalGraph(graphRequest,signal):null;
+    if(route==='local-graph-verify')await local!.read();
+    const before=parses(),read=reader.read.bind(reader),list=reader.list.bind(reader),hints=reader.versionHints.bind(reader);
+    let reads=0,late=0,hashes=0,revoked=false,watched:Uint8Array|undefined;
+    const originalUpdate=Hash.prototype.update;
+    t.mock.method(Hash.prototype,'update',function(this:Hash,...args:unknown[]){
+      if(revoked&&args[0]===watched)hashes++;return Reflect.apply(originalUpdate,this,args);
+    });
+    const failure=Error('synthetic read rejection');
+    reader.read=async path=>{if(revoked)late++;reads++;watched=await read(path);
+      if(revoke){revoked=true;f.change(['one.md']);}throw failure;};
+    reader.list=async()=>{if(revoked)late++;return list();};
+    reader.versionHints=async paths=>{if(revoked)late++;return hints(paths);};
+    const result=route==='chat-capture'?engine.captureChatScope({mode:'vault-wide'},signal):
+      route==='chat-verify'?chat!.verify():route==='chat-search'?chat!.search({requestId:'synthetic-chat',query:'unique',limit:10}):
+      route==='graph-read'?graph!.read():route==='local-graph-read'?local!.read():local!.verify();
+    const expected=route.startsWith('chat')?/SCOPE_CHANGED/:revoke?/GRAPH_SOURCE_STALE/:failure;
+    await assert.rejects(result,expected);
+    assert.equal(reads,1);assert.equal(revoked,revoke);assert.equal(late,0);assert.equal(hashes,0);assert.equal(parses(),before);
+    assert.equal(ownerState(engine).scopeRetired,revoke);
+    assert.equal(ownerState(engine).generation===null,revoke);
+    if(revoke){assert.equal(ownerState(engine).graphCache,null);await denied(engine);}
+    else{
+      reader.read=read;assert.equal((await engine.search(request)).status,'ok');
+      // A locally retired lease still observes subsequent owner revocation.
+      const lease=chat??graph??local;
+      if(lease){assert.equal(lease.current(),false);f.change(['one.md']);assert.equal(lease.current(),false);
+        assert.equal(ownerState(engine).scopeRetired,true);assert.equal(ownerState(engine).generation,null);}
+    }
+  }finally{await f.cleanup();}
+});
+
+for(const terminal of ['abort','timeout'] as const)
+for(const timing of ['before-terminal','after-terminal'] as const)test('graph '+terminal+' owner retirement '+timing,async t=>{
+  const f=await fixture();let release=()=>{};try{
+    const {engine,reader}=await f.open();await engine.start();await engine.whenIdle();
+    engine.configureGraph({schemaVersion:'oks-06b-mapping-v1',rules:[]});
+    const abort=new AbortController(),read=reader.read.bind(reader);
+    let enter=()=>{},reads=0;const entered=new Promise<void>(r=>{enter=r;});
+    const held=new Promise<void>(r=>{release=r;});
+    reader.read=async path=>{reads++;const bytes=await read(path);enter();await held;return bytes;};
+    if(terminal==='timeout')t.mock.timers.enable({apis:['setTimeout']});
+    const pending=engine.retrieveLocalGraph(graphRequest,abort.signal);
+    const rejected=assert.rejects(pending,timing==='before-terminal'&&terminal==='timeout'?/GRAPH_SOURCE_STALE/:terminal==='abort'?/GRAPH_CANCELLED/:/GRAPH_TIMEOUT/);
+    await entered;
+    if(timing==='before-terminal')f.change(['one.md']);
+    if(terminal==='abort')abort.abort();else t.mock.timers.tick(30001);
+    await rejected;
+    if(timing==='before-terminal')assert.equal(ownerState(engine).scopeRetired,true);
+    else{assert.equal(ownerState(engine).scopeRetired,false);f.change(['one.md']);}
+    release();await engine.whenIdle();
+    assert.equal(ownerState(engine).scopeRetired,true);assert.equal(ownerState(engine).generation,null);
+    assert.equal(reads,1);await denied(engine);
+  }finally{t.mock.timers.reset();release();await f.cleanup();}
+});
+
+for(const route of ['preview','policy'] as const)
+for(const timing of ['before-terminal','after-terminal'] as const)test(route+' owner retirement '+timing,async t=>{
+  const f=await fixture();let release=()=>{};try{
+    const {engine,reader,previews}=await f.open();await engine.start();await engine.whenIdle();
+    const abort=new AbortController(),read=reader.read.bind(reader),deadlineUnixMs=Date.now()+5000;
+    const config:ProviderConfig={state:'configured',transport:'local',origin:'http://127.0.0.1:1',
+      identity:{model:'synthetic',revision:'fixture'},limits:{timeoutMs:5000,maxInputBytes:8192,maxCandidates:10,maxOutputTokens:64,maxConcurrent:1}};
+    const snapshot:PolicySnapshot={subjects:[{kind:'original',sourceId:'one.md',expectedSha256:hash('# unique one.md'),ownerIds:['one.md']}],
+      profile:{profileId:'fixture',admissionId:'fixture-review',role:'generation',configDigest:configDigest('generation',config),
+        adapter:'fixture',classification:'trusted-internal'},role:'generation',config,adapter:'fixture',
+      ownerId:'fixture-owner',hostId:'fixture-host',scopeId:reader.rootId,policyRevision:'p1',configRevision:'c1',
+      credentialEpoch:1,deadlineUnixMs,payloadDigest:hash('fixture'),restrictions:[],evaluationComplete:true};
+    let enter=()=>{},reads=0;const entered=new Promise<void>(r=>{enter=r;});
+    const held=new Promise<void>(r=>{release=r;});
+    reader.read=async path=>{reads++;const bytes=await read(path);enter();await held;return bytes;};
+    if(route==='preview')t.mock.timers.enable({apis:['setTimeout']});
+    const pending=route==='preview'?engine.previewPolicyMetadata('one.md',()=>true):
+      engine.evaluateProcessingPolicy({snapshot:()=>snapshot,current:()=>true},{signal:abort.signal,deadlineUnixMs});
+    const settled=route==='preview'?assert.rejects(pending,timing==='before-terminal'?/SOURCE_CHANGED/:/PARSER_TIMEOUT/):
+      timing==='before-terminal'?assert.rejects(pending,/CANCELLED/):pending.then(value=>{
+        assert.ok('allowed' in value);assert.equal(value.allowed,false);assert.equal(value.reason,'cancelled');
+      });
+    await entered;if(timing==='before-terminal')f.change(['one.md']);
+    if(route==='preview')t.mock.timers.tick(5001);else abort.abort();
+    await settled;
+    if(timing==='before-terminal')assert.equal(ownerState(engine).scopeRetired,true);
+    else{assert.equal(ownerState(engine).scopeRetired,false);f.change(['one.md']);}
+    release();await engine.whenIdle();
+    assert.equal(ownerState(engine).scopeRetired,true);assert.equal(ownerState(engine).generation,null);
+    assert.equal(reads,1);assert.equal(previews(),0);await denied(engine);
+  }finally{t.mock.timers.reset();release();await f.cleanup();}
+});
+
+for(const stage of ['lexical','anchor','expanded'] as const)test('graph nested evidence settlement '+stage,async t=>{
+  const f=await fixture({'one.md':'---\nid: A\ndepends: B\n---\n# unique one',
+    'two.md':'---\nid: B\n---\n# unique two'});try{
+    const {engine,reader,store}=await f.open();await engine.start();await engine.whenIdle();
+    const mapping=validateGraphMapping({schemaVersion:'oks-06b-mapping-v1',businessIdKey:'id',rules:[
+      {relationId:'depends',propertyKey:'depends',direction:'author-to-target',targetEncoding:'business-id'}]});
+    assert.ok(!('code' in mapping));engine.configureGraph(mapping);
+    const graph=await engine.captureGraphScope({mode:'vault-wide'},new AbortController().signal).read();
+    const {generation}=await store.load();assert.ok(generation);
+    const seeds=(await engine.search({...request,scope:['one.md']})).hits;assert.equal(seeds.length,1);
+    const query=parseGraphQuery({...graphRequest,expansion:{...graphRequest.expansion,depth:1}});
+    const read=reader.read.bind(reader),watched=new Map<Uint8Array,string>(),counts=new Map<string,number>();
+    let revoked=false,armed=false,late=0,lateAssembly=0;
+    reader.read=async path=>{if(revoked)late++;const bytes=await read(path);watched.set(bytes,path);return bytes;};
+    const originalUpdate=Hash.prototype.update;
+    t.mock.method(Hash.prototype,'update',function(this:Hash,...args:unknown[]){
+      const path=watched.get(args[0] as Uint8Array);
+      if(path){const n=(counts.get(path)??0)+1;counts.set(path,n);
+        if(!armed&&((stage==='lexical'&&path==='one.md'&&n===2)||(stage==='anchor'&&path==='one.md'&&n===3)||
+          (stage==='expanded'&&path==='two.md'&&n===2))){armed=true;queueMicrotask(()=>{revoked=true;f.change(['one.md']);});}}
+      return Reflect.apply(originalUpdate,this,args);
+    });
+    const originalPush=Array.prototype.push;
+    Array.prototype.push=function(this:unknown[],...items:unknown[]){
+      if(revoked)for(const item of items)if(item&&typeof item==='object'&&'excerpt' in item&&'locator' in item&&'sourceId' in item)lateAssembly++;
+      return Reflect.apply(originalPush,this,items);
+    };
+    const check=()=>{if(!(reader.hardSearchScope as RevocableHardSearchScope).current())throw new StandaloneError('SEARCH_SCOPE_INVALID');};
+    try{await assert.rejects(materializeGraph(generation,graph,mapping,query,seeds,reader,check),/SEARCH_SCOPE_INVALID/);}
+    finally{Array.prototype.push=originalPush;}
+    assert.equal(armed,true);assert.equal(revoked,true);assert.equal(late,0);assert.equal(lateAssembly,0);
     await denied(engine);
   }finally{await f.cleanup();}
 });
