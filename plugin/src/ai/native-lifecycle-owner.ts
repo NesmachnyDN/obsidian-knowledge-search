@@ -1,6 +1,7 @@
 import { DurableLifecycleLedger, LifecycleLedgerStateError } from './lifecycle-ledger';
 import { NewMaterialTracker, type LifecycleContext, type BaselinePreview, type BaselineCandidate,
-  type InitialBaselineAdmissionOutcome } from './new-material-tracker';
+  type InitialBaselineAdmissionOutcome, type LiveTransitionAdmission,
+  type LiveTransitionAdmissionOutcome } from './new-material-tracker';
 import { BoundedVaultReader } from '../standalone/source';
 
 type NativeLifecycleBinding<T extends object> = Readonly<{
@@ -20,6 +21,9 @@ export type NativeBaselinePreviewResult=Readonly<{ok:true;preview:NativeBaseline
 export type NativeBaselineConfirmation=Readonly<{outcome:InitialBaselineAdmissionOutcome;reason?:'stale'|'expired'|'retired'|'verification-failed'}>;
 /** Local presentation can distinguish an explicit dismissal from a stale view. */
 export type NativeBaselineCancellation=Readonly<{outcome:'cancelled'|'cancel-requested'}|{outcome:'denied';reason:'stale'|'retired'}>;
+/** Host-private future native-event boundary; no production callback invokes it yet. */
+export type NativeLiveTransition<T extends object>=LiveTransitionAdmission<T>;
+export type NativeLiveTransitionResult=Readonly<{outcome:LiveTransitionAdmissionOutcome}>;
 const monotonicNow=()=>Math.floor(performance.now());
 
 /** A cancelled wait never starts a replacement ledger transaction. */
@@ -111,7 +115,10 @@ export class NativeLifecycleOwner<T extends object> {
   }
 
   /** Host readiness only, never per-source evidence or a processing grant. */
-  exactAuthorityActive(): boolean { return (this.state==='restored'||this.state==='admitted')&&this.fence?.()===true; }
+  exactAuthorityActive(): boolean {
+    return !this.operation&&(this.state==='restored'||this.state==='admitted')&&this.fence?.()===true
+      &&!this.operation&&!this.retired&&!!this.binding&&this.tracker.durableAuthorityActive(this.binding.context);
+  }
 
   /** A ready empty store is not authority over a single original. */
   readiness():NativeLifecycleReadiness {
@@ -192,6 +199,40 @@ export class NativeLifecycleOwner<T extends object> {
   /** Compatibility predicate for host callers that only need cancellation ownership. */
   cancelBaselinePreview(view:NativeBaselinePreview):boolean {
     return this.cancelBaselinePreviewOutcome(view).outcome!=='denied';
+  }
+
+  /**
+   * Admit one host-authenticated event through the canonical-reader/ledger
+   * transaction. A failed or merely durable transaction permanently retires
+   * this owner and drains its exclusive ledger lock; it never falls back to
+   * the legacy tracker mutators.
+   */
+  async admitLiveTransition(input:NativeLiveTransition<T>):Promise<NativeLiveTransitionResult> {
+    if(this.operation||this.preview||this.confirming){this.retireAndDrain();return {outcome:'denied'};}
+    if(this.state!=='restored'&&this.state!=='admitted'){this.retireAndDrain();return {outcome:'denied'};}
+    const binding=this.binding,ledger=this.ledger;
+    if(!binding||!ledger){this.retireAndDrain();return {outcome:'denied'};}
+    // Reserve before host callbacks, and enter the tracker's synchronous
+    // suspension before returning to the native event observer.
+    let complete!:(result:NativeLiveTransitionResult)=>void;
+    const operation=new Promise<NativeLiveTransitionResult>(resolve=>{complete=resolve;});
+    this.operation=operation;
+    const run=async():Promise<NativeLiveTransitionResult>=>{
+      let outcome:LiveTransitionAdmissionOutcome='denied';
+      try{
+        if(this.retired||this.controller.signal.aborted)return {outcome};
+        outcome=await this.tracker.admitLiveTransition(binding.context,ledger,binding.reader,{
+          signal:this.controller.signal,current:()=>this.fence?.()===true,
+          resolveNativeOwner:binding.resolveNativeOwner,
+        },input);
+        if(outcome==='admitted'&&!this.retired&&!this.controller.signal.aborted)return {outcome};
+        if(outcome==='admitted')outcome='committed-not-live';
+        return {outcome};
+      }catch{outcome='uncertain-publication';return {outcome};}
+      finally{if(outcome!=='admitted')this.retireAndDrain();}
+    };
+    try{void run().then(complete,()=>{this.retireAndDrain();complete({outcome:'uncertain-publication'});});return await operation;}
+    finally{if(this.operation===operation)this.operation=undefined;}
   }
 
   /** Concurrent callers share the same physical drain, including its failure. */

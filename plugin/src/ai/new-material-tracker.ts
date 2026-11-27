@@ -1,6 +1,7 @@
 import { BOUNDS, isDigest, validPath } from '../standalone/contracts';
 import { BoundedVaultReader, type DescriptorLifecycleProof } from '../standalone/source';
-import { DurableLifecycleLedger, InitialBaselinePublicationError } from './lifecycle-ledger';
+import { DurableLifecycleLedger, InitialBaselinePublicationError, LiveTransitionPublicationError,
+  type LiveTransitionDelta } from './lifecycle-ledger';
 import type { LedgerAnchor, LedgerEntry } from './lifecycle-ledger-schema';
 
 export type LifecycleState = 'existing'|'verified-new'|'unresolved';
@@ -42,6 +43,15 @@ export type InitialBaselineAdmissionHost<T extends object> = Readonly<{
 }>;
 /** Durable publication and live admission are intentionally separate facts. */
 export type InitialBaselineAdmissionOutcome='admitted'|'denied'|'committed-not-live'|'uncertain-publication';
+/**
+ * One already-authenticated native event.  Paths and the pinned native object
+ * are routing/fence inputs only: descriptor proofs and successor inventories
+ * are always read from the canonical reader by the tracker.
+ */
+export type LiveTransitionAdmission<T extends object>=Readonly<{
+  event:NativeLifecycleEvent; owner:T; sourceId:string; destinationId?:string; current:()=>boolean;
+}>;
+export type LiveTransitionAdmissionOutcome='admitted'|'denied'|'committed-not-live'|'uncertain-publication';
 
 function objectIdentity(value:unknown):value is object {
   return typeof value==='object'&&value!==null;
@@ -67,6 +77,12 @@ function sameProof(a:DescriptorLifecycleProof,b:DescriptorLifecycleProof):boolea
   return a.version.rootId===b.version.rootId&&a.version.sourceId===b.version.sourceId
     &&a.version.sha256===b.version.sha256&&a.version.versionId===b.version.versionId
     &&a.stableIdentity===b.stableIdentity;
+}
+function sameLedgerEntry<T extends object>(entry:Entry<T>|undefined,record:LedgerEntry|undefined):boolean {
+  if(entry===undefined||record===undefined)return false;
+  if(entry==='deleted'||entry==='ambiguous')return entry===record.state&&!("proof" in record);
+  return 'proof' in record&&entry.state===record.state&&entry.origin===record.origin
+    &&entry.originVersionId===record.originVersionId&&sameProof(entry.proof,record.proof);
 }
 function admitted<T extends object>(entry:Entry<T>|undefined):entry is Admitted<T> {
   return !!entry&&typeof entry==='object';
@@ -96,13 +112,17 @@ export class NewMaterialTracker<T extends object> {
   private admissionPending=false;
   private admissionSignalCleanup?:()=>void;
   private legacyTouched=false;
-  private noteLegacyMutation():void {
+  private durableEpoch=false;
+  private durableAnchor?:LedgerAnchor;
+  private durableSignal?:AbortSignal;
+  private noteLegacyMutation():boolean {
     this.legacyTouched=true;
     // The pilot path cannot supply exact-version transition evidence.
     if(this.restoreUsed||this.admissionPending||this.admissionSignalCleanup)this.sealLifecycle();
+    return !this.durableEpoch;
   }
   created(path:string,owner:T):void {
-    this.noteLegacyMutation();
+    if(!this.noteLegacyMutation())return;
     if(this.overflow||!validPath(path))return;
     if(this.entries.size>=BOUNDS.sources&&!this.entries.has(path)){this.entries.clear();this.overflow=true;return;}
     // Duplicate create for an existing tracked path is ambiguous.
@@ -111,13 +131,13 @@ export class NewMaterialTracker<T extends object> {
   }
   /** A modify/metadata event is not creation evidence. Preserve only exact live identity. */
   changed(path:string,owner:T):void {
-    this.noteLegacyMutation();
+    if(!this.noteLegacyMutation())return;
     if(this.overflow||!validPath(path))return;
     if(this.entries.has(path)&&this.entries.get(path)!==owner)this.entries.set(path,null);
   }
   /** Only an exact file-owner move can carry creation provenance to a new path. */
   renamed(oldPath:string,path:string,owner:T):void {
-    this.noteLegacyMutation();
+    if(!this.noteLegacyMutation())return;
     if(this.overflow)return;
     if(oldPath===path){this.changed(path,owner);return;}
     const known=validPath(oldPath)&&this.entries.get(oldPath)===owner;
@@ -128,11 +148,11 @@ export class NewMaterialTracker<T extends object> {
     if(known)this.entries.set(path,owner);
   }
   invalidate(path:string):void {
-    this.noteLegacyMutation();
+    if(!this.noteLegacyMutation())return;
     for(const key of this.entries.keys())if(key===path||key.startsWith(path+'/'))this.entries.delete(key);
   }
   state(path:string,owner:T):'verified-new'|'unresolved' {
-    return !this.overflow&&this.entries.get(path)===owner?'verified-new':'unresolved';
+    return !this.durableEpoch&&!this.overflow&&this.entries.get(path)===owner?'verified-new':'unresolved';
   }
   clear():void {this.entries.clear();this.overflow=false;this.lifecycleRevision++;this.sealLifecycle();}
   /** Retire the exact epoch without changing the historical read-only pilot preview. */
@@ -145,15 +165,19 @@ export class NewMaterialTracker<T extends object> {
     this.context=Object.freeze({...context});
     return true;
   }
+  durableAuthorityActive(context:LifecycleContext):boolean {
+    return this.durableEpoch&&!!this.durableAnchor&&!!this.durableSignal&&!this.durableSignal.aborted
+      &&!this.restorePending&&!this.admissionPending&&this.current(context);
+  }
   private current(context:LifecycleContext):boolean {
     return !this.sealed&&!!this.context&&validContext(context)&&sameContext(this.context,context);
   }
   private sealLifecycle():void {
-    this.sealed=true;this.exact.clear();this.pending=undefined;
+    this.sealed=true;this.exact.clear();this.pending=undefined;this.durableAnchor=undefined;this.durableSignal=undefined;
     this.admissionSignalCleanup?.();this.admissionSignalCleanup=undefined;
   }
   private event(context:LifecycleContext,event:NativeLifecycleEvent,kind:NativeLifecycleEvent['kind']):boolean {
-    if(this.restorePending||this.admissionPending){this.sealLifecycle();return false;}
+    if(this.durableEpoch||this.restorePending||this.admissionPending){this.sealLifecycle();return false;}
     if(!this.current(context))return false;
     this.lifecycleRevision++;
     this.pending=undefined;
@@ -172,7 +196,7 @@ export class NewMaterialTracker<T extends object> {
     return this.store(proof.version.sourceId,Object.freeze({owner,state,proof:copyProof(proof),origin,originVersionId}));
   }
   reviseRules(context:LifecycleContext,nextRevision:string):boolean {
-    if(this.restorePending||this.admissionPending){this.sealLifecycle();return false;}
+    if(this.durableEpoch||this.restorePending||this.admissionPending){this.sealLifecycle();return false;}
     if(!this.current(context)||!isDigest(nextRevision))return false;
     this.lifecycleRevision++;
     this.pending=undefined;
@@ -252,7 +276,7 @@ export class NewMaterialTracker<T extends object> {
   }
   private makeBaselinePreview(context:LifecycleContext,input:BaselineInventory<T>,now:number,ttlMs:number,allowEmpty:boolean):BaselinePreview<T>|null {
     if(this.admissionPending){this.sealLifecycle();return null;}
-    if(this.restorePending||!this.current(context)||this.baselineDone)return null;
+    if(this.durableEpoch||this.restorePending||!this.current(context)||this.baselineDone)return null;
     this.pending=undefined;
     if(!Number.isSafeInteger(now)||now<0||!Number.isSafeInteger(ttlMs)||ttlMs<=0||ttlMs>300000
       ||!Number.isSafeInteger(now+ttlMs))return null;
@@ -265,7 +289,7 @@ export class NewMaterialTracker<T extends object> {
     if(this.admissionPending){this.sealLifecycle();return false;}
     // Capability identity is instance-local and cannot be replayed by copying
     // serialized data. Every matching confirmation consumes it, even denial.
-    if(!preview||preview!==this.pending)return false;
+    if(this.durableEpoch||!preview||preview!==this.pending)return false;
     this.pending=undefined;
     if(!this.current(context)||this.baselineDone||!sameContext(preview.context,context)
       ||!Number.isSafeInteger(now)||now<preview.startedAt||now>=preview.expiresAt)return false;
@@ -359,7 +383,7 @@ export class NewMaterialTracker<T extends object> {
         return 'committed-not-live';
       for(const candidate of preview.candidates)this.exact.set(candidate.proof.version.sourceId,Object.freeze({owner:candidate.owner,
         state:'existing',proof:candidate.proof,origin:'baseline',originVersionId:candidate.proof.version.versionId}));
-      this.baselineDone=true;
+      this.baselineDone=true;this.durableEpoch=true;this.durableAnchor=committed.anchor;this.durableSignal=signal;
       return 'admitted';
     }catch(error) {
       if(durableCommitted)return 'committed-not-live';
@@ -442,12 +466,142 @@ export class NewMaterialTracker<T extends object> {
       if(!current())return false;
       // No callback/await between final fence and publication.
       for(const [path,entry] of restored)this.exact.set(path,entry);
-      this.baselineDone=loaded.snapshot.baselineAdmitted;
+      this.baselineDone=loaded.snapshot.baselineAdmitted;this.durableEpoch=true;
+      this.durableAnchor=loaded.anchor;this.durableSignal=signal;
+      const abort=()=>this.sealLifecycle();signal.addEventListener('abort',abort,{once:true});
+      this.admissionSignalCleanup=()=>signal.removeEventListener('abort',abort);
       published=true;
       return true;
     }catch{return false;}finally{
       if(!published)this.sealLifecycle();
       this.restorePending=false;
+    }
+  }
+
+  /**
+   * Host-private, owner-serialized admission for one already-authenticated
+   * native event. It never accepts caller proofs or a caller successor: both
+   * the durable delta and full successor observation come from the tracker,
+   * committed ledger and canonical reader.
+   */
+  async admitLiveTransition(context:LifecycleContext,ledger:DurableLifecycleLedger,reader:BoundedVaultReader,
+      host:LifecycleRestoreHost<T>,input:LiveTransitionAdmission<T>):Promise<LiveTransitionAdmissionOutcome> {
+    if(this.admissionPending){this.sealLifecycle();return 'denied';}
+    // Reserve before reading any caller-owned object, including accessors
+    // and proxies. Capture the original authority before any reentrant code.
+    this.admissionPending=true;
+    let durableCommitted=false,published=false;
+    try {
+      const capturedContext=this.context,revision=this.lifecycleRevision,sequence=this.eventSequence;
+      const signal=this.durableSignal,expectedAnchor=this.durableAnchor;
+      if(!this.durableEpoch||!expectedAnchor||!signal||!capturedContext||this.restorePending
+        ||!this.current(capturedContext)||!this.baselineDone||this.pending||this.legacyTouched||this.overflow
+        ||this.entries.size!==0||!(ledger instanceof DurableLifecycleLedger)||!(reader instanceof BoundedVaultReader))return 'denied';
+      const suppliedContext=Object.freeze({rootId:context.rootId,scopeId:context.scopeId,rulesRevision:context.rulesRevision,
+        host:context.host,session:context.session});
+      const suppliedEvent=input?.event;
+      if(!suppliedEvent||!host)return 'denied';
+      const event=Object.freeze({kind:suppliedEvent.kind,sequence:suppliedEvent.sequence});
+      input=Object.freeze({event,owner:input.owner,sourceId:input.sourceId,destinationId:input.destinationId,current:input.current});
+      host=Object.freeze({signal:host.signal,current:host.current,resolveNativeOwner:host.resolveNativeOwner});
+      const intact=()=>ledger.rootAvailable(capturedContext.rootId)&&this.admissionPending&&!this.restorePending&&!signal.aborted
+        &&this.current(capturedContext)&&this.lifecycleRevision===revision&&this.eventSequence===sequence
+        &&this.durableAnchor===expectedAnchor&&this.durableSignal===signal&&!this.legacyTouched&&!this.overflow&&this.entries.size===0;
+      if(!this.current(suppliedContext)||reader.rootId!==capturedContext.rootId
+        ||host.signal!==signal||!(signal instanceof AbortSignal)||typeof host.current!=='function'
+        ||typeof host.resolveNativeOwner!=='function'||!objectIdentity(input.owner)||typeof input.current!=='function'
+        ||!Number.isSafeInteger(event.sequence)||event.sequence!==sequence+1
+        ||!['create','modify','rename','delete'].includes(event.kind)||!validPath(input.sourceId)
+        ||(event.kind==='rename'?(!validPath(input.destinationId??'')||input.destinationId===input.sourceId):input.destinationId!==undefined)
+        ||!intact())return 'denied';
+      const current=():boolean=>{
+        if(!intact())return false;
+        try{return host.current()===true&&intact()&&input.current()===true&&intact();}catch{return false;}
+      };
+      const expected=():boolean=>{
+        for(const entry of this.exact.values()){
+          if(!admitted(entry)&&entry==='ambiguous')return false;
+        }
+        return true;
+      };
+      const prior=():Admitted<T>|null=>{
+        const value=this.exact.get(input.sourceId);return admitted(value)?value:null;
+      };
+      const ownerBindings=(records:ReadonlyMap<string,Entry<T>>):boolean=>{
+        if(!current())return false;const seen=new Set<T>();
+        for(const [path,entry] of records){
+          if(!admitted(entry)){if(entry!=='deleted'||host.resolveNativeOwner(path)!==null||!current())return false;continue;}
+          if(seen.has(entry.owner)||host.resolveNativeOwner(path)!==entry.owner||!current())return false;
+          seen.add(entry.owner);
+        }
+        return current();
+      };
+      if(!expected()||!current())return 'denied';
+      const loaded=await ledger.read();
+      if(!loaded||!sameLedgerAnchor(loaded.anchor,expectedAnchor)||!loaded.snapshot.baselineAdmitted||loaded.snapshot.rootId!==capturedContext.rootId||!current()
+        ||loaded.snapshot.entries.length!==this.exact.size
+        ||!loaded.snapshot.entries.every(record=>sameLedgerEntry(this.exact.get(record.sourceId),record)))return 'denied';
+      const old=prior();
+      if(event.kind==='create'){
+        if(old||this.exact.get(input.sourceId)==='ambiguous'||host.resolveNativeOwner(input.sourceId)!==input.owner||!current())return 'denied';
+      }else if(!old||old.owner!==input.owner||!sameLedgerEntry(old,loaded.snapshot.entries.find(record=>record.sourceId===input.sourceId))){
+        return 'denied';
+      }
+      const observe=async():Promise<{delta:LiveTransitionDelta;records:Map<string,Entry<T>>}|null>=>{
+        if(!current())return null;
+        const inventory=await reader.completeMarkdownInventory(signal);
+        if(!current()||inventory.rootId!==capturedContext.rootId)return null;
+        const proofs=new Map(inventory.sources.map(proof=>[proof.version.sourceId,proof]));
+        const records=new Map(this.exact);
+        let delta:LiveTransitionDelta;
+        if(event.kind==='create'){
+          const next=proofs.get(input.sourceId);
+          if(!next||admitted(records.get(input.sourceId))||records.get(input.sourceId)==='ambiguous'
+            ||host.resolveNativeOwner(input.sourceId)!==input.owner||!current())return null;
+          const entry:LedgerEntry=Object.freeze({sourceId:input.sourceId,state:'verified-new',origin:'native-create',originVersionId:next.version.versionId,proof:copyProof(next)});
+          records.set(input.sourceId,Object.freeze({owner:input.owner,state:'verified-new',proof:copyProof(next),origin:'native-create',originVersionId:next.version.versionId}));
+          delta=Object.freeze({kind:'create',entry});
+        }else if(event.kind==='delete'){
+          if(proofs.has(input.sourceId)||!old)return null;
+          records.set(input.sourceId,'deleted');delta=Object.freeze({kind:'delete',prior:copyProof(old.proof)});
+        }else {
+          const destination=event.kind==='rename'?input.destinationId!:input.sourceId,next=proofs.get(destination);
+          if(!old||!next||next.stableIdentity!==old.proof.stableIdentity||next.version.versionId===old.proof.version.versionId
+            ||(event.kind==='rename'&&records.get(destination)!==undefined))return null;
+          if(event.kind==='modify'&&host.resolveNativeOwner(destination)!==input.owner)return null;
+          if(event.kind==='rename'&&host.resolveNativeOwner(destination)!==input.owner)return null;
+          if(event.kind==='rename')records.set(input.sourceId,'deleted');
+          records.set(destination,Object.freeze({...old,proof:copyProof(next)}));
+          delta=event.kind==='modify'
+            ?Object.freeze({kind:'modify',prior:copyProof(old.proof),next:copyProof(next)})
+            :Object.freeze({kind:'rename',prior:copyProof(old.proof),next:copyProof(next)});
+        }
+        const admittedRecords=new Map<string,Admitted<T>>();
+        for(const [path,entry] of records)if(admitted(entry))admittedRecords.set(path,entry);
+        if(proofs.size!==admittedRecords.size||!ownerBindings(records))return null;
+        for(const [path,entry] of admittedRecords){const proof=proofs.get(path);if(!proof||!sameProof(entry.proof,proof))return null;}
+        return current()?{delta,records}:null;
+      };
+      const first=await observe();if(!first||!current())return 'denied';
+      const committed=await ledger.commitLiveTransition(loaded.anchor,first.delta,{signal,revalidate:async()=>{
+        const checked=await observe();return !!checked&&sameLiveDelta(checked.delta,first.delta)&&current();
+      },current:()=>ownerBindings(first.records)});
+      durableCommitted=true;
+      const final=await observe();
+      if(!final||!sameLiveDelta(final.delta,first.delta)||!ownerBindings(final.records)
+        ||!ledger.committedAnchorCurrent(committed.anchor)||!intact())return 'committed-not-live';
+      // No callback or await after the final anchor and authority fence.
+      this.exact.clear();for(const [path,entry] of final.records)this.exact.set(path,entry);
+      this.eventSequence=event.sequence;this.lifecycleRevision++;this.durableAnchor=committed.anchor;
+      published=true;
+      return 'admitted';
+    }catch(error){
+      if(durableCommitted)return 'committed-not-live';
+      if(error instanceof LiveTransitionPublicationError)return error.outcome;
+      return 'denied';
+    }finally{
+      if(!published)this.sealLifecycle();
+      this.admissionPending=false;
     }
   }
   /** Immutable bounded evidence for a future host-authorized ledger commit. */
@@ -461,6 +615,15 @@ export class NewMaterialTracker<T extends object> {
     }
     return Object.freeze({baselineAdmitted:this.baselineDone,entries:Object.freeze(entries)});
   }
+}
+
+function sameLiveDelta(a:LiveTransitionDelta,b:LiveTransitionDelta):boolean {
+  if(a.kind!==b.kind)return false;
+  if(a.kind==='create'&&b.kind==='create')return a.entry.sourceId===b.entry.sourceId&&'proof' in a.entry&&'proof' in b.entry
+    &&sameProof(a.entry.proof,b.entry.proof);
+  if(a.kind==='delete'&&b.kind==='delete')return sameProof(a.prior,b.prior);
+  return a.kind!=='create'&&a.kind!=='delete'&&b.kind!=='create'&&b.kind!=='delete'
+    &&sameProof(a.prior,b.prior)&&sameProof(a.next,b.next);
 }
 
 function sameLedgerAnchor(a:LedgerAnchor,b:LedgerAnchor):boolean {
