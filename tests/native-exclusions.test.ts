@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,writeFile,rm,realpath} from 'node:fs/promises';
+import fs,{mkdtemp,writeFile,rm,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {BoundedVaultReader} from '../plugin/src/standalone/source';
@@ -166,7 +166,7 @@ test('native reader never returns partial enumeration or stale asynchronous read
   const root=await realpath(await mkdtemp(join(tmpdir(),'oks-native-race-')));
   try{
     await writeFile(join(root,'note.md'),'# synthetic');
-    for(const kind of ['enumeration','empty-enumeration','matcher','missed','read','hints','descriptor','proof','in-flight-read','post-read'] as const){
+    for(const kind of ['enumeration','empty-enumeration','matcher','missed','read','hints'] as const){
       const f=hostFixture([]);f.behavior(()=>false);
       const l=f.capture();
       try{
@@ -176,25 +176,113 @@ test('native reader never returns partial enumeration or stale asynchronous read
         },l.scope);
         if(kind==='matcher')f.behavior(()=>{f.notify();return false;});
         if(kind==='missed')f.raw(['changed.md']);
-        // Third match happens in the descriptor path after root validation,
-        // before any content is returned (and even empty scope is checked).
-        if(kind==='descriptor'||kind==='proof'||kind==='in-flight-read'||kind==='post-read'){
-          let calls=0;
-          f.behavior(()=>{
-            calls++;
-            if(calls===3&&(kind==='descriptor'||kind==='proof'))f.notify();
-            if(calls===3&&kind==='in-flight-read')queueMicrotask(f.notify);
-            if(calls===5&&kind==='post-read')queueMicrotask(f.notify);
-            return false;
-          });
-        }
-        const pending=kind==='read'||kind==='descriptor'||kind==='in-flight-read'||kind==='post-read'?r.read('note.md')
-          :kind==='proof'?r.readVerifiedOriginal('note.md')
+        const pending=kind==='read'?r.read('note.md')
           :kind==='hints'?r.versionHints(['note.md']):r.list();
         if(kind==='read'||kind==='hints')f.notify();
         await assert.rejects(pending,/SEARCH_SCOPE_INVALID/);
         assert.equal(l.scope.current(),false);
       }finally{l.dispose();}
+    }
+  }finally{await rm(root,{recursive:true,force:true});}
+});
+
+// Inject at the actual I/O boundary, not at a particular matcher call count.
+// The original operation is still executed against a synthetic fixture.
+test('revocation takes precedence over enumeration and root/hint I/O rejection',async t=>{
+  const root=await realpath(await mkdtemp(join(tmpdir(),'oks-native-error-')));
+  try{
+    await writeFile(join(root,'note.md'),'# synthetic');
+    for(const kind of ['enumeration','open-root','list-root','hint'] as const){
+      const f=hostFixture([]);f.behavior(()=>false);
+      const l=f.capture();
+      try{
+        const r=await BoundedVaultReader.openWithScope(root,()=>{
+          if(kind==='enumeration'){f.notify();throw Error('synthetic callback failure');}
+          return ['note.md'];
+        },l.scope);
+        const original=fs.lstat;
+        if(kind!=='enumeration')t.mock.method(fs,'lstat',async (...args:unknown[])=>{
+          if(String(args[0])===(kind==='hint'?join(root,'note.md'):root)){
+            f.notify();throw Object.assign(Error('synthetic I/O failure'),{code:'ENOENT'});
+          }
+          return Reflect.apply(original,fs,args);
+        });
+        const pending=kind==='open-root'?BoundedVaultReader.openWithScope(root,()=>[],l.scope)
+          :kind==='hint'?r.versionHints(['note.md']):r.list();
+        await assert.rejects(pending,{name:'StandaloneError',code:'SEARCH_SCOPE_INVALID'});
+        assert.equal(l.scope.current(),false);
+      }finally{t.mock.restoreAll();l.dispose();}
+    }
+  }finally{await rm(root,{recursive:true,force:true});}
+});
+
+test('revocation during actual descriptor I/O discards bytes and proofs and closes every handle',async t=>{
+  const root=await realpath(await mkdtemp(join(tmpdir(),'oks-native-descriptor-')));
+  try{
+    await writeFile(join(root,'note.md'),'# synthetic');
+    for(const kind of ['open-success','open-error','read-success','read-error','cleanup-success','cleanup-error'] as const){
+      for(const operation of ['read','readVersionProof','readVerifiedOriginal','readLifecycleProof'] as const){
+        const f=hostFixture([]);f.behavior(()=>false);
+        const l=f.capture();
+        let reads=0,opened=0,closed=0;
+        try{
+          const r=await BoundedVaultReader.openWithScope(root,()=>['note.md'],l.scope);
+          const original=fs.open;
+          t.mock.method(fs,'open',async (...args:Parameters<typeof fs.open>)=>{
+            const note=String(args[0]).endsWith('/note.md');
+            if(note&&kind==='open-error'){f.notify();throw Object.assign(Error('synthetic open failure'),{code:'EIO'});}
+            const handle=await original(...args);opened++;
+            if(note&&kind==='open-success')f.notify();
+            const close=handle.close.bind(handle);
+            t.mock.method(handle,'close',async ()=>{
+              await close();closed++;
+              if(note&&(kind==='cleanup-success'||kind==='cleanup-error')){
+                f.notify();
+                if(kind==='cleanup-error')throw Error('synthetic close failure');
+              }
+            });
+            if(note){
+              const read=handle.read.bind(handle);
+              t.mock.method(handle,'read',async (...readArgs:unknown[])=>{
+                reads++;
+                const observed=await Reflect.apply(read,handle,readArgs);
+                if(kind==='read-success'||kind==='read-error'){
+                  f.notify();
+                  if(kind==='read-error')throw Object.assign(Error('synthetic read failure'),{code:'EIO'});
+                }
+                return observed;
+              });
+            }
+            return handle;
+          });
+          await assert.rejects(r[operation]('note.md'),{name:'StandaloneError',code:'SEARCH_SCOPE_INVALID'});
+          assert.equal(l.scope.current(),false);
+          assert.equal(reads,kind.startsWith('open')?0:kind.startsWith('cleanup')?2:1);
+          assert.equal(opened,kind==='open-error'?1:2);
+          assert.equal(closed,opened);
+        }finally{t.mock.restoreAll();l.dispose();}
+      }
+    }
+  }finally{await rm(root,{recursive:true,force:true});}
+});
+
+test('exceptional completion without revocation preserves historical errors',async t=>{
+  const root=await realpath(await mkdtemp(join(tmpdir(),'oks-native-unscoped-error-')));
+  try{
+    await writeFile(join(root,'note.md'),'# synthetic');
+    const immutable={version:HARD_SEARCH_SCOPE_VERSION,excludedFolders:[],excludedFiles:[]};
+    for(const config of [undefined,immutable]){
+      const failure=Error('synthetic enumeration failure');
+      const reader=await BoundedVaultReader.open(root,()=>{throw failure;},config);
+      await assert.rejects(reader.list(),error=>error===failure);
+      const original=fs.lstat;
+      const ioFailure=Object.assign(Error('synthetic metadata failure'),{code:'ENOENT'});
+      t.mock.method(fs,'lstat',async (...args:unknown[])=>{
+        if(String(args[0])===join(root,'note.md'))throw ioFailure;
+        return Reflect.apply(original,fs,args);
+      });
+      try{await assert.rejects(reader.versionHints(['note.md']),error=>error===ioFailure);}
+      finally{t.mock.restoreAll();}
     }
   }finally{await rm(root,{recursive:true,force:true});}
 });
