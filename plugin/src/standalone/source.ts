@@ -26,6 +26,14 @@ export type DescriptorLifecycleProof = Readonly<{
   version: OriginalVersionProof; stableIdentity: string;
 }>;
 export type VerifiedOriginalRead = Readonly<{bytes:Uint8Array;proof:DescriptorLifecycleProof}>;
+/** Shared validation of descriptor-bound bytes before policy interpretation. */
+export function verifiedOriginalDigest(observed:VerifiedOriginalRead,rootId:string,sourceId:string,expectedSha256?:string):string {
+  const {bytes,proof}=observed,v=proof?.version;
+  if(!(bytes instanceof Uint8Array)||bytes.byteLength>BOUNDS.fileBytes||!v||v.rootId!==rootId||v.sourceId!==sourceId
+    ||(expectedSha256!==undefined&&v.sha256!==expectedSha256)||!isDigest(v.versionId)||!isDigest(proof.stableIdentity)||hash(bytes)!==v.sha256)
+    throw new StandaloneError('SOURCE_CHANGED');
+  return hash(JSON.stringify([v.rootId,v.sourceId,v.sha256,v.versionId,proof.stableIdentity]));
+}
 /**
  * A bounded, fail-closed observation for future lifecycle baseline work.
  * This is intentionally not SourceProvider.list(): Basic indexing keeps its
@@ -82,6 +90,8 @@ export class BoundedVaultReader implements SourceProvider {
       return new BoundedVaultReader(absolute, info.dev, info.ino, enumerate, scope);
     } catch { throw new StandaloneError('UNSUPPORTED_FILESYSTEM'); }
   }
+  /** Synchronous adapter-path fence; descriptor reads still authenticate root identity. */
+  matchesRootPath(root:string):boolean{return isAbsolute(root)&&resolve(root)===this.root;}
   private async rootCheck(): Promise<void> {
     try {
       const info = await lstat(this.root);

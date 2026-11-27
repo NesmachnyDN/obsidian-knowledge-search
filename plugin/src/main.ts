@@ -6,6 +6,7 @@ import { configDigest } from './ai/disclosure';
 import { NewMaterialTracker } from './ai/new-material-tracker';
 import { NativeLifecycleOwner } from './ai/native-lifecycle-owner';
 import { InitialBaselineModal, baselineNotice } from './ai/native-baseline-modal';
+import { decideEffectivePolicy, type EffectivePolicyConfig, type EffectivePolicyDecision } from './ai/effective-policy';
 import { decideNewMaterialMarking, type NewMaterialRuleConfig, type NewMaterialDecision } from './ai/new-material-policy';
 import { DenseMachine } from './ai/dense-machine';
 import { DenseUiController } from './ai/dense-ui-controller';
@@ -167,6 +168,14 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private policyHostState(input:Pick<ProcessingPolicyInput<'generation'|'reranking'|'embedding'>,'role'|'scopeId'|'scopeSources'|'sources'>):GenerationPolicyHostState|null {
     const config=this.settings.ai[input.role],reader=this.sourceReader;
     if(this.unloaded||this.denseSettingsChanging||!reader||reader.rootId!==input.scopeId||config.state!=='configured')return null;
+    if(this.settings.effectivePolicy){
+      const adapter=this.app.vault.adapter;
+      if(!(adapter instanceof FileSystemAdapter)||!reader.matchesRootPath(adapter.getBasePath()))return null;
+      return {config,profile:null,adapter:'unadmitted-cloud',
+      policyRevision:String(this.searchController.sourceAuthorityRevision()),configRevision:configDigest(input.role,config),
+      restrictions:[],materials:[],complete:true,mode:'effective',effective:{
+        config:this.settings.effectivePolicy,origins:policyOriginals(input).map(()=>null)}};
+    }
     // The prospective shared policy has no fresh descriptor proof at this
     // synchronous boundary. Never substitute ephemeral dry-run provenance.
     const materials=policyOriginals(input).map(source=>({
@@ -269,7 +278,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
       () => this.searchController.snapshot().response ?? undefined,
       role => role === 'embedding' ? this.denseMachine.pending() ?
         {phase:'permission-required',error:null} : this.denseUi.operationStatus() :
-        this.searchController.evidenceOperationStatus(role), config=>this.previewNewMaterial(config)));
+        this.searchController.evidenceOperationStatus(role), config=>this.previewNewMaterial(config), config=>this.previewEffectivePolicy(config)));
     this.addCommand({ id:'ingest-active-advanced-source', name:'Ingest active Vault document (Advanced opt-in)',
       callback: () => { void this.ingestAdvancedActiveFile().catch(error =>
         new Notice('OKS Advanced: '+(error instanceof IngestError?error.code:'ADVANCED_UNAVAILABLE'))); } });
@@ -293,12 +302,12 @@ export default class SyntheticEvidencePlugin extends Plugin {
       // native event is not yet an accepted exact-version transition.
       this.retireLifecycleOwner();
       const paths = oldPath === undefined ? [file.path] : [file.path, oldPath];
-      if(this.layoutReady&&file instanceof TFile&&this.app.vault.getAbstractFileByPath(file.path)===file){
+      if(!this.settings.effectivePolicy&&this.layoutReady&&file instanceof TFile&&this.app.vault.getAbstractFileByPath(file.path)===file){
         if(event==='create')this.markingTracker.created(file.path,file);
         else if(event==='rename'&&oldPath!==undefined)this.markingTracker.renamed(oldPath,file.path,file);
         else if(event==='modify'||event==='metadata')this.markingTracker.changed(file.path,file);
         else for(const path of paths)this.markingTracker.invalidate(path);
-      } else for(const path of paths)this.markingTracker.invalidate(path);
+      } else if(!this.settings.effectivePolicy)for(const path of paths)this.markingTracker.invalidate(path);
       // Pin concrete owners and immutable path values before any callback.
       const navigator = this.navigator, engine = this.standalone, dense = this.denseHost;
       const ingestion = this.advancedIngestion, retrieval = this.advancedRetrieval;
@@ -333,6 +342,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     if(!engine||!reader||!(file instanceof TFile)||this.unloaded||this.denseSettingsChanging)
       throw new StandaloneError('SOURCE_REJECTED');
     const path=file.path,revision=this.searchController.sourceAuthorityRevision();
+    if(this.settings.effectivePolicy)throw new StandaloneError('SOURCE_REJECTED');
     const lifecycle=this.markingTracker.state(path,file);
     const current=()=>!this.unloaded&&!this.denseSettingsChanging&&this.standalone===engine&&this.sourceReader===reader
       &&this.searchController.sourceAuthorityCurrent(revision)&&this.app.workspace.getActiveFile()===file
@@ -342,6 +352,21 @@ export default class SyntheticEvidencePlugin extends Plugin {
     if(!current())throw new StandaloneError('SOURCE_CHANGED');
     return decideNewMaterialMarking(config,{sourceId:path,sha256:proof.sha256,rootId:reader.rootId,proof,
       lifecycle:{state:lifecycle,sourceId:path,sha256:proof.sha256,rootId:reader.rootId},provenance:null});
+  }
+  /** Prospective local decision over one current original; no admission or lifecycle registration. */
+  private async previewEffectivePolicy(config:EffectivePolicyConfig):Promise<EffectivePolicyDecision>{
+    const engine=this.standalone,reader=this.sourceReader,file=this.app.workspace.getActiveFile(),adapter=this.app.vault.adapter;
+    if(!engine||!reader||!(file instanceof TFile)||!(adapter instanceof FileSystemAdapter)||this.unloaded||this.denseSettingsChanging)
+      throw new StandaloneError('SOURCE_REJECTED');
+    const path=file.path,root=adapter.getBasePath(),revision=this.searchController.sourceAuthorityRevision();
+    const current=()=>!this.unloaded&&!this.denseSettingsChanging&&this.standalone===engine&&this.sourceReader===reader
+      &&this.app.vault.adapter===adapter&&adapter.getBasePath()===root&&reader.matchesRootPath(root)
+      &&this.searchController.sourceAuthorityCurrent(revision)
+      &&this.app.workspace.getActiveFile()===file&&file.path===path&&this.app.vault.getAbstractFileByPath(path)===file;
+    if(!current())throw new StandaloneError('SOURCE_CHANGED');
+    const snapshot=structuredClone(config),proof=await engine.previewPolicyMetadata(path,current,true);
+    if(!current())throw new StandaloneError('SOURCE_CHANGED');
+    return decideEffectivePolicy(snapshot,{sourceId:path,sha256:proof.sha256,rootId:reader.rootId,proof,origin:null});
   }
   async openSearch(): Promise<void> {
     if (this.unloaded) return;
@@ -454,6 +479,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
       }
       this.denseSettingsChanging = true;
       this.retireLifecycleOwner();
+      if(this.settings.effectivePolicy||settings.effectivePolicy)this.markingTracker.clear();
       try {
         // Revoke graph leases before any persistence or synchronous observers.
         this.standalone?.configureGraph(null);
@@ -901,7 +927,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private startLifecycleOwner(reader:BoundedVaultReader,root:string,revision:number):void {
     const vault=this.app.vault,adapter=vault.adapter;
     if (!(adapter instanceof FileSystemAdapter) || this.unloaded || this.sourceReader!==reader
-        || adapter.getBasePath()!==root || this.lifecycleOwner) return;
+        || adapter.getBasePath()!==root || this.lifecycleOwner || this.settings.effectivePolicy) return;
     const owner=new NativeLifecycleOwner(this.markingTracker);
     const rootPath=resolve(root),pluginId=this.manifest.id;
     const key=JSON.stringify([rootPath,pluginId]);

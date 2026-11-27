@@ -1,5 +1,5 @@
 import { BOUNDS, hash, isDigest, validPath } from '../standalone/contracts';
-import type { SourceProvider, DescriptorLifecycleProof, VerifiedOriginalRead } from '../standalone/source';
+import { verifiedOriginalDigest, type SourceProvider, type DescriptorLifecycleProof, type VerifiedOriginalRead } from '../standalone/source';
 import type { PolicyMetadataParser } from '../standalone/worker';
 import type { PolicyMetadataState, PolicyMetadataProof } from '../standalone/shared';
 import { AI_ROLES, ProviderFailure, type AiRole, type CallContext, type ProviderConfig } from './contracts';
@@ -185,11 +185,8 @@ export class EligibilityEvaluator {
       if(!requireProof)return {bytes:await this.reader.read(x.sourceId)};
       if(!this.reader.readVerifiedOriginal)throw new ProviderFailure('SOURCE_STALE');
       const observed:VerifiedOriginalRead=await this.reader.readVerifiedOriginal(x.sourceId);
-      const {bytes,proof}=observed,v=proof?.version;
-      if(!(bytes instanceof Uint8Array)||bytes.byteLength>BOUNDS.fileBytes||!v||v.rootId!==rootId||v.sourceId!==x.sourceId||v.sha256!==x.expectedSha256
-        ||!isDigest(v.versionId)||!isDigest(proof.stableIdentity)||hash(bytes)!==v.sha256)
-        throw new ProviderFailure('SOURCE_STALE');
-      return {bytes,proof,digest:hash(JSON.stringify([v.rootId,v.sourceId,v.sha256,v.versionId,proof.stableIdentity]))};
+      const digest=verifiedOriginalDigest(observed,rootId,x.sourceId,x.expectedSha256);
+      return {...observed,digest};
     };
     for(const x of notes){
       try{
