@@ -12,7 +12,7 @@ Existing OKS-02B synthetic Linux experiments with pinned local Docling Heron/Tab
 
 ## Decisions
 
-1. **Docling stays local.** For all supported Advanced PDF/DOCX structural extraction, run the reviewed, explicitly provisioned Docling runtime **on the user's Linux host**, plus local English/Russian OCR. Use no cloud Docling/Docling Serve, managed OCR, remote Docling VM, auto-provisioned cloud fallback or automatic transmission of document binaries. Local parsing does not require Cloud.ru or internet. Keep the default standalone Markdown lexical engine free of Docling/Python.
+1. **Docling stays local.** For all supported Advanced PDF/DOCX structural extraction, run the reviewed, explicitly provisioned Docling runtime **on the user's Linux host**, plus local English/Russian OCR. Use no cloud Docling/Docling Serve, managed OCR, remote Docling VM, auto-provisioned cloud fallback or automatic transmission of document binaries. Local parsing does not require internet access. Keep the default standalone Markdown lexical engine free of Docling/Python.
 2. **Independent extraction cache is required.** Persist canonical extracted `ParsedDocument` / `ParsedBlock` content, original-page/table/row/cell locators, source version, explicit `ok/partial/empty/failed` diagnostics and provenance in a **private host-local derived cache** outside the Vault. Do not store only flattened Markdown and then invent native structure. The extraction cache is separate from (a) chunk planning/cache, (b) BGE-M3 vector cache and (c) lexical/ANN index. Updating chunk policy, serialization, embeddings, retrieval settings or a vector backend must reuse validated parse results without repeating Docling.
 3. **Content and extraction-profile identity.** Compute `sourceByteDigest = SHA256(original file bytes)` independently from the extraction cache key. Build `extractionProfileId` from an unambiguous canonical, versioned manifest containing Docling/parser revision, layout/table/OCR model artifact identities, language/tessdata assets and settings, pipeline/extraction options, normalized output schema and semantic mapping version. `extractionCacheKey = SHA256(domain || sourceByteDigest || extractionProfileId)` with domain separation and unambiguous length-delimited serialization. Never assume a same-named extractor is compatible. No dependence on a host-specific absolute path for content reuse; authorizations and file-scoped locators are revalidated separately.
 4. **Freshness and provenance.** Cache hits must first verify current trusted local source bytes/hash and scope; validate cached schema, object SHA-256, completeness and source/profile identity. Rebind cached native locators to the current local source version; renames may reuse identical extraction if the underlying bytes/profile match, but never reuse stale `sourceId` or unsupported anchors. Every `EvidenceHit` still checks the current source and original location before display. A stale, missing, unauthorized or incompatible cache cannot produce apparently fresh evidence.
@@ -39,7 +39,7 @@ Invalidation must be layered: a source byte change invalidates source extraction
 | Alternative | Decision |
 |---|---|
 | Re-run Docling whenever the index is rebuilt | Rejected (slow, redundant and wasteful). |
-| Upload documents to Cloud.ru or run Docling on cloud GPU/VM | **Rejected for target OKS** (privacy/operations and no demonstrated need). |
+| Upload documents to a remote service or run Docling on cloud GPU/VM | **Rejected for target OKS** (privacy/operations and no demonstrated need). |
 | Store derived extraction as Markdown-only chunks | Rejected (loses native provenance and tables). |
 | Store extraction output in a sync folder by default | Rejected (contains potentially confidential source text). |
 | Local versioned parsed-document cache and independent downstream caches | **Selected**. |
@@ -54,7 +54,7 @@ Synthetic acceptance gates:
 - Fault injections: torn artifact, malicious metadata/path, truncated/oversize cache, crash/cancel during commit, missing local model, disk full, pressure; no partial publish and no accidental source deletion.
 - Explicit cache quota, pruning and restart support; constrained memory/disk workload on 16 GiB Linux hardware without UI blocking or implicit downloads.
 - Zero external network access in extraction tests; zero private source content in logs, public fixtures or cloud locations; standalone still works with cache disabled.
-- Measure cache hit/miss, original vs cached ingestion latency, CPU/RSS/disk, OCR quality and retrieval evidence on frozen synthetic document sets. Do not claim 1.5 GiB real-Vault performance without separately authorized sampling.
+- Measure cache hit/miss, original vs cached ingestion latency, CPU/RSS/disk, OCR quality and retrieval evidence on frozen synthetic document sets. Do not claim production-scale performance without separately authorized sampling.
 
 This is a **design decision, not implemented behavior or permission to process a production Vault**.
 

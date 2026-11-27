@@ -14,7 +14,7 @@
 ## Explicit exclusions / remaining Gate A work
 - Cross-physical-line phrase matching and text-range highlighting (only verified original line selection in A1).
 - Metadata-only search with an empty text query; independent tag/wiki-link predicate filtering and Obsidian frontmatter compatibility expansion. These require separate bounded slices and acceptance.
-- Optional PDF/DOCX/OCR (Gate C), embeddings/rerank/LLM/API (Gate B), new-Vault deployment and production documents.
+- Optional PDF/DOCX/OCR (Gate C), embeddings/rerank/LLM/API (Gate B), production deployment and production documents.
 - Independent release acceptance: an author cannot APPROVE or merge this Draft PR.
 
 ## Validation gates
