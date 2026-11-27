@@ -14,6 +14,7 @@ import { ProviderFailure, type CallContext } from '../ai/contracts';
 import type { PolicyMetadataProof } from './shared';
 import { verifiedOriginalDigest, type SourceProvider } from './source';
 import type { GenerationStore } from './storage';
+import type { HardSearchScope } from './hard-search-scope';
 import { validateGraphMapping, type GraphMapping } from './graph-mapping';
 import type { GraphProjection } from './graph-projection';
 import { authenticateGraphCatalog, buildAuthenticatedGraph, scopeGraph, type GraphScopeLease,
@@ -67,11 +68,13 @@ export class StandaloneEngine {
   private initialized = false;
   private versionHints: string[] | null = null;
   private verifiedAt = 0;
+  private readonly hardSearchScope: HardSearchScope|undefined;
   constructor(private readonly provider: SourceProvider, private readonly store: GenerationStore,
     private readonly parser: MarkdownParser,
     private readonly yieldJob: () => Promise<void> = yieldToHost,
     private readonly now: () => number = Date.now) {
     if (provider.rootId !== store.rootId) throw new StandaloneError('VAULT_IDENTITY_CHANGED');
+    this.hardSearchScope = provider.hardSearchScope;
   }
   status(): EngineState { return { ...this.state }; }
   private retireGraph(): void {
@@ -88,6 +91,11 @@ export class StandaloneEngine {
       busy: this.work !== null,
     };
   }
+  /** Reuse the source owner's immutable predicate, including for recovered data. */
+  private generationAllowed(generation: IndexGeneration): boolean {
+    const scope = this.hardSearchScope;
+    return !scope?.hasExclusions || generation.documents.every(doc => scope.allows(doc.sourceId));
+  }
   async start(): Promise<void> {
     if (this.stopped || this.initialized) throw new StandaloneError('LIFECYCLE_INVALID');
     this.initialized = true;
@@ -95,11 +103,14 @@ export class StandaloneEngine {
     try {
       const result = await this.store.load();
       if (this.stopped) return;
-      this.generation = result.generation;
-      this.recoveryNeedsPublication = result.recovered;
-      this.recordState(!result.generation && result.error ? 'failed'
+      // An authenticated rollback may still be inadmissible in the current
+      // scope. Never expose it or reuse its parsed documents while rebuilding.
+      const excluded = result.generation !== null && !this.generationAllowed(result.generation);
+      this.generation = excluded ? null : result.generation;
+      this.recoveryNeedsPublication = result.recovered || excluded;
+      this.recordState(excluded ? 'initializing' : !result.generation && result.error ? 'failed'
         : result.error || result.recovered ? 'degraded'
-        : result.generation ? 'ready' : 'initializing', result.error);
+        : result.generation ? 'ready' : 'initializing', excluded ? 'SEARCH_SCOPE_RESTRICTED' : result.error);
       // Unknown, foreign or corrupt cache must not be silently overwritten at startup.
       if (!result.generation && result.error) return;
       this.reconcile();
@@ -410,6 +421,7 @@ export class StandaloneEngine {
         throw new StandaloneError('SOURCE_CHANGED');
       if (this.stopped || this.paused || revision !== this.revision) return;
       const next = makeGeneration(this.provider.rootId, [...prior.values()]);
+      if (!this.generationAllowed(next)) throw new StandaloneError('SEARCH_SCOPE_RESTRICTED');
       // Repair a corrupt CURRENT recovered from PREVIOUS even when the source
       // content is unchanged, without risking deletion of the fallback snapshot.
       const publish = this.recoveryNeedsPublication || next.generationId !== this.generation?.generationId;

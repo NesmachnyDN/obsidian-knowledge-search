@@ -7,6 +7,8 @@ import {captureHardSearchScope,validHardScopePath,type HardSearchScope} from './
 
 export interface SourceProvider {
   readonly rootId: string;
+  /** Optional immutable hard scope captured by the source owner. */
+  readonly hardSearchScope?: HardSearchScope;
   list(): Promise<string[]>;
   versionHints(paths: readonly string[]): Promise<string[]>;
   read(path: string): Promise<Uint8Array>;
@@ -90,6 +92,7 @@ export class BoundedVaultReader implements SourceProvider {
       return new BoundedVaultReader(absolute, info.dev, info.ino, enumerate, scope);
     } catch { throw new StandaloneError('UNSUPPORTED_FILESYSTEM'); }
   }
+  get hardSearchScope(): HardSearchScope|undefined { return this.searchScope; }
   /** Synchronous adapter-path fence; descriptor reads still authenticate root identity. */
   matchesRootPath(root:string):boolean{return isAbsolute(root)&&resolve(root)===this.root;}
   private async rootCheck(): Promise<void> {
