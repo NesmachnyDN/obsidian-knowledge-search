@@ -93,3 +93,9 @@ test('POLICY.2a invalid rule shape, oversized values, missing input and spoofed 
     assert.equal(result.reason,'invalid-config');assert.equal(result.externalBlocked,true);
   }
 });
+
+test('POLICY.2a historical rule shape rejects new origin alias and preserves import-only rules',()=>{
+  const value=input();
+  assert.equal(decideNewMaterialMarking(config([{id:'legacy',action:'set-external',when:{importChannel:'scanner'}}]),value).reason,'required-input-unresolved');
+  assert.equal(decideNewMaterialMarking(config([{id:'bad-alias',action:'set-external',when:{origin:'scanner'}}]),value).reason,'invalid-config');
+});
