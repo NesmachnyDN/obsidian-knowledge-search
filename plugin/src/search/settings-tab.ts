@@ -1,4 +1,5 @@
 import { defaultMarkingRules, validNewMaterialRuleConfig, MAX_RULE_CONFIG_BYTES, type NewMaterialRuleConfig, type MarkAction, type NewMaterialDecision } from '../ai/new-material-policy';
+import { defaultEffectivePolicyConfig, validEffectivePolicyConfig, MAX_EFFECTIVE_POLICY_CONFIG_BYTES, type EffectivePolicyConfig, type EffectivePolicyDecision } from '../ai/effective-policy';
 import type { AdvancedHealth, AdvancedConfig } from '../advanced/health';
 import type { IngestionStatus } from '../advanced/manager';
 import type { RetrievalStatus } from '../advanced/retrieval-manager';
@@ -37,6 +38,7 @@ export class SearchSettingsTab extends PluginSettingTab {
   private topKInput?: string;
   private markingDraft?: {defaultAction:MarkAction;rules:string};
   private markingViewEpoch=0;
+  private effectiveDraft?:string;
   private graphDraft?: string;
   private advancedInput?: AdvancedConfig;
   private ingestionInput?: IngestionConfig;
@@ -59,7 +61,8 @@ export class SearchSettingsTab extends PluginSettingTab {
     private readonly searchStatus?: () => SearchStatus,
     private readonly lastBasic?: () => BasicResponse | undefined,
     private readonly aiOperationStatus?: OperationStatusReader,
-    private readonly previewMarking?: (config:NewMaterialRuleConfig)=>Promise<NewMaterialDecision>) {
+    private readonly previewMarking?: (config:NewMaterialRuleConfig)=>Promise<NewMaterialDecision>,
+    private readonly previewEffective?: (config:EffectivePolicyConfig)=>Promise<EffectivePolicyDecision>) {
     super(app, plugin);
     plugin.register(() => this.hide());
   }
@@ -423,6 +426,61 @@ export class SearchSettingsTab extends PluginSettingTab {
     if (restoreRefresh) restoreSettingsFocus(root, 'refresh');
   }
 
+  private showEffectivePolicy(root:HTMLElement):void {
+    const section=heading(root,'Read-only processing policy');
+    const saved=this.current().effectivePolicy;
+    section.createEl('p',{text:t(saved?'Read-only policy configured. Provider authorization is separate.':'Read-only policy not configured.')});
+    section.createEl('p',{text:t('Saving replaces legacy marking rules. No automatic migration, note writes, lifecycle enrollment or provider authorization.')});
+    this.effectiveDraft??=JSON.stringify(saved??defaultEffectivePolicyConfig(),null,2);
+    const error=alert(section),result=section.createEl('p'),epoch=this.markingViewEpoch;
+    result.setAttribute('aria-live','polite');
+    let revision=0,saving=false;
+    const parsed=():EffectivePolicyConfig|null=>{
+      try{
+        if(Buffer.byteLength(this.effectiveDraft!)>MAX_EFFECTIVE_POLICY_CONFIG_BYTES)return null;
+        const config:unknown=JSON.parse(this.effectiveDraft!);
+        return validEffectivePolicyConfig(config)?config:null;
+      }catch{return null;}
+    };
+    new Setting(section).setName(t('Effective policy (JSON)')).setDesc(t('Verified absent is denied by default. Private and restrictive rules override eligible. Unknown origin denies origin-dependent rules.'))
+      .addTextArea(text=>{
+        text.inputEl.setAttribute('aria-label',t('Effective policy (JSON)'));
+        text.inputEl.rows=8;text.inputEl.maxLength=MAX_EFFECTIVE_POLICY_CONFIG_BYTES;
+        return text.setValue(this.effectiveDraft!).onChange(value=>{this.effectiveDraft=value;revision++;result.textContent='';});
+      });
+    new Setting(section).setName(t('Local rule actions'))
+      .addButton(button=>button.setButtonText(t('Preview active note')).onClick(async()=>{
+        if(saving||this.markingViewEpoch!==epoch)return;
+        const config=parsed();
+        if(!config||!this.previewEffective){error.textContent=t('Invalid or unavailable effective policy.');return;}
+        const started=++revision;error.textContent='';result.textContent=t('Checking local original…');
+        try{
+          const decision=await this.previewEffective(config);
+          if(this.markingViewEpoch!==epoch||revision!==started)return;
+          result.textContent=f('Decision: {decision}; reason: {reason}. No provider authorization.',{
+            decision:t(decision.decision==='eligible'?'Eligible':'Denied'),reason:decision.reason});
+        }catch{if(this.markingViewEpoch===epoch&&revision===started)result.textContent=t('Local preview unavailable.');}
+      }))
+      .addButton(button=>button.setButtonText(t('Save read-only policy')).onClick(async()=>{
+        if(saving||this.markingViewEpoch!==epoch)return;
+        const config=parsed();if(!config){error.textContent=t('Invalid or unavailable effective policy.');return;}
+        saving=true;const started=++revision;result.textContent='';
+        try{if(await this.commit(settings=>{delete settings.markingRules;settings.effectivePolicy=structuredClone(config);},error)
+          &&this.markingViewEpoch===epoch&&revision===started){this.effectiveDraft=undefined;this.markingDraft=undefined;this.display();}}
+        finally{saving=false;}
+      }))
+      .addButton(button=>button.setButtonText(t('Disable read-only policy')).onClick(async()=>{
+        if(saving||this.markingViewEpoch!==epoch||!saved)return;
+        saving=true;const started=++revision;result.textContent='';
+        try{if(await this.commit(settings=>{delete settings.effectivePolicy;},error)
+          &&this.markingViewEpoch===epoch&&revision===started){this.effectiveDraft=undefined;this.display();}}
+        finally{saving=false;}
+      }))
+      .addButton(button=>button.setButtonText(t('Cancel')).onClick(()=>{
+        if(saving||this.markingViewEpoch!==epoch)return;this.effectiveDraft=undefined;this.display();
+      }));
+  }
+
   private showMarkingRules(root:HTMLElement):void {
     const section=heading(root,'New-material processing rules');
     section.createEl('p',{text:t('Local dry run only. No note writes or provider authorization. Unknown lifecycle or provenance blocks external processing.')});
@@ -542,7 +600,8 @@ export class SearchSettingsTab extends PluginSettingTab {
     this.releaseProviderChecks = renderProviderSettings(ai, this.app, this.current().ai, this.aiInputs, this.openEditors, expert,
       (role, preference) => this.patchSettings(settings => { settings.ai[role] = preference; }),
       focusKey => this.display(focusKey), this.aiOperationStatus);
-    this.showMarkingRules(root);
+    this.showEffectivePolicy(root);
+    if(!this.current().effectivePolicy)this.showMarkingRules(root);
     this.showDocuments(root);
     this.showIndex(root);
     if (expert) { this.showGraphSettings(root); this.showExpert(root); }

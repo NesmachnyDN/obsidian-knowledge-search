@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { defaultEffectivePolicyConfig } from '../plugin/src/ai/effective-policy';
+import { defaultMarkingRules } from '../plugin/src/ai/new-material-policy';
 import { defaultSettings, parseSettings } from '../plugin/src/search/settings';
 import { advancedDraft, ingestionDraft, needsOcr, needsStructure, probeDraft, topKDraft,
   newProviderDraft, providerDraft, embeddingSpaceChanged } from '../plugin/src/search/settings-draft';
@@ -178,4 +180,20 @@ test('06B.2c optional graph settings are explicit, canonical, independently fail
   const {presentationMode:_mode,...v5}=initial;
   assert.throws(()=>parseSettings({...v5,version:5,graph:{state:'configured',mapping}}),/SETTINGS_INVALID/);
   assert.equal(parseSettings({...v5,version:5}).graph,undefined);
+});
+
+
+test('P0.1c explicit effective settings are independent, strict and never implicitly migrated',()=>{
+  const base=defaultSettings(),effective=defaultEffectivePolicyConfig(),legacy=defaultMarkingRules();
+  assert.equal(base.effectivePolicy,undefined);
+  assert.equal(parseSettings({...base,markingRules:legacy}).effectivePolicy,undefined);
+  const saved=parseSettings({...base,effectivePolicy:effective});
+  assert.deepEqual(saved.effectivePolicy,effective);assert.notEqual(saved.effectivePolicy,effective);
+  assert.deepEqual(parseSettings(JSON.parse(JSON.stringify(saved))),saved);
+  assert.throws(()=>parseSettings({...base,effectivePolicy:effective,markingRules:legacy}),/SETTINGS_INVALID/);
+  for(const value of [null,undefined,legacy,{...effective,verifiedAbsent:true},{...effective,unknown:true}]){
+    assert.throws(()=>parseSettings({...base,effectivePolicy:value}),/SETTINGS_INVALID/);
+  }
+  const {presentationMode:_mode,...older}=base;
+  assert.throws(()=>parseSettings({...older,version:5,effectivePolicy:effective}),/SETTINGS_INVALID/);
 });

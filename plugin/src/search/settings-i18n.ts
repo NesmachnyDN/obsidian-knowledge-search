@@ -21,6 +21,18 @@ export function settingsLocale(language: string): SettingsLocale {
 }
 
 const russian: Readonly<Record<string, string>> = {
+  'Read-only processing policy': 'Политика обработки без изменения заметок',
+  'Read-only policy configured. Provider authorization is separate.': 'Политика настроена. Допуск провайдера проверяется отдельно.',
+  'Read-only policy not configured.': 'Политика обработки без изменения заметок не настроена.',
+  'Saving replaces legacy marking rules. No automatic migration, note writes, lifecycle enrollment or provider authorization.': 'Сохранение заменяет прежние правила маркировки. Без автоматической миграции, записи заметок, регистрации жизненного цикла или допуска провайдера.',
+  'Effective policy (JSON)': 'Политика обработки (JSON)',
+  'Verified absent is denied by default. Private and restrictive rules override eligible. Unknown origin denies origin-dependent rules.': 'Подтверждённое отсутствие метки по умолчанию запрещает обработку. Private и ограничительные правила имеют приоритет. Неизвестное происхождение блокирует правила, зависящие от него.',
+  'Invalid or unavailable effective policy.': 'Некорректная или недоступная политика обработки.',
+  'Decision: {decision}; reason: {reason}. No provider authorization.': 'Решение: {decision}; причина: {reason}. Допуск провайдера не выдан.',
+  'Eligible': 'Допустимо по политике',
+  'Denied': 'Запрещено политикой',
+  'Save read-only policy': 'Сохранить политику без изменения заметок',
+  'Disable read-only policy': 'Отключить политику без изменения заметок',
   'Local knowledge graph': 'Локальный граф знаний',
   'Graph mapping state': 'Состояние конфигурации графа',
   'Graph mapping configured; readiness not verified.': 'Конфигурация графа сохранена; готовность не проверена.',

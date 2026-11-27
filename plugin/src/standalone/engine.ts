@@ -12,7 +12,7 @@ import type { MarkdownParser, PolicyMetadataParser } from './worker';
 import { EligibilityEvaluator, type PolicyHost, type PolicyEnvelope } from '../ai/processing-policy';
 import { ProviderFailure, type CallContext } from '../ai/contracts';
 import type { PolicyMetadataProof } from './shared';
-import type { SourceProvider } from './source';
+import { verifiedOriginalDigest, type SourceProvider } from './source';
 import type { GenerationStore } from './storage';
 import { validateGraphMapping, type GraphMapping } from './graph-mapping';
 import type { GraphProjection } from './graph-projection';
@@ -172,7 +172,7 @@ export class StandaloneEngine {
   }
   /** Local preview only. Share the existing worker and hold the physical slot
    * through late read/parser completion; a timeout never publishes a proof. */
-  previewPolicyMetadata(path:string,current:()=>boolean):Promise<PolicyMetadataProof> {
+  previewPolicyMetadata(path:string,current:()=>boolean,requireOriginalProof=false):Promise<PolicyMetadataProof> {
     const parser=this.parser as MarkdownParser & Partial<PolicyMetadataParser>;
     if(this.stopped||!this.initialized||this.paused||this.work||this.localRead||!validPath(path)||!parser.policyMetadata)
       return Promise.reject(new StandaloneError('PARSER_BUSY'));
@@ -180,11 +180,18 @@ export class StandaloneEngine {
     let expired=false;
     const live=()=>!expired&&!this.stopped&&!this.paused&&this.revision===revision;
     const check=()=>{if(!live()||!current()||!live())throw new StandaloneError('SOURCE_CHANGED');};
+    const read=async()=>{
+      if(!requireOriginalProof)return {bytes:await this.provider.read(path),digest:null};
+      if(!this.provider.readVerifiedOriginal)throw new StandaloneError('SOURCE_CHANGED');
+      const observed=await this.provider.readVerifiedOriginal(path);
+      return {bytes:observed.bytes,digest:verifiedOriginalDigest(observed,root,path)};
+    };
     const physical=Promise.resolve().then(async()=>{
-      check();const bytes=await this.provider.read(path);check();
+      check();const {bytes,digest}=await read();check();
       if(bytes.byteLength>BOUNDS.fileBytes)throw new StandaloneError('SOURCE_LIMIT');
       const sha=hash(bytes),proof=await parser.policyMetadata!(path,bytes,root);check();
-      if(proof.sourceId!==path||proof.sha256!==sha||proof.scopeId!==root||hash(await this.provider.read(path))!==sha)
+      const renewed=await read();
+      if(proof.sourceId!==path||proof.sha256!==sha||proof.scopeId!==root||hash(renewed.bytes)!==sha||renewed.digest!==digest)
         throw new StandaloneError('SOURCE_CHANGED');
       check();return proof;
     });

@@ -11,6 +11,9 @@ import type { ModelReply } from '../plugin/src/advanced/model-protocol';
 import { join, resolve } from 'node:path';
 import { parseMarkdown } from '../plugin/src/standalone/markdown';
 import { parsePolicyMetadata } from '../plugin/src/standalone/markdown-parse';
+import { defaultEffectivePolicyConfig, type EffectivePolicyConfig, type EffectivePolicyDecision } from '../plugin/src/ai/effective-policy';
+import type { GenerationPolicyHostState } from '../plugin/src/ai/generation-policy-host';
+import type { ProcessingPolicyInput } from '../plugin/src/ai/generation-policy';
 import { defaultMarkingRules, type NewMaterialRuleConfig, type NewMaterialDecision } from '../plugin/src/ai/new-material-policy';
 import { SourceNavigator } from '../plugin/src/search/navigation';
 import { uiRequest } from '../plugin/src/search/controller';
@@ -2403,4 +2406,76 @@ test('06B.2c persisted graph mapping loads on startup while malformed graph does
       assert.equal(basic.status,'ok');assert.equal(basic.hits.length,1);
     }finally{await f.cleanup();}
   }
+});
+
+
+test('P0.1c native effective mode reads originals without ledger or provider admission, including reload',async()=>{
+  const f=await fixture();let replacement:LifecycleTestPlugin|undefined;
+  const file=Object.assign(new Empty(),{path:'fixture.md'});
+  Object.assign(f.plugin.app.vault,{getMarkdownFiles:()=>[file],getAbstractFileByPath:(path:string)=>path===file.path?file:null});
+  Object.assign(f.plugin.app.workspace,{getActiveFile:()=>file});
+  const config=defaultEffectivePolicyConfig();
+  const provider={state:'configured',transport:'cloud',origin:'https://api.example.com',identity:{model:'synthetic',revision:'v1'},
+    limits:{timeoutMs:1000,maxInputBytes:2048,maxCandidates:10,maxOutputTokens:128,maxConcurrent:1}} as const;
+  const settings=defaultSettings();settings.effectivePolicy=config;
+  settings.ai.generation=provider;settings.ai.reranking=provider;settings.ai.embedding=provider;
+  Object.assign(f.plugin,{saved:settings});
+  const port=(p:LifecycleTestPlugin)=>p as unknown as {
+    previewEffectivePolicy(c:EffectivePolicyConfig):Promise<EffectivePolicyDecision>;
+    policyHostState(i:Pick<ProcessingPolicyInput<'generation'|'reranking'|'embedding'>,'role'|'scopeId'|'scopeSources'|'sources'>):GenerationPolicyHostState|null;
+    sourceReader:BoundedVaultReader;
+  };
+  try{
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    assert.equal(nativeLifecycleOwner(f.plugin),undefined);
+    const original=await readFile(join(f.vault,file.path));
+    assert.equal((await port(f.plugin).previewEffectivePolicy(config)).reason,'default-denied');
+    const eligible={...config,verifiedAbsent:'eligible'} as const;
+    assert.equal((await port(f.plugin).previewEffectivePolicy(eligible)).decision,'eligible');
+    for(const role of ['generation','reranking','embedding'] as const){
+      const state=port(f.plugin).policyHostState({role,scopeId:port(f.plugin).sourceReader.rootId,
+        scopeSources:[{sourceId:file.path,sourceSha256:hash(original)}],sources:[]});
+      assert.ok(state);assert.equal(state.profile,null);assert.equal(state.mode,'effective');assert.deepEqual(state.materials,[]);
+      assert.deepEqual(state.effective?.origins,[null]);
+      assert.equal(state.rules,undefined);assert.deepEqual(state.effective?.config,config);
+    }
+    const reader=port(f.plugin).sourceReader;
+    const adapter=f.plugin.app.vault.adapter;
+    const other=join(f.root,'unrelated');await mkdir(other);
+    Object.assign(f.plugin.app.vault,{adapter:new FileSystemAdapter(other)});
+    try{
+      await assert.rejects(port(f.plugin).previewEffectivePolicy(eligible),/SOURCE_CHANGED/);
+      assert.equal(port(f.plugin).policyHostState({role:'generation',scopeId:reader.rootId,scopeSources:[],sources:[]}),null);
+    }finally{Object.assign(f.plugin.app.vault,{adapter});}
+    const read=reader.readVerifiedOriginal.bind(reader);
+    let reads=0;
+    reader.readVerifiedOriginal=async path=>{
+      const observed=await read(path);
+      if(++reads===1){
+        await writeFile(join(f.vault,'replacement.tmp'),original);await rename(join(f.vault,'replacement.tmp'),join(f.vault,file.path));
+      }
+      return observed;
+    };
+    try{await assert.rejects(port(f.plugin).previewEffectivePolicy(eligible),/SOURCE_CHANGED/);}
+    finally{reader.readVerifiedOriginal=read;}
+    assert.deepEqual(await readFile(join(f.vault,file.path)),original);
+    const rev=f.plugin.searchController.sourceAuthorityRevision();
+    await f.plugin.patchSettings(s=>{s.effectivePolicy=eligible;});
+    assert.equal(f.plugin.searchController.sourceAuthorityCurrent(rev),false);
+    assert.deepEqual(f.plugin.settings.effectivePolicy,eligible);
+    assert.equal(nativeLifecycleOwner(f.plugin),undefined);
+    // The silent descriptor replacement must be reconciled before a ready search.
+    f.plugin.standalone!.reconcile();await f.plugin.standalone!.whenIdle();
+    const search=await f.plugin.searchController.search(uiRequest('REQ-LIFE-1',1));
+    assert.ok(search.ok&&search.value.status==='ok');assert.equal(search.value.hits.length,1);
+    f.plugin.onunload();
+    await assert.rejects(port(f.plugin).previewEffectivePolicy(eligible),/SOURCE_REJECTED/);
+    replacement=replacementPlugin(f);await replacement.onload();f.layout();
+    await (replacement as unknown as {initializing:Promise<void>}).initializing;
+    await replacement.standalone!.whenIdle();
+    assert.equal(nativeLifecycleOwner(replacement),undefined);
+    assert.deepEqual(replacement.settings.effectivePolicy,eligible);
+    assert.equal((await port(replacement).previewEffectivePolicy(eligible)).decision,'eligible');
+    assert.deepEqual(await readFile(join(f.vault,file.path)),original);
+  }finally{replacement?.onunload();await f.cleanup();}
 });
