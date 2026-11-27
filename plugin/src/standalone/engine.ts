@@ -206,7 +206,8 @@ export class StandaloneEngine {
     const live=()=>!this.stopped&&!this.paused&&this.revision===revision;
     const current=()=>live()&&host.current()&&live();
     const evaluator=new EligibilityEvaluator(this.provider,{policyMetadata:(path,bytes,root)=>parser.policyMetadata!(path,bytes,root)},
-      {snapshot:()=>host.snapshot(),current,...(host.marking?{marking:(proof:PolicyMetadataProof)=>host.marking!(proof)}:{})});
+      {snapshot:()=>host.snapshot(),current,...(host.requireOriginalProof?{requireOriginalProof:true as const}:{}),
+        ...(host.marking?{marking:(proof,original)=>host.marking!(proof,original)}:{})});
     const result=Promise.resolve().then(()=>evaluator.evaluate(context));
     const physical=result.then(()=>evaluator.drain(),()=>evaluator.drain());
     this.localRead=physical;
