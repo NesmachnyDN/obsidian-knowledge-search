@@ -56,12 +56,14 @@ export const hash = (data: Uint8Array | string): string => createHash('sha256').
 export const isDigest = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
-export function validPath(path: unknown): path is string {
+export function validVaultRelativePath(path: unknown): path is string {
   return typeof path === 'string' && path.length > 0 && Buffer.byteLength(path) <= 1024
     && !path.includes('\\') && !path.includes('\0') && !path.startsWith('/')
     && path.split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..'
-      && !segment.startsWith('.') && !segment.includes(':'))
-    && path.toLowerCase().endsWith('.md');
+      && !segment.startsWith('.') && !segment.includes(':'));
+}
+export function validPath(path: unknown): path is string {
+  return validVaultRelativePath(path) && path.toLowerCase().endsWith('.md');
 }
 function scalar(value: unknown): value is Scalar {
   return value === null || typeof value === 'string' || typeof value === 'boolean'
