@@ -1,0 +1,138 @@
+{
+  "oracle_sha256": "e8f33023a222aa5b5ea230559274e76777ad251b78384847c2ccc875d6fdacc1",
+  "schema": "oks-06g1b-text-diagram-v1",
+  "sources": {
+    "backlink.md": {
+      "bytes": 46,
+      "sha256": "288496d0a90c94cb9608b5d8d9980042ddc4f12903f6b4a4ee8bad785308a3ba"
+    },
+    "copy.drawio": {
+      "bytes": 1142,
+      "sha256": "5d9dad47192d2a4cb1185867741f8045853bac7935551cfadfb7ef2931bf625f"
+    },
+    "d01.mermaid": {
+      "bytes": 59,
+      "sha256": "1c73df0e4bf9290e3b36ef67c477a0db2d199b00bce6717339b99b50d3c11fe5"
+    },
+    "d02.mermaid": {
+      "bytes": 61,
+      "sha256": "847f52737e2891022117503496f7afe1a7643419ac7c612e46ebe7161de45925"
+    },
+    "d03.mmd": {
+      "bytes": 59,
+      "sha256": "8a8560b6bd5b9de1f2d3652a0bb7872cc1795854c98d0edc92557de72e0055c5"
+    },
+    "d04.mmd": {
+      "bytes": 61,
+      "sha256": "e06a43e6839688d153cef8b0b3ac45a246a22b3bc072e0ed1ff489be63d325a4"
+    },
+    "d05.uml": {
+      "bytes": 94,
+      "sha256": "1e0d3747c08ee64c736dd96d967e379733e5b781e465f99be0b73a9a2b673c8e"
+    },
+    "d06.uml": {
+      "bytes": 99,
+      "sha256": "fb2156e5e2060c0a9e7f5f569f61e6d8fe8206b23c9165ec47c15f39b47a19e7"
+    },
+    "d07.puml": {
+      "bytes": 94,
+      "sha256": "df1be5abccc7cab68b94a1e0fe86afa6e454ef33d2a88d7c4f546d768e577fb6"
+    },
+    "d08.puml": {
+      "bytes": 99,
+      "sha256": "a4b8c6c28035c8d6624c9d10b05f87d65f7e03be71d491343c873563feea6f5c"
+    },
+    "d09.plantuml": {
+      "bytes": 94,
+      "sha256": "3843fa85c9f149b62964695b1afc19b29ac8e4d6681ea544dbf7822ff62f9976"
+    },
+    "d10.plantuml": {
+      "bytes": 99,
+      "sha256": "e2d29fb17f0b6ebc1fbb9b67bb63ae55ede0195d53470755fa322e1ce7af6dfb"
+    },
+    "m01.md": {
+      "bytes": 54,
+      "sha256": "025f9f26ac6c9263fb5a645c1ff15abb881a034c3f1adfc871fe32031e914c14"
+    },
+    "m02.md": {
+      "bytes": 57,
+      "sha256": "24ad24e99cf87dab12b6fbf43fea4967ee5d23914f066695920dac159e80b732"
+    },
+    "n01.txt": {
+      "bytes": 11,
+      "sha256": "2c147c9e90ea474a7621e9a41fba9c4e30a3393476f45960a9e385f09c837206"
+    },
+    "n02.txt": {
+      "bytes": 2,
+      "sha256": "17a68a6d0378bc7f7be5ba21616fa0d5bec393a1ca4d2f6adca678c2794971a9"
+    },
+    "n03.txt": {
+      "bytes": 24,
+      "sha256": "2009bfc46cce47d4ef9b9e5cd6393c20fc46c015b86d4bb94dd00d7a51f308cd"
+    },
+    "n04.puml": {
+      "bytes": 96,
+      "sha256": "0cc47953a7c006963091aff1491cdeec2c2d79379a7df7ec44b4840014aedb7c"
+    },
+    "n05.drawio": {
+      "bytes": 80,
+      "sha256": "a0460b28d97909380d7fb45266f30019c956513a4f0537bfe494a023631d32ac"
+    },
+    "n06.drawio": {
+      "bytes": 71,
+      "sha256": "006a5d37ff74cd993002082623bd9f2ca996b697b55e6c3cee75fdec9be5c82f"
+    },
+    "n07.drawio": {
+      "bytes": 299,
+      "sha256": "d8f371444e958e0595203cb3167c6ca365974dc56d7edd248b395ec7583eceeb"
+    },
+    "n08.drawio": {
+      "bytes": 14,
+      "sha256": "a709753cb48d7b098fdb9df68f3d21b1d5f6124c1651bc8cd680cd90fac2bfe9"
+    },
+    "n09.drawio": {
+      "bytes": 117,
+      "sha256": "45a131367030480d71ec3bab618acdc3dd41952d67f2bfc0a1ff213fa49377ea"
+    },
+    "owner-a.md": {
+      "bytes": 85,
+      "sha256": "590bd352c6f3d093f13e0a8b381228117cf0745364d492d1f112b160ab611de6"
+    },
+    "owner-b.md": {
+      "bytes": 84,
+      "sha256": "3d111cfa04f9c65b4b09108f92be8cb89de1cac0cf540ad7b6377906a4659845"
+    },
+    "t01.txt": {
+      "bytes": 42,
+      "sha256": "4a89bc95f429737f86adb27d24bbf7c248792878e0d2501c06848b2757c9c2ed"
+    },
+    "t02.txt": {
+      "bytes": 45,
+      "sha256": "43f37126e41bbd51a1bec7e4cf2270c4a97b64f5ff2ef9658f1abd88d890f41d"
+    },
+    "t03.txt": {
+      "bytes": 35,
+      "sha256": "9808fbe1f46c88710c028f76083ec9bd5f5432badcdc46b0fcd8c3a5165c05b2"
+    },
+    "t04.txt": {
+      "bytes": 33,
+      "sha256": "e6e4523218de4c09b34c16e883d5e2b2718ed0cae1c936f6631bc4c8c8b4e0a6"
+    },
+    "x01.drawio": {
+      "bytes": 1142,
+      "sha256": "5d9dad47192d2a4cb1185867741f8045853bac7935551cfadfb7ef2931bf625f"
+    },
+    "x02.drawio": {
+      "bytes": 1142,
+      "sha256": "43b20c68ddb62a58b99dc901221291ed3045c40a9ba0f6982e972e8154d009c8"
+    },
+    "x03.drawio": {
+      "bytes": 2397,
+      "sha256": "28a545cda0ff4fcc10e36b5b40c453def3caeda25ecd2aea49f3d6398576c3fe"
+    },
+    "x04.drawio": {
+      "bytes": 2397,
+      "sha256": "aa50b805ba91e4095f488e5bcf26af3acb31975cd4d22ac34fd65e68378a6765"
+    }
+  }
+}
