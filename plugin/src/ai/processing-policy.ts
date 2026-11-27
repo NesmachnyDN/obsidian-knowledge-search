@@ -182,7 +182,11 @@ export class EligibilityEvaluator {
     const requireProof=this.host.requireOriginalProof===true;
     const originals=new Map<string,string>();
     const read=async(x:PolicySubject):Promise<{bytes:Uint8Array;proof?:DescriptorLifecycleProof;digest?:string}>=>{
-      if(!requireProof)return {bytes:await this.reader.read(x.sourceId)};
+      if(!requireProof){
+        const bytes=await this.reader.read(x.sourceId);
+        if(!current())throw new ProviderFailure('CANCELLED');
+        return {bytes};
+      }
       if(!this.reader.readVerifiedOriginal)throw new ProviderFailure('SOURCE_STALE');
       const observed:VerifiedOriginalRead=await this.reader.readVerifiedOriginal(x.sourceId);
       if(!current())throw new ProviderFailure('CANCELLED');

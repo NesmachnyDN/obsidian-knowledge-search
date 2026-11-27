@@ -16,6 +16,7 @@ import {hash,PROTOCOL,StandaloneError} from '../plugin/src/standalone/contracts'
 import {captureNativeExclusions} from '../plugin/src/search/native-exclusions';
 import {authenticateGraphCatalog} from '../plugin/src/standalone/graph-lifecycle';
 import {materializeGraph} from '../plugin/src/standalone/graph-retrieval';
+import {deriveGraphProjection} from '../plugin/src/standalone/graph-projection';
 import {parseGraphQuery} from '../plugin/src/standalone/graph-expansion';
 import {validateGraphMapping} from '../plugin/src/standalone/graph-mapping';
 import type {RevocableHardSearchScope} from '../plugin/src/standalone/hard-search-scope';
@@ -44,7 +45,7 @@ async function fixture(files:Record<string,string>={'one.md':'# unique one.md','
     engines.push(engine);
     return {engine,reader,store,parses:()=>parses,onParse:(cb:()=>void)=>{onParse=cb;},previews:()=>previews,onPreview:(cb:()=>void)=>{onPreview=cb;}};
   };
-  return {open,change,cleanup:async()=>{for(const e of engines)await e.close();for(const l of leases)l.dispose();await rm(root,{recursive:true,force:true});}};
+  return {open,change,write:(path:string,text:string)=>writeFile(join(root,path),text),cleanup:async()=>{for(const e of engines)await e.close();for(const l of leases)l.dispose();await rm(root,{recursive:true,force:true});}};
 }
 async function denied(engine:StandaloneEngine){
   assert.equal(engine.status().generationId,null);
@@ -254,7 +255,10 @@ test('revoked settlement discards bytes before processing: '+stage,async t=>{
 });
 
 // Inspect owner state before status()/current() can repair the missing fence.
-const ownerState=(engine:StandaloneEngine)=>engine as unknown as {scopeRetired:boolean;generation:unknown;graphCache:unknown};
+const ownerState=(engine:StandaloneEngine)=>engine as unknown as {
+  scopeRetired:boolean;generation:unknown;graphCache:unknown;localRead:Promise<unknown>|null;
+  work:Promise<void>|null;all:boolean;pending:Set<string>;yieldJob:()=>Promise<void>;scopeCurrent():boolean;
+};
 const graphRequest={requestId:'synthetic-graph',query:'unique',limit:10,scope:{mode:'vault-wide'},
   expansion:{depth:0,direction:'outgoing',fanOut:16,maxExpanded:32}};
 for(const route of ['chat-capture','chat-verify','chat-search','graph-read','local-graph-read','local-graph-verify'] as const)
@@ -313,9 +317,11 @@ for(const timing of ['before-terminal','after-terminal'] as const)test('graph '+
     if(timing==='before-terminal')f.change(['one.md']);
     if(terminal==='abort')abort.abort();else t.mock.timers.tick(30001);
     await rejected;
+    assert.ok(ownerState(engine).localRead,'logical denial must not release physical slot');
     if(timing==='before-terminal')assert.equal(ownerState(engine).scopeRetired,true);
     else{assert.equal(ownerState(engine).scopeRetired,false);f.change(['one.md']);}
     release();await engine.whenIdle();
+    assert.equal(ownerState(engine).localRead,null);
     assert.equal(ownerState(engine).scopeRetired,true);assert.equal(ownerState(engine).generation,null);
     assert.equal(reads,1);await denied(engine);
   }finally{t.mock.timers.reset();release();await f.cleanup();}
@@ -346,9 +352,11 @@ for(const timing of ['before-terminal','after-terminal'] as const)test(route+' o
     await entered;if(timing==='before-terminal')f.change(['one.md']);
     if(route==='preview')t.mock.timers.tick(5001);else abort.abort();
     await settled;
+    assert.ok(ownerState(engine).localRead,'logical denial must not release physical slot');
     if(timing==='before-terminal')assert.equal(ownerState(engine).scopeRetired,true);
     else{assert.equal(ownerState(engine).scopeRetired,false);f.change(['one.md']);}
     release();await engine.whenIdle();
+    assert.equal(ownerState(engine).localRead,null);
     assert.equal(ownerState(engine).scopeRetired,true);assert.equal(ownerState(engine).generation,null);
     assert.equal(reads,1);assert.equal(previews(),0);await denied(engine);
   }finally{t.mock.timers.reset();release();await f.cleanup();}
@@ -386,5 +394,170 @@ for(const stage of ['lexical','anchor','expanded'] as const)test('graph nested e
     finally{Array.prototype.push=originalPush;}
     assert.equal(armed,true);assert.equal(revoked,true);assert.equal(late,0);assert.equal(lateAssembly,0);
     await denied(engine);
+  }finally{await f.cleanup();}
+});
+
+// One-shot admission is independent of the lifetime of the engine owner.
+for(const stage of ['read-again','verify-before-read','verify-after-failed-read','verify-again'] as const)
+for(const revoke of [true,false])test('local graph repeated admission '+stage+' revoked='+revoke,async()=>{
+  const f=await fixture();try{
+    const {engine,reader,parses}=await f.open();await engine.start();await engine.whenIdle();
+    const owner=ownerState(engine);
+    engine.configureGraph({schemaVersion:'oks-06b-mapping-v1',rules:[]});
+    const lease=engine.captureLocalGraph(graphRequest,new AbortController().signal);
+    const original=reader.read.bind(reader),failure=Error('ordinary synthetic read failure');
+    if(stage==='read-again'||stage==='verify-again'){
+      await lease.read();assert.ok(owner.graphCache);
+      if(stage==='verify-again')await lease.verify();
+    }else if(stage==='verify-after-failed-read'){
+      reader.read=async()=>{throw failure;};
+      await assert.rejects(lease.read(),failure);reader.read=original;
+    }
+    assert.ok(owner.generation);assert.equal(owner.scopeRetired,false);
+    let dispatches=0;
+    reader.read=async path=>{dispatches++;return original(path);};
+    const list=reader.list.bind(reader),hints=reader.versionHints.bind(reader);
+    reader.list=async()=>{dispatches++;return list();};
+    reader.versionHints=async paths=>{dispatches++;return hints(paths);};
+    const before=parses();
+    if(revoke)f.change(['one.md']);
+    const result=stage==='read-again'?lease.read():lease.verify();
+    if(stage==='verify-again'&&!revoke){await result;assert.ok(dispatches>0);}
+    else{await assert.rejects(result,/GRAPH_SOURCE_STALE/);assert.equal(dispatches,0);}
+    assert.equal(owner.scopeRetired,revoke);
+    assert.equal(owner.generation===null,revoke);
+    if(revoke)assert.equal(owner.graphCache,null);
+    assert.equal(parses(),before);
+  }finally{await f.cleanup();}
+});
+
+// Await the actual captured work promise, not status/current/whenIdle, so
+// a missing finalizer cannot be concealed by a subsequent public observation.
+for(const stage of ['unchanged','parsed','final-versions'] as const)
+for(const mode of ['cancel-revoke','revoke-cancel','cancel-only','dirty-revoke','yield-reject','revoke-only','close-revoke','dirty-only'] as const)
+test('reconciliation physical yield '+stage+' '+mode,async()=>{
+  const f=await fixture();let release=()=>{};try{
+    const {engine,reader,parses}=await f.open();await engine.start();await engine.whenIdle();
+    const owner=ownerState(engine);
+    const before=owner.generation;assert.ok(before);
+    let enter=()=>{},yields=0,dispatches=0;
+    const entered=new Promise<void>(r=>{enter=r;});
+    const held=new Promise<void>(r=>{release=r;});
+    const target=stage==='final-versions'?3:1;
+    const read=reader.read.bind(reader),list=reader.list.bind(reader),hints=reader.versionHints.bind(reader);
+    if(stage==='parsed')await f.write('one.md','# unique changed');
+    reader.read=async path=>{dispatches++;return read(path);};
+    reader.list=async()=>{dispatches++;return list();};
+    reader.versionHints=async paths=>{dispatches++;return hints(paths);};
+    const beforeParses=parses();
+    owner.yieldJob=async()=>{
+      if(++yields!==target)return;
+      enter();await held;
+      if(mode==='yield-reject')throw Error('synthetic cooperative yield failure');
+    };
+    engine.reconcile();await entered;
+    const physical=owner.work;assert.ok(physical);
+    assert.equal(parses()-beforeParses,stage==='parsed'?1:0);
+    let closing:Promise<void>|undefined;
+    if(mode==='dirty-revoke'||mode==='dirty-only'){engine.changed('two.md');assert.ok(owner.pending.size);}
+    else if(mode==='revoke-cancel'){f.change(['one.md']);assert.equal(engine.cancel(),true);}
+    else if(mode==='close-revoke')closing=engine.close();
+    else if(mode==='cancel-only'||mode==='cancel-revoke')assert.equal(engine.cancel(),true);
+    if(['cancel-revoke','dirty-revoke','yield-reject','revoke-only','close-revoke'].includes(mode))f.change(['one.md']);
+    const dispatchBefore=dispatches,parseBefore=parses();
+    assert.equal(owner.work,physical);
+    release();await physical;
+    const revoked=mode!=='cancel-only'&&mode!=='dirty-only';
+    assert.equal(owner.scopeRetired,revoked);
+    if(mode==='dirty-only'){
+      await engine.whenIdle();
+      assert.equal(engine.status().status,'ready');
+      assert.ok(dispatches>dispatchBefore,'dirty obligations must be reconciled');
+      assert.equal(owner.pending.size,0);assert.equal(owner.all,false);
+      return;
+    }
+    assert.equal(owner.generation,revoked?null:before);
+    assert.equal(owner.graphCache,null);assert.equal(owner.work,null);
+    assert.equal(owner.pending.size,0);assert.equal(owner.all,false);
+    assert.equal(dispatches,dispatchBefore);assert.equal(parses(),parseBefore);
+    if(closing){await closing;assert.throws(()=>engine.resume(),/LIFECYCLE_INVALID/);}
+    else if(revoked){engine.resume();assert.equal(owner.work,null);assert.equal(owner.generation,null);}
+    else{engine.resume();await engine.whenIdle();assert.equal(engine.status().status,'ready');}
+  }finally{release();await f.cleanup();}
+});
+
+test('projection observes native revocation at every nested microtask continuation',async t=>{
+  const f=await fixture({'one.md':'---\nid: A\naliases: ["Alpha"]\ndepends: B\n---\n# unique one\n[[two]]',
+    'two.md':'---\nid: B\naliases: ["Beta"]\n---\n# unique two\n[[Alpha]]'});
+  try{
+    const first=await f.open();await first.engine.start();await first.engine.whenIdle();
+    const {generation}=await first.store.load();assert.ok(generation);
+    const mapping={schemaVersion:'oks-06b-mapping-v1',businessIdKey:'id',aliasKeys:['aliases'],rules:[
+      {relationId:'depends',propertyKey:'depends',direction:'author-to-target',targetEncoding:'business-id'}]};
+    let checks=0;
+    const normal=await deriveGraphProjection(generation,mapping,{cancelled:()=>{checks++;return false;}});
+    assert.ok(!('code' in normal));assert.ok(normal.edges.some(e=>e.kind==='relation'));
+    assert.ok(normal.edges.some(e=>e.kind==='navigation'));assert.ok(checks>10);
+    // Queue revocation after every possible observation (including observations
+    // in the nested navigation helper). Only a projection already completely
+    // assembled and frozen before revocation may have completed normally.
+    const count=checks;
+    for(let at=1;at<=count;at++){
+      f.change(null);
+      const {engine}=await f.open();await engine.start();await engine.whenIdle();
+      const owner=ownerState(engine),copy=structuredClone(generation);
+      let observed=0,revoked=false,late=0,completedBeforeRevocation=false;
+      for(const doc of copy.documents){
+        for(const key of ['properties','blocks','sourceId','sha256'] as const){
+          const value=doc[key];
+          Object.defineProperty(doc,key,{enumerable:true,configurable:true,get(){if(revoked)late++;return value;}});
+        }
+      }
+      const push=Array.prototype.push,update=Hash.prototype.update,freeze=Object.freeze;
+      Array.prototype.push=function(this:unknown[],...items:unknown[]){
+        if(revoked)for(const item of items)if(item&&typeof item==='object'&&
+          (('doc' in item&&'eligible' in item)||('anchors' in item&&('edgeId' in item||'value' in item))))late++;
+        return Reflect.apply(push,this,items);
+      };
+      Hash.prototype.update=function(this:Hash,...args:unknown[]){
+        if(revoked)late++;
+        return Reflect.apply(update,this,args);
+      } as typeof Hash.prototype.update;
+      Object.freeze=function<T>(value:T):Readonly<T>{
+        if(value&&typeof value==='object'&&'projectionId' in value){
+          if(revoked)late++;else completedBeforeRevocation=true;
+        }
+        return freeze(value);
+      } as typeof Object.freeze;
+      try{
+        const result=await deriveGraphProjection(copy,mapping,{cancelled:()=>{
+          const live=owner.scopeCurrent();
+          if(++observed===at)queueMicrotask(()=>{revoked=true;f.change(['one.md']);});
+          return !live;
+        }});
+        assert.equal(revoked,true,'revocation must occur at checkpoint '+at);
+        assert.equal(late,0,'post-revocation processing at checkpoint '+at);
+        if('code' in result){assert.equal(result.code,'GRAPH_CANCELLED');assert.equal(owner.scopeRetired,true);}
+        else assert.equal(completedBeforeRevocation,true,'projection completed after revocation');
+      }finally{
+        Array.prototype.push=push;Hash.prototype.update=update;Object.freeze=freeze;
+      }
+      await engine.close();
+    }
+  }finally{await f.cleanup();}
+});
+
+for(const mode of ['resolve','reject'] as const)test('projection observes revocation at physical cooperative yield '+mode,async()=>{
+  const f=await fixture({'one.md':Array.from({length:300},(_,i)=>'unique '+i).join('\n'),'two.md':'# unique two'});
+  try{
+    const {engine,store}=await f.open();await engine.start();await engine.whenIdle();
+    const {generation}=await store.load();assert.ok(generation);
+    const owner=ownerState(engine);let yields=0;
+    const result=await deriveGraphProjection(generation,{schemaVersion:'oks-06b-mapping-v1',rules:[]},{
+      cancelled:()=>!owner.scopeCurrent(),yieldJob:async()=>{
+        yields++;f.change(['one.md']);if(mode==='reject')throw Error('synthetic yield rejection');
+      }});
+    assert.equal(yields,1);assert.deepEqual(result,{code:'GRAPH_CANCELLED'});
+    assert.equal(owner.scopeRetired,true);assert.equal(owner.generation,null);
   }finally{await f.cleanup();}
 });

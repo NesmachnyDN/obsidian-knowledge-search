@@ -122,8 +122,9 @@ export class StandaloneEngine {
     return allowed;
   }
   async start(): Promise<void> {
+    const live=this.scopeCurrent();
     if (this.stopped || this.initialized) throw new StandaloneError('LIFECYCLE_INVALID');
-    this.requireScope();
+    if(!live)throw new StandaloneError('SEARCH_SCOPE_INVALID');
     this.initialized = true;
     this.recordState('initializing', null);
     try {
@@ -150,7 +151,7 @@ export class StandaloneEngine {
   // Event mutation immediately invalidates a pending publication. Search rehashes
   // the current source whether or not an Obsidian event has arrived.
   changed(path?: string): void {
-    if (this.stopped || !this.scopeCurrent()) return;
+    if (!this.scopeCurrent() || this.stopped) return;
     this.revision++;
     this.retireGraph();
     this.enqueueChange(path);
@@ -170,6 +171,7 @@ export class StandaloneEngine {
     this.changed(); // authoritative full scan (startup and explicit reconciliation)
   }
   rebuild(): void {
+    this.scopeCurrent();
     if (this.stopped) throw new StandaloneError('LIFECYCLE_INVALID');
     this.paused = false;
     this.reconcile();
@@ -177,6 +179,7 @@ export class StandaloneEngine {
   // Returns false if publication has crossed the irreversible CURRENT-rename
   // boundary: pause later jobs, but never claim that committed work was canceled.
   cancel(): boolean {
+    this.scopeCurrent();
     this.paused = true;
     this.retireGraph();
     this.pending.clear(); this.all = false;
@@ -189,6 +192,7 @@ export class StandaloneEngine {
     return true;
   }
   resume(): void {
+    this.scopeCurrent();
     if (this.stopped) throw new StandaloneError('LIFECYCLE_INVALID');
     this.paused = false;
     this.reconcile();
@@ -196,18 +200,29 @@ export class StandaloneEngine {
   private schedule(): void {
     if (!this.scopeCurrent() || !this.initialized || this.stopped || this.paused || this.work || this.localRead) return;
     this.work = this.run().catch(error => {
-      this.recordState(this.generation ? 'degraded' : 'failed', code(error));
+      if (this.scopeCurrent()) this.recordState(this.generation ? 'degraded' : 'failed', code(error));
     }).finally(() => {
+      const live = this.scopeCurrent();
       this.work = null;
       this.state.busy = false;
-      if (!this.stopped && !this.paused && (this.all || this.pending.size)) this.schedule();
+      if (live && !this.stopped && !this.paused && (this.all || this.pending.size)) this.schedule();
     });
     this.state.busy = true;
   }
   async whenIdle(): Promise<void> {
-    while (this.work||this.localRead) {
-      if(this.work)await this.work;else await this.localRead?.catch(()=>{});
-    }
+    try {
+      while (this.work||this.localRead) {
+        if(this.work)await this.work;else await this.localRead?.catch(()=>{});
+        this.scopeCurrent();
+      }
+    } finally { this.scopeCurrent(); }
+  }
+  /** A logical denial does not release an outstanding physical operation. */
+  private releaseLocalRead(physical:Promise<unknown>):void {
+    const live=this.scopeCurrent();
+    if(this.localRead!==physical)return;
+    this.localRead=null;
+    if(live&&!this.stopped&&!this.paused&&(this.all||this.pending.size))this.schedule();
   }
   /** Local preview only. Share the existing worker and hold the physical slot
    * through late read/parser completion; a timeout never publishes a proof. */
@@ -219,7 +234,16 @@ export class StandaloneEngine {
     const revision=this.revision,root=this.provider.rootId;
     let expired=false;
     const live=()=>this.scopeCurrent()&&!expired&&!this.stopped&&!this.paused&&this.revision===revision;
-    const check=()=>{if(!live()||!current()||!live())throw new StandaloneError('SOURCE_CHANGED');};
+    const check=()=>{
+      if(!live())throw new StandaloneError('SOURCE_CHANGED');
+      try{
+        const allowed=current();
+        if(!live()||!allowed)throw new StandaloneError('SOURCE_CHANGED');
+      }catch(error){
+        if(!this.scopeCurrent())throw new StandaloneError('SOURCE_CHANGED');
+        throw error;
+      }
+    };
     const read=async()=>{
       check();
       if(!requireOriginalProof){
@@ -240,12 +264,15 @@ export class StandaloneEngine {
       check();return proof;
     });
     this.localRead=physical;
-    const drain=()=>{this.scopeCurrent();if(this.localRead===physical){this.localRead=null;
-      if(!this.stopped&&!this.paused&&(this.all||this.pending.size))this.schedule();}};
+    const drain=()=>this.releaseLocalRead(physical);
     void physical.then(drain,drain);
     return new Promise((resolve,reject)=>{
       const timer=setTimeout(()=>{expired=true;reject(new StandaloneError(this.scopeCurrent()?'PARSER_TIMEOUT':'SOURCE_CHANGED'));},5000);
-      physical.then(value=>{clearTimeout(timer);if(!expired){try{check();resolve(value);}catch(error){reject(error);}}},error=>{
+      physical.then(value=>{
+        clearTimeout(timer);
+        const live=this.scopeCurrent();
+        if(!expired){try{if(!live)throw new StandaloneError('SOURCE_CHANGED');check();resolve(value);}catch(error){reject(error);}}
+      },error=>{
         clearTimeout(timer);reject(this.scopeCurrent()?error:new StandaloneError('SOURCE_CHANGED'));
       });
     });
@@ -258,15 +285,18 @@ export class StandaloneEngine {
       return Promise.reject(new ProviderFailure('BUSY'));
     const revision=this.revision;
     const live=()=>this.scopeCurrent()&&!this.stopped&&!this.paused&&this.revision===revision;
-    const current=()=>live()&&host.current()&&live();
+    const current=()=>{
+      if(!live())return false;
+      try{const allowed=host.current();return live()&&allowed;}
+      finally{this.scopeCurrent();}
+    };
     const evaluator=new EligibilityEvaluator(this.provider,{policyMetadata:(path,bytes,root)=>parser.policyMetadata!(path,bytes,root)},
       {snapshot:()=>host.snapshot(),current,...(host.requireOriginalProof?{requireOriginalProof:true as const}:{}),
         ...(host.marking?{marking:(proof,original)=>host.marking!(proof,original)}:{})});
     const result=Promise.resolve().then(()=>evaluator.evaluate(context));
     const physical=result.then(()=>evaluator.drain(),()=>evaluator.drain());
     this.localRead=physical;
-    const release=()=>{this.scopeCurrent();if(this.localRead===physical){this.localRead=null;
-      if(!this.stopped&&!this.paused&&(this.all||this.pending.size))this.schedule();}};
+    const release=()=>this.releaseLocalRead(physical);
     void physical.then(release,release);
     return result.then(async envelope=>{
       if(!evaluator.physicallyPending)await physical;
@@ -277,10 +307,14 @@ export class StandaloneEngine {
       throw error;
     });
   }
-  processingPolicyDrain():Promise<void>{return (this.localRead??Promise.resolve()).then(()=>{},()=>{});}
+  processingPolicyDrain():Promise<void>{
+    const observe=()=>{this.scopeCurrent();};
+    return (this.localRead??Promise.resolve()).then(observe,observe);
+  }
   /** Explicit internal host configuration. Invalid or null input revokes the
    * prior graph; ordinary lexical search is unchanged. */
   configureGraph(input: unknown): void {
+    this.scopeCurrent();
     if (this.stopped) throw new StandaloneError('LIFECYCLE_INVALID');
     this.retireGraph();
     this.graphMapping = null;
@@ -295,12 +329,13 @@ export class StandaloneEngine {
   private captureGraphOperation<T>(input:unknown,signal:AbortSignal,
     consume:(snapshot:ScopedGraphSnapshot,gen:IndexGeneration,mapping:GraphMapping,check:()=>void)=>Promise<T>,
     deadline?:GraphDeadline):Readonly<{current():boolean;read():Promise<T>}> {
+    const scopeLive = this.scopeCurrent();
     const selector = parseScopeSelector(input);
     if (selector.mode==='selected' && selector.kind==='editor-selection')
       throw new StandaloneError('GRAPH_SCOPE_UNSUPPORTED');
     const gen = this.generation, mapping = this.graphMapping, revision = this.graphRevision;
     if (!mapping) throw new StandaloneError('GRAPH_DISABLED');
-    if (!this.scopeCurrent() || !gen || this.stopped || this.paused || this.state.status!=='ready'
+    if (!scopeLive || !gen || this.stopped || this.paused || this.state.status!=='ready'
       || this.work || this.all || this.pending.size || this.store.isPublicationUncertain())
       throw new StandaloneError('GRAPH_UNAVAILABLE');
     let retired = false;
@@ -362,13 +397,7 @@ export class StandaloneEngine {
         }
       });
       this.localRead = physical;
-      const release = () => {
-        this.scopeCurrent();
-        if (this.localRead===physical) {
-          this.localRead=null;
-          if (!this.stopped && !this.paused && (this.all || this.pending.size)) this.schedule();
-        }
-      };
+      const release = () => this.releaseLocalRead(physical);
       void physical.then(release,release);
       try {
         const result = await (deadline?deadline.wait(physical):physical);
@@ -383,9 +412,18 @@ export class StandaloneEngine {
   /** Internal graph-only retrieval uses the same scope/generation/physical
    * authority as projection reads. No AI evidence or implicit mode fallback. */
   async retrieveLocalGraph(input:unknown,signal:AbortSignal):Promise<LocalGraphResult> {
-    return this.captureLocalGraph(input,signal).read();
+    try {
+      const lease=this.captureLocalGraph(input,signal);
+      const result=await lease.read();
+      if(!lease.current())throw new StandaloneError(signal.aborted?'GRAPH_CANCELLED':'GRAPH_SOURCE_STALE');
+      return result;
+    } catch(error) {
+      if(!this.scopeCurrent())throw new StandaloneError(signal.aborted?'GRAPH_CANCELLED':'GRAPH_SOURCE_STALE');
+      throw error;
+    }
   }
   captureLocalGraph(input:unknown,signal:AbortSignal):LocalGraphLease {
+    this.scopeCurrent();
     const query=parseGraphQuery(input), deadline=graphDeadline(signal);
     const lease=this.captureGraphOperation(query.scope,signal,async(snapshot,gen,mapping,check)=>{
       const properties=query.scope.mode==='selected'&&query.scope.kind==='properties'?query.scope:undefined;
@@ -405,13 +443,17 @@ export class StandaloneEngine {
     let result:LocalGraphResult|undefined, started=false, retired=false;
     const current=()=>lease.current()&&!retired;
     const read=async():Promise<LocalGraphResult>=>{
-      if(started||!current())throw new StandaloneError('GRAPH_SOURCE_STALE');
+      if(!current()||started)throw new StandaloneError('GRAPH_SOURCE_STALE');
       started=true;
-      try { result=await lease.read(); if(!current())throw new StandaloneError('GRAPH_SOURCE_STALE'); return result; }
+      try {
+        const value=await lease.read();
+        if(!current())throw new StandaloneError('GRAPH_SOURCE_STALE');
+        result=value;return value;
+      }
       catch(error){retired=true;if(!this.scopeCurrent())throw new StandaloneError(signal.aborted?'GRAPH_CANCELLED':'GRAPH_SOURCE_STALE');throw error;}
     };
     const verify=async():Promise<void>=>{
-      if(!result||!current())throw new StandaloneError('GRAPH_SOURCE_STALE');
+      if(!current()||!result)throw new StandaloneError('GRAPH_SOURCE_STALE');
       const retained=result;
       try {
         const fresh=this.captureGraphOperation(query.scope,signal,async(snapshot,gen,_mapping,check)=>{
@@ -451,6 +493,7 @@ export class StandaloneEngine {
         this.requireScope();
         if (previous && hash(bytes) === previous.sha256) {
           await this.yieldJob();
+          this.requireScope();
           continue; // Full audit reuses unchanged, already authenticated documents.
         }
         if (previous) blocks -= previous.blocks.length;
@@ -460,6 +503,7 @@ export class StandaloneEngine {
         if (blocks > BOUNDS.blocks) throw new StandaloneError('INDEX_LIMIT');
         prior.set(path, doc);
         await this.yieldJob(); // bounded per-source cooperative scheduling
+        this.requireScope();
       }
       if (this.stopped || this.paused || revision !== this.revision) return;
       // Recheck all participating source versions before publication; missed file
@@ -471,6 +515,8 @@ export class StandaloneEngine {
         if (hash(bytes) !== doc.sha256) throw new StandaloneError('SOURCE_CHANGED');
         if (this.stopped || this.paused || revision !== this.revision) return;
         await this.yieldJob();
+        this.requireScope();
+        if (this.stopped || this.paused || revision !== this.revision) return;
       }
       this.requireScope();
       const currentPaths = await this.provider.list();
@@ -538,7 +584,7 @@ export class StandaloneEngine {
       // Merge them into the same bounded queue before the physical slot drains.
       // Do not reschedule an unchanged failed revision, paused/cancelled work,
       // or uncertain publication; explicit resume already requests a full scan.
-      if (!this.stopped && !this.paused && revision !== this.revision) {
+      if (this.scopeCurrent() && !this.stopped && !this.paused && revision !== this.revision) {
         if (full) this.enqueueChange();
         else for (const path of changes) {
           this.enqueueChange(path);
@@ -549,6 +595,7 @@ export class StandaloneEngine {
   }
   /** Complete explicit selection, independent of search query and Top-K. */
   async captureDenseCorpus(paths: readonly string[], limit: number, signal: AbortSignal): Promise<SelectedCorpus> {
+    this.scopeCurrent();
     if (!Array.isArray(paths) || !paths.length || paths.length > BOUNDS.sources
       || paths.some(path => !validPath(path)) || new Set(paths).size !== paths.length
       || !Number.isSafeInteger(limit) || limit < 1 || limit > BOUNDS.blocks)
@@ -625,6 +672,7 @@ export class StandaloneEngine {
   }
   /** Capture explicit membership on the same authenticated lexical generation. */
   async captureChatScope(input:unknown,signal:AbortSignal):Promise<ChatScopeLease> {
+    this.scopeCurrent();
     const selector=parseScopeSelector(input);
     const gen=this.generation, revision=this.revision;
     let retired=false, searching=false, verifying=false;
@@ -712,6 +760,7 @@ export class StandaloneEngine {
     }};
   }
   async search(input: unknown): Promise<SearchResponse> {
+    this.scopeCurrent();
     validateRequest(input);
     const req: SearchRequest = input.range ? structuredClone(input) : input;
     const range = req.range;
@@ -892,14 +941,20 @@ export class StandaloneEngine {
     }
   }
   async close(): Promise<void> {
+    this.scopeCurrent();
     this.stopped = true;
     this.retireGraph();
     this.revision++;
     this.pending.clear(); this.all = false;
-    await this.parser.close(); // Interrupt CPU-bound parse immediately on unload.
-    if (this.work) await this.work;
-    if(this.localRead)await this.localRead.catch(()=>{});
-    this.recordState('unavailable', 'LIFECYCLE_INVALID');
+    try {
+      await this.parser.close(); // Interrupt CPU-bound parse immediately on unload.
+      this.scopeCurrent();
+      if (this.work) await this.work;
+      this.scopeCurrent();
+      if(this.localRead)await this.localRead.catch(()=>{});
+      this.scopeCurrent();
+      this.recordState('unavailable', 'LIFECYCLE_INVALID');
+    } finally { this.scopeCurrent(); }
   }
 }
 function code(error: unknown): string {
