@@ -4,7 +4,14 @@ export const HARD_SEARCH_SCOPE_VERSION='oks-hard-search-scope-v1';
 export type HardSearchScopeConfig=Readonly<{version:typeof HARD_SEARCH_SCOPE_VERSION;
   excludedFolders:readonly string[];excludedFiles:readonly string[]}>;
 export type HardSearchScope=Readonly<{revision:string;hasExclusions:boolean;allows(path:unknown):boolean}>;
-export type RevocableHardSearchScope=HardSearchScope&Readonly<{current():boolean}>;
+/** current() observes the host; retirementSignal is the same owner's
+ * irreversible local seal, read without invoking any host port. */
+export type RevocableHardSearchScope=HardSearchScope&Readonly<{current():boolean;retirementSignal:AbortSignal}>;
+const abortedGetter=Object.getOwnPropertyDescriptor(AbortSignal.prototype,'aborted')!.get!;
+/** Read the built-in signal state, not a caller-supplied getter or predicate. */
+export function liveRevocationSignal(signal:unknown):boolean{
+  try{return Reflect.apply(abortedGetter,signal,[])===false;}catch{return false;}
+}
 const MAX_ENTRIES=64,MAX_CONFIG_BYTES=32768;
 /** Canonical vault-relative path, independent of file format. No host paths; wildcard characters are literal, not patterns. */
 export function validHardScopePath(value:unknown):value is string{

@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import {hash,StandaloneError} from '../standalone/contracts';
-import {validHardScopePath,type HardSearchScope,type RevocableHardSearchScope} from '../standalone/hard-search-scope';
+import {liveRevocationSignal,validHardScopePath,type HardSearchScope,type RevocableHardSearchScope} from '../standalone/hard-search-scope';
 
 /** Compatibility is deliberately restricted to the measured host release.
  * This boundary is the only consumer of the undocumented native methods. */
@@ -53,10 +53,13 @@ export function captureNativeExclusions(host:NativeExclusionHost,platform:Native
     }catch{throw invalid();}
   })();
   const {vault,metadata,get,match,on,off}=native;
-  let retired=false,disposed=false,ref:unknown;
+  const retirement=new AbortController();
+  const retirementSignal=retirement.signal;
+  const retired=()=>!liveRevocationSignal(retirementSignal);
+  let disposed=false,ref:unknown;
   const retire=():void=>{
-    if(retired)return;
-    retired=true;
+    if(retired())return;
+    retirement.abort();
     // The logical seal precedes any possibly reentrant host callback.
     try{onRetired();}catch{/* The seal still holds if the observer fails. */}
   };
@@ -68,7 +71,7 @@ export function captureNativeExclusions(host:NativeExclusionHost,platform:Native
   };
   try{
     ref=on.call(vault,'config-changed',retire);
-    if(ref===undefined||ref===null||retired)throw invalid();
+    if(ref===undefined||ref===null||retired())throw invalid();
     const rules=snapshotRules(vault,get);
     const filters=metadata.userIgnoreFilters;
     // The observed native default uses null for both the getter and
@@ -80,7 +83,7 @@ export function captureNativeExclusions(host:NativeExclusionHost,platform:Native
     const revision=hash(JSON.stringify(['oks-native-exclusion-v1',platform.version,randomUUID(),
       rules.serialized,base?.revision??null]));
     const current=():boolean=>{
-      if(retired)return false;
+      if(retired())return false;
       try{
         if(host.vault!==vault||host.metadataCache!==metadata||vault.getConfig!==get
           ||vault.on!==on||vault.offref!==off||metadata.isUserIgnored!==match)throw invalid();
@@ -90,13 +93,13 @@ export function captureNativeExclusions(host:NativeExclusionHost,platform:Native
           &&metadata.userIgnoreFilters===filters
           &&(nativeDefault?filters===null:Array.isArray(filters)&&filters.length===entries.length
             &&entries.every((entry,i)=>filters[i]===entry))
-          &&next.serialized===rules.serialized&&!retired)return true;
+          &&next.serialized===rules.serialized&&!retired())return true;
       }catch{/* Unknown native state is never permission. */}
       retire();
       return false;
     };
     const scope=Object.freeze({
-      revision,hasExclusions:rules.count>0||base?.hasExclusions===true,current,
+      revision,hasExclusions:rules.count>0||base?.hasExclusions===true,current,retirementSignal,
       allows(path:unknown):boolean{
         if(!validHardScopePath(path)||!current())return false;
         try{

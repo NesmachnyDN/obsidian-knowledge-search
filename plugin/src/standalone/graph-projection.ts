@@ -70,7 +70,7 @@ export async function deriveGraphProjection(generation: IndexGeneration, input: 
     const identities: Identity[] = [], paths: Lookup = new Map(), business: Lookup = new Map(), wiki: Lookup = new Map();
     let identityComplete = true, aliasComplete = true;
     for (const doc of docs) {
-      await checkpoint();
+      await checkpoint(); check();
       const complete = completeMetadata(doc);
       const eligible = ['ok','partial','empty'].includes(doc.extractionStatus);
       const type = complete ? single(readProperty(doc,mapping.cardTypeKey,true)) : null;
@@ -93,7 +93,7 @@ export async function deriveGraphProjection(generation: IndexGeneration, input: 
         else add(business,v,item);
       }
       for (const key of mapping.aliasKeys ?? []) {
-        await checkpoint();
+        await checkpoint(); check();
         const p = readProperty(doc,key);
         if (p.state === 'unsupported' || p.state === 'ok' && p.values.some(v => !graphText(v.value))) {
           aliasComplete = false; bump(coverage,'unsupported-alias'); continue;
@@ -130,10 +130,10 @@ export async function deriveGraphProjection(generation: IndexGeneration, input: 
       edges.push(edge);
     };
     for (const author of identities) {
-      await checkpoint();
+      await checkpoint(); check();
       if (!author.eligible) { bump(coverage,'unsupported-source'); continue; }
       if (author.complete) for (const rule of mapping.rules) {
-        await checkpoint();
+        await checkpoint(); check();
         const p = readProperty(author.doc,rule.propertyKey);
         if (p.state === 'missing') continue;
         if (p.state === 'unsupported') { bump(coverage,'unsupported-property'); continue; }
@@ -144,29 +144,34 @@ export async function deriveGraphProjection(generation: IndexGeneration, input: 
           : rule.targetEncoding === 'wiki-link' ? wikiTarget(v) !== null : graphText(v);
         if (p.values.some(v => !valid(v.value))) { bump(coverage,'unsupported-property-target'); continue; }
         for (const [ordinal,v] of p.values.entries()) {
-          await checkpoint();
+          await checkpoint(); check();
           const target = resolve(v.value,rule.targetEncoding);
           if (!target) continue;
           if (!hasType(target,targetTypes)) { bump(coverage,'target-type-rejected'); continue; }
           addEdge('relation',rule.relationId,author,target,rule.direction,v.anchors,ordinal);
         }
       }
-      for (const [ordinal,v] of (await navigationValues(author.doc,coverage,checkpoint)).entries()) {
-        await checkpoint();
+      const navigation = await navigationValues(author.doc,coverage,checkpoint,check); check();
+      for (const [ordinal,v] of navigation.entries()) {
+        await checkpoint(); check();
         const target = resolve(v.value,'wiki-link',true);
         if (target) addEdge('navigation',null,author,target,'author-to-target',v.anchors,ordinal);
       }
     }
+    check();
     edges.sort((a,b) => compare(a.edgeId,b.edgeId));
     const base = {schemaVersion:1 as const,algorithm:ALGORITHM_VERSION,rootId:generation.rootId,
       lexicalGenerationId:generation.generationId,mappingId:graphMappingId(mapping),sourceVersionSet,nodes,edges,
       coverage:Object.fromEntries(Object.entries(coverage).sort(([a],[b]) => compare(a,b)))};
+    check();
     const result = {...base,projectionId:hash('oks-06b-projection\0'+JSON.stringify(base))};
     if (bytes(result) > MAX_BYTES) return {code:'GRAPH_LIMIT'};
     check();
     return freeze(result);
   } catch (error) {
     if (error instanceof ProjectionError) return {code:error.code};
+    // A rejected cooperative yield is also a settlement boundary.
+    if (options.cancelled?.()) return {code:'GRAPH_CANCELLED'};
     throw error; // programming errors are not silently mapped to a budget result
   }
 }

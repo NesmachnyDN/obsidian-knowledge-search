@@ -84,12 +84,14 @@ const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 /** Deliberately conservative supported Markdown subset. Unsupported multiline
  * markup could conceal links on later lines, so the entire navigation-only
  * part of that document is marked unsupported instead of guessing. */
-export async function navigationValues(doc: SourceVersion, coverage: Coverage, checkpoint: () => Promise<void>): Promise<AuthoredValue[]> {
+export async function navigationValues(doc: SourceVersion, coverage: Coverage, checkpoint: () => Promise<void>,
+  check: () => void): Promise<AuthoredValue[]> {
+  check();
   if (doc.diagnostics.includes('unterminated-front-matter')) { bump(coverage,'unsupported-navigation-document'); return []; }
   const result: AuthoredValue[] = [];
   let fence: string | null = null, uncertain = false;
   for (const b of doc.blocks) {
-    await checkpoint();
+    await checkpoint(); check();
     if (b.kind === 'property') continue;
     const line = b.originalText, marker = FENCE.exec(line);
     if (fence) {
@@ -123,6 +125,7 @@ export async function navigationValues(doc: SourceVersion, coverage: Coverage, c
     }
     if (line.includes('[[') && !b.wikiLinks.length) bump(coverage,'unsupported-link');
   }
+  check();
   if (uncertain || fence) { bump(coverage,'unsupported-navigation-document'); return []; }
   return result;
 }
