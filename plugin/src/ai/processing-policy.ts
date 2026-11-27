@@ -97,7 +97,14 @@ export class EligibilityEvaluator {
   get physicallyPending():boolean{return this.pending;}
   async drain():Promise<void>{await this.dependency;}
   constructor(private readonly reader: SourceProvider, private readonly parser: PolicyMetadataParser,
-    private readonly host: PolicyHost) {}
+    private readonly host: PolicyHost,
+    // The engine supplies its existing irreversible source-owner observation.
+    // Historical standalone evaluator callers have no engine-owned scope.
+    private readonly requireOwner: () => void = () => {}) {}
+  private guardedCallback<T>(callback:()=>T):T {
+    this.requireOwner();
+    try{return callback();}finally{this.requireOwner();}
+  }
   private awaitDependency<T>(context:CallContext,current:()=>boolean,work:()=>Promise<T>):Promise<T> {
     const remaining=remainingOperationMs(context);
     if(this.pending)return Promise.reject(new ProviderFailure('BUSY'));
@@ -105,6 +112,8 @@ export class EligibilityEvaluator {
     return new Promise<T>((resolve,reject)=>{
       let settled=false;
       const finish=(value?:T,error?:unknown):void=>{
+        // Observe even a late physical completion after outward denial.
+        try{this.requireOwner();}catch(revoked){error=revoked;}
         if(settled)return;
         settled=true;clearTimeout(timer);context.signal.removeEventListener('abort',cancel);
         const terminal=deadlineFailure(context);
@@ -114,6 +123,7 @@ export class EligibilityEvaluator {
       const timer=setTimeout(()=>{expireActiveDeadline(context);finish(undefined,new ProviderFailure('TIMEOUT'));},remaining);
       context.signal.addEventListener('abort',cancel,{once:true});
       const physical=Promise.resolve().then(()=>{
+        this.requireOwner();
         remainingOperationMs(context);
         if(!current())throw new ProviderFailure('CANCELLED');
         remainingOperationMs(context);
@@ -125,26 +135,33 @@ export class EligibilityEvaluator {
     });
   }
   async evaluate(context:CallContext):Promise<PolicyEnvelope> {
+    this.requireOwner();
     if(this.active||this.pending)return freeze({policyVersion:POLICY_VERSION,allowed:false,reason:'busy',bindingDigest:null,rootId:'',sourceVersions:[]});
     this.active=true;
-    try{return await this.evaluateOwned(context);}finally{this.active=false;}
+    try{const envelope=await this.evaluateOwned(context);this.requireOwner();return envelope;}
+    finally{this.active=false;this.requireOwner();}
   }
   private async evaluateOwned(context:CallContext):Promise<PolicyEnvelope> {
     const signal=context.signal;
     const versions:{sourceId:string;sha256:string;metadataState:PolicyMetadataState;reason:PolicyReason}[]=[];
     const rootId=this.reader.rootId;
     let bindingDigest:string|null=null,originalProofDigest:string|undefined;
-    const done=(reason:PolicyReason):PolicyEnvelope=>freeze({policyVersion:POLICY_VERSION,
-      allowed:reason==='eligible',reason,bindingDigest,rootId,sourceVersions:versions.map(x=>({...x})),
-      ...(reason==='eligible'&&originalProofDigest?{originalProofDigest}:{})});
+    const done=(reason:PolicyReason):PolicyEnvelope=>{
+      // No new derivative/envelope assembly, even on a denied path, after
+      // the engine owner has retired.
+      this.requireOwner();
+      return freeze({policyVersion:POLICY_VERSION,
+        allowed:reason==='eligible',reason,bindingDigest,rootId,sourceVersions:versions.map(x=>({...x})),
+        ...(reason==='eligible'&&originalProofDigest?{originalProofDigest}:{})});
+    };
     const failure=():PolicyReason=>{
       const terminal=deadlineFailure(context);
       return terminal?.code==='TIMEOUT'?'timeout':signal.aborted||terminal?.code==='CANCELLED'?'cancelled':'authority-changed';
     };
     let s:PolicySnapshot;
     try {
-      if(signal.aborted||!this.host.current())return done(failure());
-      const value=this.host.snapshot();
+      if(signal.aborted||!this.guardedCallback(()=>this.host.current()))return done(failure());
+      const value=this.guardedCallback(()=>this.host.snapshot());
       if(!value||!isDigest(rootId)||!validSnapshot(value)||value.deadlineUnixMs!==context.deadlineUnixMs)return done('source-unresolved');
       s=structuredClone(value);
       if(!validSnapshot(s))return done('source-unresolved');
@@ -153,14 +170,15 @@ export class EligibilityEvaluator {
       bindingDigest=hash(JSON.stringify([POLICY_VERSION,rootId,s]));
     }catch(error){return done(error instanceof ProviderFailure&&error.code==='TIMEOUT'?'timeout':signal.aborted?'cancelled':'source-unresolved');}
     const current=():boolean=>{
+      this.requireOwner();
       if(signal.aborted||this.reader.rootId!==rootId)return false;
       try {
         remainingOperationMs(context);
-        if(!this.host.current())return false;
-        const value=this.host.snapshot();
+        if(!this.guardedCallback(()=>this.host.current()))return false;
+        const value=this.guardedCallback(()=>this.host.snapshot());
         return !!value&&validSnapshot(value)&&hash(JSON.stringify([POLICY_VERSION,rootId,value]))===bindingDigest
-          &&this.host.current()&&remainingOperationMs(context)>0;
-      }catch{return false;}
+          &&this.guardedCallback(()=>this.host.current())&&remainingOperationMs(context)>0;
+      }catch{this.requireOwner();return false;}
     };
     if(!current())return done(failure());
     const notes=s.subjects.filter(x=>x.kind==='original');
@@ -208,7 +226,7 @@ export class EligibilityEvaluator {
         versions.push({sourceId:x.sourceId,sha256:x.expectedSha256,metadataState:doc.state,reason});
         if(reason==='metadata-unresolved'||(s.profile!.classification==='external'&&reason!=='eligible'))return done(reason);
         if(s.profile!.classification==='external'&&this.host.marking){
-          if(!this.host.marking(doc,proof))return done('marking-denied');
+          if(!this.guardedCallback(()=>this.host.marking!(doc,proof)))return done('marking-denied');
           if(!current())return done(failure());
         }
       }catch{return done(current()?'source-unresolved':failure());}

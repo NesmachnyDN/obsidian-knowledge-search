@@ -561,3 +561,88 @@ for(const mode of ['resolve','reject'] as const)test('projection observes revoca
     assert.equal(owner.scopeRetired,true);assert.equal(owner.generation,null);
   }finally{await f.cleanup();}
 });
+
+// Host callbacks may re-enter the native exclusion authority synchronously,
+// including from a post-read continuation. A denied envelope is not a license
+// to validate, hash or copy the returned metadata after owner retirement.
+for(const stage of ['initial-snapshot','post-read-snapshot','snapshot-throw','current-revoke',
+  'marking-allow-revoke','marking-deny-revoke','marking-throw-revoke',
+  'snapshot-allow','snapshot-null','snapshot-error','current-deny',
+  'marking-allow','marking-deny','marking-error','snapshot-reentrant'] as const)
+test('processing policy callback fence '+stage,async t=>{
+  const f=await fixture();try{
+    const {engine,reader,previews}=await f.open();await engine.start();await engine.whenIdle();
+    engine.configureGraph({schemaVersion:'oks-06b-mapping-v1',rules:[]});
+    await engine.captureGraphScope({mode:'vault-wide'},new AbortController().signal).read();
+    const owner=ownerState(engine);assert.ok(owner.generation);assert.ok(owner.graphCache);
+    const deadlineUnixMs=Date.now()+5000,context={signal:new AbortController().signal,deadlineUnixMs};
+    const config:ProviderConfig={state:'configured',transport:'local',origin:'http://127.0.0.1:1',
+      identity:{model:'synthetic',revision:'fixture'},limits:{timeoutMs:5000,maxInputBytes:8192,maxCandidates:10,maxOutputTokens:64,maxConcurrent:1}};
+    const snapshot:PolicySnapshot={subjects:[{kind:'original',sourceId:'one.md',expectedSha256:hash('# unique one.md'),ownerIds:['one.md']}],
+      profile:{profileId:'fixture',admissionId:'fixture-review',role:'generation',configDigest:configDigest('generation',config),
+        adapter:'fixture',classification:stage.startsWith('marking')?'external':'trusted-internal'},
+      role:'generation',config,adapter:'fixture',ownerId:'fixture-callback-owner',hostId:'fixture-host',scopeId:reader.rootId,
+      policyRevision:'p1',configRevision:'c1',credentialEpoch:1,deadlineUnixMs,payloadDigest:hash('fixture'),restrictions:[],evaluationComplete:true};
+    let revoked=false,armed=stage!=='post-read-snapshot',reads=0,lateDispatch=0,lateMetadata=0,lateHashes=0,lateCopies=0,markings=0,snapshots=0;
+    const revoke=()=>{revoked=true;f.change(['one.md']);};
+    const originalRead=reader.read.bind(reader);
+    reader.read=async path=>{if(revoked)lateDispatch++;reads++;const bytes=await originalRead(path);if(stage==='post-read-snapshot')armed=true;return bytes;};
+    const originalUpdate=Hash.prototype.update;
+    t.mock.method(Hash.prototype,'update',function(this:Hash,...args:unknown[]){
+      if(revoked&&typeof args[0]==='string'&&args[0].includes('fixture-callback-owner'))lateHashes++;
+      return Reflect.apply(originalUpdate,this,args);
+    });
+    const wrapped={...snapshot,get subjects(){if(revoked)lateMetadata++;return snapshot.subjects;}};
+    const originalMap=Array.prototype.map;
+    Array.prototype.map=function(this:unknown[],...args:unknown[]){
+      if(revoked&&this.some(x=>x&&typeof x==='object'&&'metadataState' in x&&'sourceId' in x))lateCopies++;
+      return Reflect.apply(originalMap,this,args);
+    };
+    let nested:Promise<void>|undefined;
+    const host={
+      snapshot:()=>{
+        snapshots++;
+        if(armed&&(stage==='initial-snapshot'||stage==='post-read-snapshot'||stage==='snapshot-throw')){
+          armed=false;revoke();if(stage==='snapshot-throw')throw Error('synthetic snapshot error');
+        }
+        if(stage==='snapshot-null')return null;
+        if(stage==='snapshot-error')throw Error('synthetic snapshot error');
+        if(stage==='snapshot-reentrant'&&!nested){
+          nested=assert.rejects(engine.evaluateProcessingPolicy(host,context),/BUSY/);
+          assert.ok(owner.localRead,'reserve before entering host callback');
+        }
+        return wrapped;
+      },
+      current:()=>{if(stage==='current-revoke'&&!revoked)revoke();return stage!=='current-deny';},
+      marking:()=>{
+        markings++;
+        if(stage.endsWith('-revoke'))revoke();
+        if(stage==='marking-error'||stage==='marking-throw-revoke')throw Error('synthetic marking error');
+        return stage!=='marking-deny'&&stage!=='marking-deny-revoke';
+      }
+    };
+    const expectRevoked=['initial-snapshot','post-read-snapshot','snapshot-throw','current-revoke','marking-allow-revoke','marking-deny-revoke','marking-throw-revoke'].includes(stage);
+    try{
+      const pending=engine.evaluateProcessingPolicy(host,context),physical=owner.localRead;assert.ok(physical);
+      if(expectRevoked)await assert.rejects(pending,/CANCELLED/);
+      else{
+        const result=await pending;
+        const expected=stage==='snapshot-null'||stage==='snapshot-error'||stage==='marking-error'?'source-unresolved':
+          stage==='current-deny'?'authority-changed':stage==='marking-deny'?'marking-denied':'eligible';
+        assert.equal(result.reason,expected);assert.equal(result.allowed,expected==='eligible');
+      }
+      await physical.catch(()=>{});await nested;
+      assert.equal(revoked,expectRevoked);
+      assert.equal(owner.scopeRetired,expectRevoked);
+      assert.equal(owner.generation===null,expectRevoked);assert.equal(owner.graphCache===null,expectRevoked);
+      assert.equal(owner.localRead,null);
+      assert.equal(lateDispatch,0);assert.equal(lateMetadata,0);assert.equal(lateHashes,0);assert.equal(lateCopies,0);
+      if(expectRevoked){
+        assert.equal(reads,stage.startsWith('marking')||stage==='post-read-snapshot'?1:0);
+        assert.equal(previews(),stage.startsWith('marking')?1:0);
+      }
+      assert.equal(markings,stage.startsWith('marking')?1:0);
+      if(stage==='current-revoke'||stage==='current-deny')assert.equal(snapshots,0);
+    }finally{Array.prototype.map=originalMap;}
+  }finally{await f.cleanup();}
+});

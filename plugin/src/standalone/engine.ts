@@ -285,14 +285,16 @@ export class StandaloneEngine {
       return Promise.reject(new ProviderFailure('BUSY'));
     const revision=this.revision;
     const live=()=>this.scopeCurrent()&&!this.stopped&&!this.paused&&this.revision===revision;
-    const current=()=>{
-      if(!live())return false;
-      try{const allowed=host.current();return live()&&allowed;}
+    const callback=<T>(call:()=>T,denied:T):T=>{
+      if(!live())return denied;
+      try{const value=call();return live()?value:denied;}
       finally{this.scopeCurrent();}
     };
+    const current=()=>callback(()=>host.current(),false);
     const evaluator=new EligibilityEvaluator(this.provider,{policyMetadata:(path,bytes,root)=>parser.policyMetadata!(path,bytes,root)},
-      {snapshot:()=>host.snapshot(),current,...(host.requireOriginalProof?{requireOriginalProof:true as const}:{}),
-        ...(host.marking?{marking:(proof,original)=>host.marking!(proof,original)}:{})});
+      {snapshot:()=>callback(()=>host.snapshot(),null),current,...(host.requireOriginalProof?{requireOriginalProof:true as const}:{}),
+        ...(host.marking?{marking:(proof,original)=>callback(()=>host.marking!(proof,original),false)}:{})},
+      ()=>{if(!this.scopeCurrent())throw new ProviderFailure('CANCELLED');});
     const result=Promise.resolve().then(()=>evaluator.evaluate(context));
     const physical=result.then(()=>evaluator.drain(),()=>evaluator.drain());
     this.localRead=physical;
