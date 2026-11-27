@@ -2,6 +2,8 @@
 
 **State:** Proposed; maintainer direction 2026-11-26 (#78, #79, merged roadmap #81). Acceptance of this DOCS_ONLY decision defines a prospective target, not runtime admission. The strict synthetic/public pilot remains authoritative until each affected role/profile passes its implementation and acceptance gates. History candidate #77 is integrated at `f45ee9da6f689d97b517775fee49fff1e31a4f65` under the previous contract; preserve its evidence and constraints.
 
+**Prospective supersession notice (ADR-0023):** intake-time marking and its enrollment/ledger/writer prerequisites are replaced for read-only effective policy. The table below records the prior target; verified absence is eligible only with an explicit configured decision, unknown/incomplete evidence is denied. Current-source proofs, all-owner restrictions, exact consent, provider admission and role fences are preserved. No runtime change or new permission until implementation acceptance.
+
 ## Decision
 
 Use one host-owned policy for processing eligibility, not RBAC/ACL, a second search engine, credential store, grant issuer, index or transport. The canonical note Property is `llm_processing` (case-sensitive key and exact scalar string values). This decision supersedes only the prospective repeated manual per-excerpt classification requirement of ADR-0018 and the corresponding prospective classification interpretation of ADR-0015/05P; scope, source freshness, provider admission, credential binding, one-shot exact consent, budgets, confidentiality and all historical pilot contracts remain intact.

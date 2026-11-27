@@ -2,6 +2,10 @@
 
 Status: target API-first AI architecture under product-owner ADR-0015 rebaseline (repository review pending), preserving ADR-0006/0008 Standalone invariants. The Standalone native Markdown lexical core (PR #11) and UI/controller/navigation/settings/API integration (PR #12) are merged into develop. OKS-05 is the separate cumulative MVP acceptance stage; the Python reference retrieval remains experimental and is not an installed advanced profile.
 
+## Standalone consumer boundary (ADR-0023)
+
+OKS reads the authoritative Vault, creates only derived search data and performs retrieval/RAG; external intake and domain knowledge lifecycle remain outside. A producer may coexist but is never required. An optional versioned local extraction provider resolves a verified current cache, explicitly admitted compatible immutable artifact, or standalone extractor; otherwise typed partial/unavailable. Validate exact bytes, identity, schema/profile, locators, coverage, limits and current owners/scope/policy; no hash-only trust, external parsing or shared mutable index. Canonical pipeline: Original → Verified Extraction → ParsedDocument → Chunk → Lexical/Dense Index → Retrieval → Optional Reranking → EvidenceHit → RAG. Current Advanced/Dense host exclusion is retained until shared-generation and authority coexistence tests pass. See [ADR-0023](adr/0023-standalone-consumer-reuse.md).
+
 ## Logical components and deployment profiles
 
 The **mandatory default** contains only Obsidian and the installed plugin:
@@ -138,7 +142,7 @@ A versioned allowlisted extractor registry routes verified local source types to
 
 ## Prospective note processing authority (ADR-0019)
 
-One shared host-owned policy decision boundary uses the existing canonical verified source/metadata path, explicit admitted provider trust profiles and existing disclosure/grant/transport lifecycle. No second controller, index, policy issuer, credential store or network client. Bind decisions and derived-source provenance to exact policy/source/owner/scope/config/credential revision and payload; revalidate before preview, dispatch and publication. Offline Basic Search is independent. New material rules run locally before external eligibility; separately authorized bounded writes use original-version checks. Mixed/private context requires explicit trusted internal admission or typed denial/explicit re-selection. See [ADR-0019](adr/0019-note-processing-policy.md) and [POLICY contract](prompts/OKS-06H-POLICY.md) for the target; strict historical pilot contracts remain valid and operative until each implementation gate passes.
+One shared host-owned policy decision boundary uses the existing canonical verified source/metadata path, explicit admitted provider trust profiles and existing disclosure/grant/transport lifecycle. No second controller, index, policy issuer, credential store or network client. Bind decisions and derived-source provenance to exact policy/source/owner/scope/config/credential revision and payload; revalidate before preview, dispatch and publication. Offline Basic Search is independent. Under ADR-0023, effective rules run locally over current verified originals without requiring intake enrollment or writes; verified absence is distinct from unknown and requires an explicit configured permissive decision. Preserve all original proof and retirement safeguards. Historical marking lifecycle is no longer a prospective prerequisite for read-only effective policy. Mixed/private context requires explicit trusted internal admission or typed denial/explicit re-selection. See [ADR-0019](adr/0019-note-processing-policy.md) and [POLICY contract](prompts/OKS-06H-POLICY.md) for the target; strict historical pilot contracts remain valid and operative until each implementation gate passes.
 
 
 ## Prospective curated semantic corpus (ADR-0022)
