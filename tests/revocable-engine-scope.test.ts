@@ -1127,3 +1127,50 @@ test('ordinary denied envelope does not outlive original publication deadline',a
     assert.equal(observed,true);
   }finally{t.mock.restoreAll();await f.cleanup();}
 });
+
+
+// B-14: the incoming elapsed budget exists independently of a policy digest.
+for(const reason of ['source-unresolved','profile-unadmitted','authority-changed'] as const)
+for(const stage of ['live','expired','callback-expiry','publication-expiry','cancelled'] as const)
+test('early bound policy denial '+reason+' '+stage,async()=>{
+  const f=await fixture();try{
+    const {engine,reader,previews}=await f.open();await engine.start();await engine.whenIdle();
+    const owner=ownerState(engine),abort=new AbortController(),authority=new AbortController();
+    const context=bindActiveDeadline({signal:abort.signal,deadlineUnixMs:Date.now()+5000},5000);
+    const snapshot={...terminalPolicyFixture(reader.rootId,context.deadlineUnixMs),profile:null};
+    let currents=0,snapshots=0,reads=0,observed=false;
+    const read=reader.read.bind(reader);reader.read=async path=>{reads++;return read(path);};
+    if(stage==='expired')expireActiveDeadline(context);
+    if(stage==='cancelled')abort.abort();
+    f.onConfigRead(()=>{
+      if(stage==='publication-expiry'&&!observed&&(new Error().stack??'').includes('observePublication')){
+        observed=true;assert.ok(owner.localSettlement);expireActiveDeadline(context);
+      }
+    });
+    const pending=engine.evaluateProcessingPolicy({
+      authority:authority.signal,
+      current:()=>{
+        currents++;
+        if(stage==='callback-expiry'&&reason==='authority-changed')expireActiveDeadline(context);
+        return reason!=='authority-changed';
+      },
+      snapshot:()=>{
+        snapshots++;
+        if(stage==='callback-expiry')expireActiveDeadline(context);
+        return reason==='source-unresolved'?null:snapshot;
+      }
+    },context);
+    if(stage==='publication-expiry'){
+      await assert.rejects(pending,/TIMEOUT/);assert.equal(observed,true);
+    }else{
+      const envelope=await pending;
+      assert.equal(envelope.allowed,false);assert.equal(envelope.bindingDigest,null);
+      assert.equal(envelope.reason,stage==='expired'||stage==='callback-expiry'?'timeout':stage==='cancelled'?'cancelled':reason);
+    }
+    await engine.processingPolicyDrain();
+    assert.equal(currents,stage==='expired'||stage==='cancelled'?0:1);
+    assert.equal(snapshots,stage==='expired'||stage==='cancelled'||reason==='authority-changed'?0:1);
+    assert.equal(reads,0);assert.equal(previews(),0);
+    assert.equal(owner.localRead,null);assert.equal(owner.localSettlement,null);
+  }finally{await f.cleanup();}
+});

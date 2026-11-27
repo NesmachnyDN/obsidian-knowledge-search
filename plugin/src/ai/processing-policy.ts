@@ -104,7 +104,8 @@ export class EligibilityEvaluator {
     // Owner observation is the engine's responsibility before its final
     // callback-free publication cut. No host callback is permitted here.
     if(!this.publicationContext)throw new ProviderFailure('CANCELLED');
-    remainingOperationMs(this.publicationContext);
+    const terminal=deadlineFailure(this.publicationContext);
+    if(terminal)throw terminal;
   }
   get physicallyPending():boolean{return this.pending;}
   async drain():Promise<void>{await this.dependency;}
@@ -150,7 +151,9 @@ export class EligibilityEvaluator {
     this.requireOwner();
     if(this.active||this.pending)return freeze({policyVersion:POLICY_VERSION,allowed:false,reason:'busy',bindingDigest:null,rootId:'',sourceVersions:[]});
     this.active=true;
-    this.publicationContext=undefined;
+    // Retain an incoming bound budget even if evaluation denies before a digest
+    // can be constructed. Successful binding below replaces only unbound input.
+    this.publicationContext=context;
     try{const envelope=await this.evaluateOwned(context);this.requireOwner();return envelope;}
     finally{this.active=false;this.requireOwner();}
   }
@@ -163,6 +166,8 @@ export class EligibilityEvaluator {
       // No new derivative/envelope assembly, even on a denied path, after
       // the engine owner has retired.
       this.requireOwner();
+      const terminal=deadlineFailure(context);
+      if(terminal)reason=terminal.code==='TIMEOUT'?'timeout':'cancelled';
       return freeze({policyVersion:POLICY_VERSION,
         allowed:reason==='eligible',reason,bindingDigest,rootId,sourceVersions:versions.map(x=>({...x})),
         ...(reason==='eligible'&&originalProofDigest?{originalProofDigest}:{})});
@@ -173,8 +178,10 @@ export class EligibilityEvaluator {
     };
     let s:PolicySnapshot;
     try {
-      if(signal.aborted||!this.guardedCallback(()=>this.host.current()))return done(failure());
+      if(deadlineFailure(context)||signal.aborted||!this.guardedCallback(()=>this.host.current()))return done(failure());
+      if(deadlineFailure(context))return done(failure());
       const value=this.guardedCallback(()=>this.host.snapshot());
+      if(deadlineFailure(context))return done(failure());
       if(!value||!isDigest(rootId)||!validSnapshot(value)||value.deadlineUnixMs!==context.deadlineUnixMs)return done('source-unresolved');
       s=structuredClone(value);
       if(!validSnapshot(s))return done('source-unresolved');
@@ -189,7 +196,9 @@ export class EligibilityEvaluator {
       try {
         remainingOperationMs(context);
         if(!this.guardedCallback(()=>this.host.current()))return false;
+        remainingOperationMs(context);
         const value=this.guardedCallback(()=>this.host.snapshot());
+        remainingOperationMs(context);
         return !!value&&validSnapshot(value)&&hash(JSON.stringify([POLICY_VERSION,rootId,value]))===bindingDigest
           &&this.guardedCallback(()=>this.host.current())&&remainingOperationMs(context)>0;
       }catch{this.requireOwner();return false;}

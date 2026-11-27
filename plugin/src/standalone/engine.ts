@@ -437,7 +437,7 @@ export class StandaloneEngine {
       // Keep already-terminal typed cancellation/timeout denials. Every
       // other bound outcome must still fit its original operation budget.
       if(envelope.reason!=='cancelled'&&envelope.reason!=='timeout'){
-        if(envelope.bindingDigest!==null)evaluator.assertPublicationDeadline();
+        evaluator.assertPublicationDeadline();
         if(!localLive()||!liveRevocationSignal(operationSignal))throw new ProviderFailure('CANCELLED');
       }
     };
