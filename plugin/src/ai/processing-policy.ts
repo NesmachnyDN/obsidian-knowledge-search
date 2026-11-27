@@ -185,6 +185,7 @@ export class EligibilityEvaluator {
       if(!requireProof)return {bytes:await this.reader.read(x.sourceId)};
       if(!this.reader.readVerifiedOriginal)throw new ProviderFailure('SOURCE_STALE');
       const observed:VerifiedOriginalRead=await this.reader.readVerifiedOriginal(x.sourceId);
+      if(!current())throw new ProviderFailure('CANCELLED');
       const digest=verifiedOriginalDigest(observed,rootId,x.sourceId,x.expectedSha256);
       return {...observed,digest};
     };

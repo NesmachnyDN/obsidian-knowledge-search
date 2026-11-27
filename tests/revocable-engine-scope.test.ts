@@ -1,5 +1,9 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {Hash} from 'node:crypto';
+import {configDigest} from '../plugin/src/ai/disclosure';
+import type {ProviderConfig} from '../plugin/src/ai/contracts';
+import type {PolicySnapshot} from '../plugin/src/ai/processing-policy';
 import {mkdtemp,writeFile,rm,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -186,5 +190,62 @@ test('graph catalog does not dispatch hints after membership revocation at '+sta
     await assert.rejects(authenticateGraphCatalog(generation,reader,parser,false,check,async()=>{}),/SEARCH_SCOPE_INVALID/);
     assert.equal(retired,true);assert.equal(late,0,'post-revocation hints dispatch');
     assert.equal(hintCalls,stage==='initial-membership'?0:1);await denied(engine);
+  }finally{await f.cleanup();}
+});
+
+/** Observe the exact returned byte object; don't count unrelated authority hashes. */
+for(const stage of ['generation','dense','preview-renewal','preview-proof-initial','preview-proof-renewal',
+  'policy-proof-initial','policy-proof-renewal','dense-exception','preview-exception','policy-exception'] as const)
+test('revoked settlement discards bytes before processing: '+stage,async t=>{
+  const f=await fixture();try{
+    const {engine,reader,store,parses,previews}=await f.open();
+    if(stage!=='generation'){await engine.start();await engine.whenIdle();}
+    const dense=stage.startsWith('dense')?await engine.captureDenseCorpus(['one.md'],10,new AbortController().signal):null;
+    const beforeParses=parses(),beforePreviews=previews();
+    const proof=stage.includes('proof')||stage==='policy-exception',exception=stage.endsWith('exception');
+    const target=stage==='generation'?3:stage.includes('renewal')?2:1;
+    let watched:Uint8Array|undefined,revoked=false,reads=0,late=0,byteHashes=0;
+    const originalUpdate=Hash.prototype.update;
+    t.mock.method(Hash.prototype,'update',function(this:Hash,...args:unknown[]){
+      if(revoked&&args[0]===watched)byteHashes++;
+      return Reflect.apply(originalUpdate,this,args);
+    });
+    const read=reader.read.bind(reader),verified=reader.readVerifiedOriginal.bind(reader);
+    const list=reader.list.bind(reader),hints=reader.versionHints.bind(reader);
+    const settle=(bytes:Uint8Array)=>{
+      if(++reads!==target)return;
+      watched=bytes;revoked=true;f.change(['one.md']);
+      if(exception)throw Error('synthetic read settlement failure');
+    };
+    reader.read=async path=>{if(revoked)late++;const bytes=await read(path);settle(bytes);return bytes;};
+    reader.readVerifiedOriginal=async path=>{if(revoked)late++;const value=await verified(path);settle(value.bytes);return value;};
+    reader.list=async()=>{if(revoked)late++;return list();};
+    reader.versionHints=async paths=>{if(revoked)late++;return hints(paths);};
+    if(stage==='generation'){
+      await engine.start();await engine.whenIdle();
+      assert.equal((await store.load()).generation,null);
+    }else if(dense){
+      await assert.rejects(dense.verify(dense.evidence[0]!),/SOURCE_STALE/);
+      assert.equal(dense.current(),false);
+    }else if(stage.startsWith('preview')){
+      await assert.rejects(engine.previewPolicyMetadata('one.md',()=>true,proof),/SOURCE_CHANGED/);
+    }else{
+      const deadlineUnixMs=Date.now()+5000;
+      const config:ProviderConfig={state:'configured',transport:'local',origin:'http://127.0.0.1:1',
+        identity:{model:'synthetic',revision:'fixture'},limits:{timeoutMs:5000,maxInputBytes:8192,maxCandidates:10,maxOutputTokens:64,maxConcurrent:1}};
+      const snapshot:PolicySnapshot={subjects:[{kind:'original',sourceId:'one.md',expectedSha256:hash('# unique one.md'),ownerIds:['one.md']}],
+        profile:{profileId:'fixture',admissionId:'fixture-review',role:'generation',configDigest:configDigest('generation',config),
+          adapter:'fixture',classification:'trusted-internal'},role:'generation',config,adapter:'fixture',
+        ownerId:'fixture-owner',hostId:'fixture-host',scopeId:reader.rootId,policyRevision:'p1',configRevision:'c1',
+        credentialEpoch:1,deadlineUnixMs,payloadDigest:hash('fixture'),restrictions:[],evaluationComplete:true};
+      await assert.rejects(engine.evaluateProcessingPolicy({snapshot:()=>snapshot,current:()=>true,requireOriginalProof:true},
+        {signal:new AbortController().signal,deadlineUnixMs}),/CANCELLED/);
+    }
+    await engine.whenIdle();assert.equal(revoked,true);assert.ok(watched);
+    assert.equal(reads,target);assert.equal(late,0);
+    assert.equal(parses()-beforeParses,stage==='generation'?2:0);
+    assert.equal(previews()-beforePreviews,stage.includes('renewal')?1:0);
+    assert.equal(byteHashes,0,'post-revocation processing of returned bytes');
+    await denied(engine);
   }finally{await f.cleanup();}
 });

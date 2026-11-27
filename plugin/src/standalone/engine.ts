@@ -221,16 +221,20 @@ export class StandaloneEngine {
     const live=()=>this.scopeCurrent()&&!expired&&!this.stopped&&!this.paused&&this.revision===revision;
     const check=()=>{if(!live()||!current()||!live())throw new StandaloneError('SOURCE_CHANGED');};
     const read=async()=>{
-      if(!requireOriginalProof)return {bytes:await this.provider.read(path),digest:null};
+      check();
+      if(!requireOriginalProof){
+        const bytes=await this.provider.read(path);check();
+        return {bytes,digest:null};
+      }
       if(!this.provider.readVerifiedOriginal)throw new StandaloneError('SOURCE_CHANGED');
-      const observed=await this.provider.readVerifiedOriginal(path);
+      const observed=await this.provider.readVerifiedOriginal(path);check();
       return {bytes:observed.bytes,digest:verifiedOriginalDigest(observed,root,path)};
     };
     const physical=Promise.resolve().then(async()=>{
       check();const {bytes,digest}=await read();check();
       if(bytes.byteLength>BOUNDS.fileBytes)throw new StandaloneError('SOURCE_LIMIT');
       const sha=hash(bytes),proof=await parser.policyMetadata!(path,bytes,root);check();
-      const renewed=await read();
+      const renewed=await read();check();
       if(proof.sourceId!==path||proof.sha256!==sha||proof.scopeId!==root||hash(renewed.bytes)!==sha||renewed.digest!==digest)
         throw new StandaloneError('SOURCE_CHANGED');
       check();return proof;
@@ -241,7 +245,9 @@ export class StandaloneEngine {
     void physical.then(drain,drain);
     return new Promise((resolve,reject)=>{
       const timer=setTimeout(()=>{expired=true;reject(new StandaloneError('PARSER_TIMEOUT'));},5000);
-      physical.then(value=>{clearTimeout(timer);if(!expired){try{check();resolve(value);}catch(error){reject(error);}}},error=>{clearTimeout(timer);reject(error);});
+      physical.then(value=>{clearTimeout(timer);if(!expired){try{check();resolve(value);}catch(error){reject(error);}}},error=>{
+        clearTimeout(timer);reject(this.scopeCurrent()?error:new StandaloneError('SOURCE_CHANGED'));
+      });
     });
   }
   /** One existing worker/source owner, shared with lexical indexing and dry-run. */
@@ -266,6 +272,9 @@ export class StandaloneEngine {
       if(!evaluator.physicallyPending)await physical;
       if(!this.scopeCurrent()||envelope.allowed&&!current())throw new ProviderFailure('CANCELLED');
       return envelope;
+    },error=>{
+      if(!this.scopeCurrent())throw new ProviderFailure('CANCELLED');
+      throw error;
     });
   }
   processingPolicyDrain():Promise<void>{return (this.localRead??Promise.resolve()).then(()=>{},()=>{});}
@@ -376,6 +385,7 @@ export class StandaloneEngine {
       if(lexical.status!=='ok'||lexical.executedMode!=='lexical'||lexical.indexGenerationId!==gen.generationId)
         throw new StandaloneError('GRAPH_SOURCE_STALE');
       const result=await materializeGraph(gen,snapshot,mapping,query,lexical.hits,this.provider,check);
+      check();
       await authenticateGraphCatalog(gen,this.provider,this.parser,false,check,this.yieldJob);
       check();
       if(generationId(gen.rootId,gen.documents)!==gen.generationId)throw new StandaloneError('GRAPH_INDEX_UNAUTHENTICATED');
@@ -445,9 +455,9 @@ export class StandaloneEngine {
       // events cannot introduce a known-inconsistent generation.
       for (const [path, doc] of prior) {
         this.requireScope();
-        if (hash(await this.provider.read(path)) !== doc.sha256)
-          throw new StandaloneError('SOURCE_CHANGED');
+        const bytes = await this.provider.read(path);
         this.requireScope();
+        if (hash(bytes) !== doc.sha256) throw new StandaloneError('SOURCE_CHANGED');
         if (this.stopped || this.paused || revision !== this.revision) return;
         await this.yieldJob();
       }
@@ -560,18 +570,29 @@ export class StandaloneEngine {
       }
       if (evidence.length === before) throw new StandaloneError('EVIDENCE_INCOMPLETE');
     }
-    const live = await this.provider.list(); check();
-    if (live.length !== gen!.documents.length || live.some((path,i) => path !== gen!.documents[i]?.sourceId))
-      throw new StandaloneError('SOURCE_STALE');
-    for (const doc of docs) {
-      const bytes = await this.provider.read(doc.sourceId); check();
-      for (const hit of evidence) if (hit.sourceId === doc.sourceId) verifySpan(hit,bytes);
+    try {
+      const live = await this.provider.list(); check();
+      if (live.length !== gen!.documents.length || live.some((path,i) => path !== gen!.documents[i]?.sourceId))
+        throw new StandaloneError('SOURCE_STALE');
+      for (const doc of docs) {
+        const bytes = await this.provider.read(doc.sourceId); check();
+        for (const hit of evidence) if (hit.sourceId === doc.sourceId) verifySpan(hit,bytes);
+      }
+    } catch (error) {
+      if (!this.scopeCurrent()) check();
+      throw error;
     }
     const verify = async (hit: EvidenceHit): Promise<void> => {
       check();
       if (!selected.has(hit.sourceId) || hit.indexGenerationId !== gen!.generationId)
         throw new StandaloneError('EVIDENCE_INCOMPLETE');
-      verifySpan(hit,await this.provider.read(hit.sourceId)); check();
+      try {
+        const bytes = await this.provider.read(hit.sourceId); check();
+        verifySpan(hit,bytes); check();
+      } catch (error) {
+        if (!this.scopeCurrent()) check();
+        throw error;
+      }
     };
     const metadataPaths = (request: SearchRequest, lexicalGenerationId: string, selectedPaths: readonly string[]): readonly string[] => {
       check();
