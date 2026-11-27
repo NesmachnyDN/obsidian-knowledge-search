@@ -712,7 +712,10 @@ export class StandaloneEngine {
         const selected = gen.documents.find(doc => doc.sourceId === range.sourceId);
         if (!selected || selected.sha256 !== range.sourceSha256 || !paths.includes(range.sourceId))
           throw new StandaloneError('SOURCE_STALE');
-        verifyOriginalRange(range, await this.provider.read(range.sourceId));
+        this.requireScope();
+        const bytes = await this.provider.read(range.sourceId);
+        this.requireScope();
+        verifyOriginalRange(range, bytes);
         if (this.revision !== rangeRevision || this.generation !== gen) throw new StandaloneError('SOURCE_STALE');
       }
       // Protocol-v2 default is unchanged ranked terms. The explicit literal mode
@@ -780,8 +783,10 @@ export class StandaloneEngine {
       for (const row of candidates) {
         let bytes = freshness.get(row.doc.sourceId);
         if (bytes === undefined) {
+          this.requireScope();
           try {
             const candidate = await this.provider.read(row.doc.sourceId);
+            this.requireScope();
             bytes = hash(candidate) === row.doc.sha256 ? candidate : null;
           } catch { bytes = null; }
           this.requireScope();
@@ -816,8 +821,12 @@ export class StandaloneEngine {
       }
       if (range) {
         // Even a zero-hit answer must authenticate the selected source before publication.
+        this.requireScope();
         const currentPaths=await this.provider.list();
-        verifyOriginalRange(range,await this.provider.read(range.sourceId));
+        this.requireScope();
+        const bytes=await this.provider.read(range.sourceId);
+        this.requireScope();
+        verifyOriginalRange(range,bytes);
         if (!currentPaths.includes(range.sourceId) || stale || this.revision !== rangeRevision || this.generation !== gen)
           throw new StandaloneError('SOURCE_STALE');
       }

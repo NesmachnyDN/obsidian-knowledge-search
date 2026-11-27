@@ -33,7 +33,7 @@ export async function authenticateGraphCatalog(gen: IndexGeneration, provider: S
       throw new StandaloneError('GRAPH_SOURCE_STALE');
     return paths;
   };
-  const paths = await membership();
+  const paths = await membership(); check();
   const hints = await provider.versionHints(paths); check();
   let processed=0;
   for (const doc of gen.documents) {
@@ -50,7 +50,7 @@ export async function authenticateGraphCatalog(gen: IndexGeneration, provider: S
     // additional cooperative timer yield without reducing per-source guards.
     if(++processed%8===0){await yieldJob();check();}
   }
-  const after = await membership();
+  const after = await membership(); check();
   const afterHints = await provider.versionHints(after); check();
   if (hints.length !== paths.length || afterHints.length !== hints.length
     || hints.some((h,i) => h !== afterHints[i])) throw new StandaloneError('GRAPH_SOURCE_STALE');
