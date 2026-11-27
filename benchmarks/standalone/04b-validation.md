@@ -1,6 +1,6 @@
 # OKS-04B candidate — local validation evidence (2026-11-23)
 
-**Evidence status:** full author + orchestrator local validation completed on the ZenBook; **not independent SDD approval**. This report is pinned to the feature-branch implementation relative to baseline `a8ad950201fd7a5caebb8639b147d70f6f53a964`; the final candidate HEAD and CI/review outcome must be recorded in the PR conversation. Only synthetic notes, disposable Vault/profile and host-private index fixtures were used. No private working Vault was accessed. Previous author-only Codex sandbox Xvfb/Python environment failures are superseded by actual checks in the normal authorized ZenBook environment, not represented as product failures.
+**Evidence status:** full author + orchestrator local validation completed on the Linux test host; **not independent SDD approval**. This report is pinned to the feature-branch implementation relative to baseline `a8ad950201fd7a5caebb8639b147d70f6f53a964`; the final candidate HEAD and CI/review outcome must be recorded in the PR conversation. Only synthetic notes, disposable Vault/profile and host-private index fixtures were used. No private working Vault was accessed. Previous author-only Codex sandbox Xvfb/Python environment failures are superseded by actual checks in the normal authorized Linux test host environment, not represented as product failures.
 
 ## Scope and CAP/AC traceability
 
