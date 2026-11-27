@@ -54,6 +54,27 @@
   try {
     for (const kind of ['create', 'modify', 'rename', 'delete'])
       refs.push(vault.on(kind, (owner, oldPath) => event(kind, owner, oldPath)));
+    // Separate identity/path: delayed events from the counterexample cannot
+    // satisfy the normal native modify observation below.
+    const probeName = 'event-counterexample.md';
+    const probeFile = await vault.create(probeName, 'Synthetic event original.\n');
+    await waitEvent('create', probeFile, probeName);
+    requireThat(vault.getAbstractFileByPath(probeName) === probeFile, 'PROBE_OWNER');
+    const original = await reader.readLifecycleProof(probeName);
+    const notificationCount = events.length;
+    vault.trigger('modify', probeFile);
+    requireThat(events.slice(notificationCount).some(e => e.kind === 'modify'
+      && e.owner === probeFile && e.path === probeName), 'PUBLIC_NOTIFICATION');
+    assert.deepEqual(await reader.readLifecycleProof(probeName), original);
+    const externalEventCount = events.length;
+    require('node:fs').writeFileSync(path.join(root, probeName), 'Synthetic external edit.\n');
+    const beforeEventLoop = events.length === externalEventCount;
+    const external = await reader.readLifecycleProof(probeName);
+    requireThat(beforeEventLoop && external.version.sha256 !== original.version.sha256
+      && external.version.versionId !== original.version.versionId, 'EXTERNAL_WRITE_BOUNDARY');
+    await vault.delete(probeFile);
+    await waitEvent('delete', probeFile, probeName);
+    await checkInventory(['first.md', 'second.md']);
     const file = await vault.create(fileName, 'Synthetic lifecycle original.\n');
     await waitEvent('create', file, fileName);
     requireThat(vault.getAbstractFileByPath(fileName) === file, 'CREATE_OWNER');
@@ -61,31 +82,11 @@
     const created = await reader.readLifecycleProof(fileName);
     assert.deepEqual(created.version, await reader.readVersionProof(fileName));
     requireThat(/^[a-f0-9]{64}$/.test(created.stableIdentity), 'IDENTITY');
-    // A public event notification alone does not establish a filesystem mutation.
-    const notificationCount = events.length;
-    vault.trigger('modify', file);
-    requireThat(events.slice(notificationCount).some(e => e.kind === 'modify'
-      && e.owner === file && e.path === fileName), 'PUBLIC_NOTIFICATION');
-    assert.deepEqual(await reader.readLifecycleProof(fileName), created);
-    const externalEventCount = events.length;
-    require('node:fs').writeFileSync(path.join(root, fileName), 'Synthetic external edit.\n');
-    const beforeEventLoop = events.length === externalEventCount;
-    const external = await reader.readLifecycleProof(fileName);
-    requireThat(beforeEventLoop && external.version.sha256 !== created.version.sha256
-      && external.version.versionId !== created.version.versionId, 'EXTERNAL_WRITE_BOUNDARY');
-    const modificationCount = events.length;
     await vault.modify(file, 'Synthetic lifecycle modified.\n');
-    const deadline = Date.now() + 2000;
-    while (!events.slice(modificationCount).some(e => e.kind === 'modify'
-      && e.owner === file && e.path === fileName)) {
-      requireThat(!overflow && Date.now() < deadline, 'MODIFY_AFTER_EXTERNAL');
-      await new Promise(resolve => setTimeout(resolve, 25));
-    }
+    await waitEvent('modify', file, fileName);
     const modified = await reader.readLifecycleProof(fileName);
     requireThat(created.version.sha256 !== modified.version.sha256
-      && external.version.sha256 !== modified.version.sha256
-      && created.version.versionId !== modified.version.versionId
-      && external.version.versionId !== modified.version.versionId, 'MODIFY_PROOF');
+      && created.version.versionId !== modified.version.versionId, 'MODIFY_PROOF');
     const modifyContinuity = created.stableIdentity === modified.stableIdentity;
     await vault.rename(file, movedName);
     await waitEvent('rename', file, movedName, fileName);
