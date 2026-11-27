@@ -29,6 +29,8 @@ export type GenerationPolicyPort = ProcessingPolicyPort<'generation'> & Readonly
 export type RerankPolicyPort = ProcessingPolicyPort<'reranking'>;
 export type GenerationPolicyBinding = Readonly<{
   bindingDigest:string; payloadDigest:string; sourceDigest:string; scopeBinding:string; deadlineUnixMs:number;
+  /** Opaque, domain-separated digest of fresh lifecycle observations. */
+  lifecycleDigest?:string;
   embedding?:EmbeddingPolicyBindingDetails;
 }>;
 export function processingPolicyInput<R extends AiRole>(input:ProcessingPolicyInput<R>):ProcessingPolicyInput<R> {
@@ -93,6 +95,8 @@ export function generationPolicySourceDigest(input:{role:AiRole;sources:readonly
 export function sameGenerationPolicy(a:GenerationPolicyBinding|undefined,b:GenerationPolicyBinding|undefined):boolean {
   return !!a&&!!b&&a.bindingDigest===b.bindingDigest&&a.payloadDigest===b.payloadDigest
     &&a.sourceDigest===b.sourceDigest&&a.scopeBinding===b.scopeBinding&&a.deadlineUnixMs===b.deadlineUnixMs
+    &&a.lifecycleDigest===b.lifecycleDigest
+    &&(a.lifecycleDigest===undefined||isDigest(a.lifecycleDigest))
     &&(a.embedding===undefined&&b.embedding===undefined||!!a.embedding&&!!b.embedding
       &&a.embedding.purpose===b.embedding.purpose&&a.embedding.spaceId===b.embedding.spaceId
       &&a.embedding.scopeId===b.embedding.scopeId&&a.embedding.queryClassification===b.embedding.queryClassification);
@@ -126,8 +130,10 @@ export class GenerationPolicyGate {
             ||result.rootId!==exact.scopeId||result.sourceVersions.length!==originals.length
             ||result.sourceVersions.some((x,i)=>x.sourceId!==originals[i]!.sourceId||x.sha256!==originals[i]!.sourceSha256
               ||x.metadataState==='unresolved'))throw new ProviderFailure('DISCLOSURE_DENIED');
+          if(result.lifecycleDigest!==undefined&&!isDigest(result.lifecycleDigest))throw new ProviderFailure('DISCLOSURE_DENIED');
           const binding=Object.freeze({bindingDigest:result.bindingDigest,payloadDigest:exact.payloadDigest,
             sourceDigest:generationPolicySourceDigest(exact),scopeBinding:exact.scopeBinding,deadlineUnixMs:exact.deadlineUnixMs,
+            ...(result.lifecycleDigest?{lifecycleDigest:result.lifecycleDigest}:{}),
             ...(exact.embedding?{embedding:Object.freeze({purpose:exact.embedding.purpose,spaceId:exact.embedding.spaceId,
               scopeId:exact.scopeId,queryClassification:exact.embedding.queryClassification})}:{})});
           if(!port.current(exact,binding))throw new ProviderFailure('CANCELLED');

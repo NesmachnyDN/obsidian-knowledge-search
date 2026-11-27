@@ -35,6 +35,8 @@ export type PolicyEnvelope = Readonly<{
   policyVersion: typeof POLICY_VERSION; allowed: boolean; reason: PolicyReason;
   bindingDigest: string | null; rootId: string;
   sourceVersions: readonly Readonly<{sourceId:string;sha256:string;metadataState:PolicyMetadataState;reason:PolicyReason}>[];
+  /** Host-private evidence binding; never a proof, path diagnostic, or grant. */
+  lifecycleDigest?:string;
 }>;
 const identifier = (v: unknown): v is string => typeof v === 'string' && v.length > 0
   && Buffer.byteLength(v) <= 256 && Buffer.from(v,'utf8').toString('utf8')===v && !/[\0\r\n]/.test(v);

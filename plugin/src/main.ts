@@ -1,4 +1,5 @@
-import { GenerationPolicyHost, ProcessingPolicyHost, RerankPolicyHost, type GenerationPolicyHostState } from './ai/generation-policy-host';
+import { randomUUID } from 'node:crypto';
+import { GenerationPolicyHost, ProcessingPolicyHost, RerankPolicyHost, type FreshLifecycleObserver, type GenerationPolicyHostState } from './ai/generation-policy-host';
 import { GenerationCredentialAuthority } from './ai/generation-credential';
 import { GenerationPolicyGate,policyOriginals, type ProcessingPolicyInput } from './ai/generation-policy';
 import { configDigest } from './ai/disclosure';
@@ -90,7 +91,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private retiringNavigator?: SourceNavigator<TFile>;
   private sourceReader?: BoundedVaultReader;
   private readonly markingTracker=new NewMaterialTracker<TFile>();
-  private lifecycleOwner?: {owner:NativeLifecycleOwner<TFile>;key:string};
+  private lifecycleOwner?: {owner:NativeLifecycleOwner<TFile>;key:string;revision:string};
   private baselineModal?:InitialBaselineModal;
   private baselineOpening=false;
   private denseHost?: ApiDenseHost;
@@ -126,6 +127,23 @@ export default class SyntheticEvidencePlugin extends Plugin {
   private initializing?: Promise<void>;
   private layoutReady = false;
   private lifecycleRevision = 0;
+  /** Structural owner identity is safe to query even during its own physical read. */
+  private currentLifecycleEvidenceRevision(scopeId:string):string|null {
+    const binding=this.lifecycleOwner,reader=this.sourceReader;
+    if(!binding||!reader||reader.rootId!==scopeId||this.unloaded)return null;
+    const readiness=binding.owner.readiness();
+    return (readiness==='restored'||readiness==='admitted')&&this.lifecycleOwner===binding&&this.sourceReader===reader
+      ?binding.revision:null;
+  }
+  private readonly lifecycleObserver:FreshLifecycleObserver={
+    revision:scopeId=>this.currentLifecycleEvidenceRevision(scopeId),
+    observe:async(scopeId,revision,requests,signal)=>{
+      const binding=this.lifecycleOwner,reader=this.sourceReader;
+      if(signal.aborted||!binding||!reader||this.currentLifecycleEvidenceRevision(scopeId)!==revision)return null;
+      const result=await binding.owner.observeCommittedLifecycle(requests);
+      return !signal.aborted&&this.lifecycleOwner===binding&&this.sourceReader===reader
+        &&this.currentLifecycleEvidenceRevision(scopeId)===revision&&result.ok?result.observations:null;
+    }};
   private settingsQueue: Promise<void> = Promise.resolve();
   private purgeInFlight?: Promise<number>;
   readonly advancedHealth = new AdvancedHealthBridge();
@@ -139,13 +157,13 @@ export default class SyntheticEvidencePlugin extends Plugin {
   // later provider-specific gate; a configured URL cannot issue a profile.
   private readonly generationPolicyHost=new GenerationPolicyHost(
     ()=>this.settings.ai.generation.state==='configured'&&this.settings.ai.generation.transport==='cloud',
-    ()=>this.standalone,input=>this.policyHostState(input));
+    ()=>this.standalone,input=>this.policyHostState(input),this.lifecycleObserver);
   private readonly rerankPolicyHost=new RerankPolicyHost(
     ()=>this.settings.ai.reranking.state==='configured'&&this.settings.ai.reranking.transport==='cloud',
-    ()=>this.standalone,input=>this.policyHostState(input));
+    ()=>this.standalone,input=>this.policyHostState(input),this.lifecycleObserver);
   private readonly embeddingPolicyHost=new ProcessingPolicyHost<'embedding'>(
     ()=>this.settings.ai.embedding.state==='configured'&&this.settings.ai.embedding.transport==='cloud',
-    ()=>this.standalone,input=>this.policyHostState(input),'embedding',input=>this.denseHost?.resolvedPolicyScope(input)??null);
+    ()=>this.standalone,input=>this.policyHostState(input),'embedding',input=>this.denseHost?.resolvedPolicyScope(input)??null,this.lifecycleObserver);
   private policyHostState(input:Pick<ProcessingPolicyInput<'generation'|'reranking'|'embedding'>,'role'|'scopeId'|'scopeSources'|'sources'>):GenerationPolicyHostState|null {
     const config=this.settings.ai[input.role],reader=this.sourceReader;
     if(this.unloaded||this.denseSettingsChanging||!reader||reader.rootId!==input.scopeId||config.state!=='configured')return null;
@@ -887,7 +905,7 @@ export default class SyntheticEvidencePlugin extends Plugin {
     const owner=new NativeLifecycleOwner(this.markingTracker);
     const rootPath=resolve(root),pluginId=this.manifest.id;
     const key=JSON.stringify([rootPath,pluginId]);
-    const binding={owner,key};
+    const binding={owner,key,revision:hash(randomUUID())};
     this.lifecycleOwner=binding;
     const rulesRevision=hash(JSON.stringify(this.settings.markingRules??null));
     // Optional restoration may wait for a prior lifecycle drain, never for
