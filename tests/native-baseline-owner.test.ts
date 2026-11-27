@@ -225,6 +225,56 @@ test('live transition captures mutable input before any host callback or async b
   });
 });
 
+test('live transition reserves tracker authority before accessing caller getters and proxies',async()=>{
+  await fixture('fresh',async f=>{
+    const baseline=await f.owner.prepareBaselinePreview();assert.ok(baseline.ok);
+    assert.equal((await f.owner.confirmBaselinePreview(baseline.preview)).outcome,'admitted');
+    const a=f.owners.get('a.md')!,before=await f.reader.readLifecycleProof('a.md');
+    assert.equal(f.tracker.lifecycleState(f.context,a,before),'existing');
+    await writeFile(join(f.root,'a.md'),'changed');
+    let eventReads=0,sequenceReads=0;
+    const suspended=()=>{
+      assert.equal(f.tracker.durableAuthorityActive(f.context),false);
+      assert.equal(f.tracker.lifecycleState(f.context,a,before),'unresolved');
+      assert.equal(f.tracker.exportCommittedLifecycleEvidence(f.context),null);
+    };
+    const event=new Proxy({sequence:1,kind:'modify' as const},{get(target,key,receiver){
+      suspended();if(key==='sequence')sequenceReads++;return Reflect.get(target,key,receiver);
+    }});
+    const result=await f.owner.admitLiveTransition({
+      get event(){eventReads++;suspended();return event;},owner:a,sourceId:'a.md',current:()=>true,
+    });
+    assert.equal(result.outcome,'admitted');assert.equal(eventReads,1);assert.equal(sequenceReads,1);
+    assert.equal(f.tracker.lifecycleState(f.context,a,await f.reader.readLifecycleProof('a.md')),'existing');
+    await f.owner.close();const ledger=await f.open();try{assert.equal((await ledger.read())?.snapshot.revision,2);}finally{await ledger.close();}
+  });
+});
+
+test('live transition throwing or reentrant accessor denies and drains without publication',async()=>{
+  for(const kind of ['throw','retire','overlap'] as const)await fixture('fresh',async f=>{
+    const baseline=await f.owner.prepareBaselinePreview();assert.ok(baseline.ok);
+    assert.equal((await f.owner.confirmBaselinePreview(baseline.preview)).outcome,'admitted');
+    const a=f.owners.get('a.md')!,before=await f.reader.readLifecycleProof('a.md');
+    await writeFile(join(f.root,'a.md'),'changed');
+    const event={sequence:1,kind:'modify' as const},input={event,owner:a,sourceId:'a.md',current:()=>true};
+    let nested:ReturnType<typeof f.owner.admitLiveTransition>|undefined;
+    let observed=false;
+    const result=await f.owner.admitLiveTransition({...input,get event(){
+      observed=f.tracker.lifecycleState(f.context,a,before)==='unresolved'
+        &&f.tracker.exportCommittedLifecycleEvidence(f.context)===null&&!f.tracker.durableAuthorityActive(f.context);
+      if(kind==='throw')throw new Error('synthetic accessor failure');
+      if(kind==='retire')f.tracker.retireExactLifecycle();
+      if(kind==='overlap')nested=f.owner.admitLiveTransition(input);
+      return event;
+    }});
+    assert.equal(observed,true,kind);assert.equal(result.outcome,'denied',kind);
+    if(nested)assert.equal((await nested).outcome,'denied');
+    assert.equal(f.owner.exactAuthorityActive(),false);
+    assert.equal(f.tracker.exportCommittedLifecycleEvidence(f.context),null);
+    await f.owner.close();const ledger=await f.open();try{assert.equal((await ledger.read())?.snapshot.revision,1);}finally{await ledger.close();}
+  });
+});
+
 test('durable authority cannot advance via unguarded or legacy tracker calls',async()=>{
   for(const kind of ['advance','legacy','rules'] as const)await fixture('fresh',async f=>{
     const baseline=await f.owner.prepareBaselinePreview();assert.ok(baseline.ok);

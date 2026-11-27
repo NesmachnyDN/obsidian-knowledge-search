@@ -487,48 +487,55 @@ export class NewMaterialTracker<T extends object> {
   async admitLiveTransition(context:LifecycleContext,ledger:DurableLifecycleLedger,reader:BoundedVaultReader,
       host:LifecycleRestoreHost<T>,input:LiveTransitionAdmission<T>):Promise<LiveTransitionAdmissionOutcome> {
     if(this.admissionPending){this.sealLifecycle();return 'denied';}
-    const event=input?.event&&Object.freeze({...input.event});
-    if(!this.durableEpoch||!this.durableAnchor||!this.durableSignal||this.restorePending||!this.current(context)||!this.baselineDone||this.pending||this.legacyTouched||this.overflow
-      ||this.entries.size!==0||!(ledger instanceof DurableLifecycleLedger)||!(reader instanceof BoundedVaultReader)
-      ||reader.rootId!==context.rootId||!ledger.rootAvailable(context.rootId)||!host||!(host.signal instanceof AbortSignal)
-      ||host.signal!==this.durableSignal||typeof host.current!=='function'||typeof host.resolveNativeOwner!=='function'||!input||!objectIdentity(input.owner)
-      ||typeof input.current!=='function'||!event||!Number.isSafeInteger(event.sequence)||event.sequence!==this.eventSequence+1
-      ||!['create','modify','rename','delete'].includes(event.kind)||!validPath(input.sourceId)
-      ||(event.kind==='rename'?(!validPath(input.destinationId??'')||input.destinationId===input.sourceId):input.destinationId!==undefined)) {
-      this.sealLifecycle();return 'denied';
-    }
+    // Reserve before reading any caller-owned object, including accessors
+    // and proxies. Capture the original authority before any reentrant code.
     this.admissionPending=true;
-    input=Object.freeze({event,owner:input.owner,sourceId:input.sourceId,destinationId:input.destinationId,current:input.current});
-    host=Object.freeze({...host});
-    const capturedContext=this.context!,revision=this.lifecycleRevision,sequence=this.eventSequence,signal=host.signal;
-    const expectedAnchor=this.durableAnchor;
-    const intact=()=>this.admissionPending&&!this.restorePending&&!signal.aborted&&this.current(capturedContext)
-      &&this.lifecycleRevision===revision&&this.eventSequence===sequence&&!this.legacyTouched&&!this.overflow&&this.entries.size===0
-      &&ledger.rootAvailable(capturedContext.rootId);
-    const current=():boolean=>{
-      if(!intact())return false;
-      try{return host.current()===true&&intact()&&input.current()===true&&intact();}catch{return false;}
-    };
-    const expected=():boolean=>{
-      for(const entry of this.exact.values()){
-        if(!admitted(entry)&&entry==='ambiguous')return false;
-      }
-      return true;
-    };
-    const prior=():Admitted<T>|null=>{
-      const value=this.exact.get(input.sourceId);return admitted(value)?value:null;
-    };
-    const ownerBindings=(records:ReadonlyMap<string,Entry<T>>):boolean=>{
-      if(!current())return false;const seen=new Set<T>();
-      for(const [path,entry] of records){
-        if(!admitted(entry)){if(entry!=='deleted'||host.resolveNativeOwner(path)!==null||!current())return false;continue;}
-        if(seen.has(entry.owner)||host.resolveNativeOwner(path)!==entry.owner||!current())return false;
-        seen.add(entry.owner);
-      }
-      return current();
-    };
-    let durableCommitted=false;
+    let durableCommitted=false,published=false;
     try {
+      const capturedContext=this.context,revision=this.lifecycleRevision,sequence=this.eventSequence;
+      const signal=this.durableSignal,expectedAnchor=this.durableAnchor;
+      if(!this.durableEpoch||!expectedAnchor||!signal||!capturedContext||this.restorePending
+        ||!this.current(capturedContext)||!this.baselineDone||this.pending||this.legacyTouched||this.overflow
+        ||this.entries.size!==0||!(ledger instanceof DurableLifecycleLedger)||!(reader instanceof BoundedVaultReader))return 'denied';
+      const suppliedContext=Object.freeze({rootId:context.rootId,scopeId:context.scopeId,rulesRevision:context.rulesRevision,
+        host:context.host,session:context.session});
+      const suppliedEvent=input?.event;
+      if(!suppliedEvent||!host)return 'denied';
+      const event=Object.freeze({kind:suppliedEvent.kind,sequence:suppliedEvent.sequence});
+      input=Object.freeze({event,owner:input.owner,sourceId:input.sourceId,destinationId:input.destinationId,current:input.current});
+      host=Object.freeze({signal:host.signal,current:host.current,resolveNativeOwner:host.resolveNativeOwner});
+      const intact=()=>ledger.rootAvailable(capturedContext.rootId)&&this.admissionPending&&!this.restorePending&&!signal.aborted
+        &&this.current(capturedContext)&&this.lifecycleRevision===revision&&this.eventSequence===sequence
+        &&this.durableAnchor===expectedAnchor&&this.durableSignal===signal&&!this.legacyTouched&&!this.overflow&&this.entries.size===0;
+      if(!this.current(suppliedContext)||reader.rootId!==capturedContext.rootId
+        ||host.signal!==signal||!(signal instanceof AbortSignal)||typeof host.current!=='function'
+        ||typeof host.resolveNativeOwner!=='function'||!objectIdentity(input.owner)||typeof input.current!=='function'
+        ||!Number.isSafeInteger(event.sequence)||event.sequence!==sequence+1
+        ||!['create','modify','rename','delete'].includes(event.kind)||!validPath(input.sourceId)
+        ||(event.kind==='rename'?(!validPath(input.destinationId??'')||input.destinationId===input.sourceId):input.destinationId!==undefined)
+        ||!intact())return 'denied';
+      const current=():boolean=>{
+        if(!intact())return false;
+        try{return host.current()===true&&intact()&&input.current()===true&&intact();}catch{return false;}
+      };
+      const expected=():boolean=>{
+        for(const entry of this.exact.values()){
+          if(!admitted(entry)&&entry==='ambiguous')return false;
+        }
+        return true;
+      };
+      const prior=():Admitted<T>|null=>{
+        const value=this.exact.get(input.sourceId);return admitted(value)?value:null;
+      };
+      const ownerBindings=(records:ReadonlyMap<string,Entry<T>>):boolean=>{
+        if(!current())return false;const seen=new Set<T>();
+        for(const [path,entry] of records){
+          if(!admitted(entry)){if(entry!=='deleted'||host.resolveNativeOwner(path)!==null||!current())return false;continue;}
+          if(seen.has(entry.owner)||host.resolveNativeOwner(path)!==entry.owner||!current())return false;
+          seen.add(entry.owner);
+        }
+        return current();
+      };
       if(!expected()||!current())return 'denied';
       const loaded=await ledger.read();
       if(!loaded||!sameLedgerAnchor(loaded.anchor,expectedAnchor)||!loaded.snapshot.baselineAdmitted||loaded.snapshot.rootId!==capturedContext.rootId||!current()
@@ -586,13 +593,14 @@ export class NewMaterialTracker<T extends object> {
       // No callback or await after the final anchor and authority fence.
       this.exact.clear();for(const [path,entry] of final.records)this.exact.set(path,entry);
       this.eventSequence=event.sequence;this.lifecycleRevision++;this.durableAnchor=committed.anchor;
+      published=true;
       return 'admitted';
     }catch(error){
       if(durableCommitted)return 'committed-not-live';
       if(error instanceof LiveTransitionPublicationError)return error.outcome;
       return 'denied';
     }finally{
-      if(this.eventSequence!==event.sequence)this.sealLifecycle();
+      if(!published)this.sealLifecycle();
       this.admissionPending=false;
     }
   }
