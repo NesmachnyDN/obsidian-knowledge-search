@@ -2,6 +2,7 @@ import { BOUNDS, hash, isDigest, validPath } from '../standalone/contracts';
 import { remainingOperationMs } from './active-deadline';
 import type { PolicyMetadataProof } from '../standalone/shared';
 import type { StandaloneEngine } from '../standalone/engine';
+import type { DescriptorLifecycleProof } from '../standalone/source';
 import { ProviderFailure, type CallContext, type ProviderConfig } from './contracts';
 import { configDigest } from './disclosure';
 import { policyOriginals, type ProcessingPolicyInput, type ProcessingPolicyPort, type GenerationHistoryScope, type GenerationPolicyPort, type RerankPolicyPort, type GenerationPolicyBinding } from './generation-policy';
@@ -29,7 +30,7 @@ export type GenerationPolicyHostState=Readonly<{
   /** Omitted is the historical marking authority, retained byte-for-byte. */
   mode?:'effective';
   /** Read-only current-original decisions; intentionally incompatible with marking rules. */
-  effective?:Readonly<{config:EffectivePolicyConfig;origins:readonly (VerifiedOrigin|null)[]}>;
+  effective?:Readonly<{config:EffectivePolicyConfig;origins:readonly (Readonly<{origin:VerifiedOrigin;versionId:string;stableIdentity:string}>|null)[]}>;
 }>;
 /** Trusted native adapter. No credential, network, grant or second parser.
  * A profile must come from independently admitted host authority, never a note,
@@ -58,8 +59,13 @@ export class ProcessingPolicyHost<R extends AiRole> implements ProcessingPolicyP
     if((value.mode!==undefined&&!effective)||(effective!==(value.effective!==undefined))
       ||(effective&&(value.rules!==undefined||value.materials.length!==0
         ||!value.effective||!validEffectivePolicyConfig(value.effective.config)||!Array.isArray(value.effective.origins)||value.effective.origins.length!==originals.length
-        ||value.effective!.origins.some((origin,i)=>origin!==null&&(!origin||origin.sourceId!==originals[i]!.sourceId
-          ||origin.sha256!==originals[i]!.sourceSha256||origin.rootId!==input.scopeId)))))return null;
+        ||originals.some((source,i)=>{
+          const entry=value.effective!.origins[i];
+          return entry!==null&&(!entry?.origin||Object.keys(entry).length!==3
+            ||!isDigest(entry.versionId)||!isDigest(entry.stableIdentity)
+            ||entry.origin.sourceId!==source.sourceId||entry.origin.sha256!==source.sourceSha256
+            ||entry.origin.rootId!==input.scopeId);
+        }))))return null;
     if(value.rules!==undefined&&(value.materials.length!==originals.length||originals.some((x,i)=>{
       const m=value.materials[i]?.lifecycle;
       return !m||m.sourceId!==x.sourceId||m.sha256!==x.sourceSha256||m.rootId!==input.scopeId;
@@ -84,7 +90,8 @@ export class ProcessingPolicyHost<R extends AiRole> implements ProcessingPolicyP
   private structuralDigest(input:ProcessingPolicyInput<R>,value:GenerationPolicyHostState,revision?:string):string{
     return hash(JSON.stringify([POLICY_VERSION,input.scopeId,this.snapshot(input,value,revision)]));
   }
-  private boundDigest(structural:string,lifecycle?:string):string{
+  private boundDigest(structural:string,lifecycle?:string,original?:string):string{
+    if(original!==undefined)return hash(JSON.stringify(['oks-effective-original-binding-v1',structural,original]));
     return lifecycle===undefined?structural:hash(JSON.stringify(['oks-policy-2e3e3c-binding-v1',structural,lifecycle]));
   }
   private async freshEvidence(input:ProcessingPolicyInput<R>,revision:string,context:CallContext,live:()=>boolean):
@@ -117,10 +124,11 @@ export class ProcessingPolicyHost<R extends AiRole> implements ProcessingPolicyP
       const engine=this.engine();if(!engine||!this.selected())return false;
       const value=this.readState(input);if(!value)return false;
       const revision=this.observationRevision(input.scopeId,value);
-      if(revision===null||(revision===undefined?binding.lifecycleDigest!==undefined:!isDigest(binding.lifecycleDigest)))return false;
+      if(revision===null||(revision===undefined?binding.lifecycleDigest!==undefined:!isDigest(binding.lifecycleDigest))
+        ||(value.mode==='effective'?!isDigest(binding.originalProofDigest):binding.originalProofDigest!==undefined))return false;
       // Structural validity only; renewal performs the fresh physical read.
       return this.engine()===engine&&this.selected()
-        &&this.boundDigest(this.structuralDigest(input,value,revision),binding.lifecycleDigest)===binding.bindingDigest;
+        &&this.boundDigest(this.structuralDigest(input,value,revision),binding.lifecycleDigest,binding.originalProofDigest)===binding.bindingDigest;
     }catch{return false;}
   }
   async evaluate(input:ProcessingPolicyInput<R>,context:CallContext,current:()=>boolean):Promise<PolicyEnvelope>{
@@ -157,21 +165,29 @@ export class ProcessingPolicyHost<R extends AiRole> implements ProcessingPolicyP
         proof,lifecycle:material.lifecycle,provenance:material.provenance});
       return result.complete&&!result.externalBlocked;
     };
-    const effective=(proof:PolicyMetadataProof):boolean=>{
+    const effective=(proof:PolicyMetadataProof,original?:DescriptorLifecycleProof):boolean=>{
       const value=state();if(!value||value.mode!=='effective'||!value.effective)return false;
       const source=policyOriginals(input).findIndex(x=>x.sourceId===proof.sourceId&&x.sourceSha256===proof.sha256);
-      if(source<0)return false;
+      if(source<0||!original)return false;
+      const entry=value.effective.origins[source];
+      if(entry&&(entry.versionId!==original.version.versionId||entry.stableIdentity!==original.stableIdentity))return false;
       const decision=decideEffectivePolicy(value.effective.config,{sourceId:proof.sourceId,sha256:proof.sha256,
-        rootId:input.scopeId,proof,origin:value.effective.origins[source]??null});
+        rootId:input.scopeId,proof,origin:entry?.origin??null});
       return decision.complete&&decision.decision==='eligible';
     };
     const evaluation=engine.evaluateProcessingPolicy({snapshot,current:live,
+      ...(initial.mode==='effective'?{requireOriginalProof:true as const}:{}),
       marking:initial.mode==='effective'?effective:marking},context);
     const physical=engine.processingPolicyDrain?.();
     let envelope:PolicyEnvelope;
     try{envelope=await evaluation;}finally{await physical;}
     if(!envelope.allowed)return envelope;
     if(!live()||envelope.bindingDigest!==structural)throw new ProviderFailure('CANCELLED');
+    if(initial.mode==='effective'){
+      if(!isDigest(envelope.originalProofDigest)||envelope.lifecycleDigest!==undefined)throw new ProviderFailure('DISCLOSURE_DENIED');
+      return Object.freeze({...envelope,bindingDigest:this.boundDigest(structural,undefined,envelope.originalProofDigest)});
+    }
+    if(envelope.originalProofDigest!==undefined)throw new ProviderFailure('DISCLOSURE_DENIED');
     if(revision===undefined)return envelope;
     const renewed=await this.freshEvidence(input,revision,context,live);
     if(!renewed||renewed.digest!==first?.digest||!live())throw new ProviderFailure('CANCELLED');

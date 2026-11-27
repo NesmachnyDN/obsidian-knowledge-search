@@ -39,7 +39,7 @@ async function fixture(role:AiRole,use:(f:{
   alter:(fn:(value:readonly LifecycleObservation[],n:number)=>readonly LifecycleObservation[]|null|Promise<readonly LifecycleObservation[]|null>)=>void;
   state:(patch:Partial<GenerationPolicyHostState>)=>void;
   revision:(value:string)=>void;
-})=>Promise<void>,purpose:'query'|'document'='document'){
+})=>Promise<void>,purpose:'query'|'document'='document',withLedger=true){
   const base=await mkdtemp(join(tmpdir(),'oks-policy-fresh-')),prior=process.env.XDG_DATA_HOME;
   const root=join(base,'vault'),xdg=join(base,'xdg');
   let owner:NativeLifecycleOwner<object>|undefined,engine:StandaloneEngine|undefined;
@@ -47,18 +47,20 @@ async function fixture(role:AiRole,use:(f:{
     await mkdir(root,{mode:0o700});await mkdir(xdg,{mode:0o700});process.env.XDG_DATA_HOME=xdg;
     for(const path of paths)await writeFile(join(root,path),body(path));
     const reader=await BoundedVaultReader.open(root,()=>paths),scopeId=reader.rootId;
-    const proofs=await Promise.all([...paths].sort().map(path=>reader.readLifecycleProof(path)));
-    const ledger=await DurableLifecycleLedger.open({path:root,rootId:scopeId},pluginId);
-    try{
-      const initial=await ledger.initializeEmptyEpoch();
-      await ledger.commit(initial.anchor.snapshotSha256,true,proofs.map(proof=>({sourceId:proof.version.sourceId,
-        state:'existing',origin:'baseline',originVersionId:proof.version.versionId,proof})));
-    }finally{await ledger.close();}
-    const files=new Map(paths.map(path=>[path,{}]));
     owner=new NativeLifecycleOwner(new NewMaterialTracker<object>());
-    await owner.start({context:{rootId:scopeId,scopeId,rulesRevision:hash(JSON.stringify(rules)),host:{},session:{}},
-      reader,rootPath:root,pluginId,current:()=>true,resolveNativeOwner:path=>files.get(path)??null});
-    assert.equal(owner.exactAuthorityActive(),true);
+    if(withLedger){
+      const proofs=await Promise.all([...paths].sort().map(path=>reader.readLifecycleProof(path)));
+      const ledger=await DurableLifecycleLedger.open({path:root,rootId:scopeId},pluginId);
+      try{
+        const initial=await ledger.initializeEmptyEpoch();
+        await ledger.commit(initial.anchor.snapshotSha256,true,proofs.map(proof=>({sourceId:proof.version.sourceId,
+          state:'existing',origin:'baseline',originVersionId:proof.version.versionId,proof})));
+      }finally{await ledger.close();}
+      const files=new Map(paths.map(path=>[path,{}]));
+      await owner.start({context:{rootId:scopeId,scopeId,rulesRevision:hash(JSON.stringify(rules)),host:{},session:{}},
+        reader,rootPath:root,pluginId,current:()=>true,resolveNativeOwner:path=>files.get(path)??null});
+      assert.equal(owner.exactAuthorityActive(),true);
+    }
     const store=await GenerationStore.open(join(base,'index'),scopeId);
     engine=new StandaloneEngine(reader,store,new WorkerMarkdownParser(join(process.cwd(),'.test-build','standalone-worker.js'),syntheticNodeWorkerPort));
     await engine.start();await engine.whenIdle();
@@ -93,7 +95,7 @@ async function fixture(role:AiRole,use:(f:{
     }};
     const host=new ProcessingPolicyHost<AiRole>(()=>true,()=>engine,i=>({...value,
       materials:value.mode==='effective'?value.materials:policyOriginals(i).map(source=>({lifecycle:{state:'unresolved',sourceId:source.sourceId,sha256:source.sourceSha256,rootId:scopeId},provenance:null}))}),
-      role,()=>resolved,observer);
+      role,()=>resolved,withLedger?observer:undefined);
     const gate=new GenerationPolicyGate();
     const evaluate=(signal=new AbortController().signal)=>gate.evaluate(host,input,{signal,deadlineUnixMs:input.deadlineUnixMs},()=>true);
     const approval=(binding:Awaited<ReturnType<GenerationPolicyGate['evaluate']>>):EvidenceApproval=>({config,scopeId,
@@ -150,7 +152,13 @@ for(const role of ['generation','reranking','embedding'] as const){
       f.state({effective:{config:allowed,origins:policyOriginals(f.input).map(()=>null)}});
       const binding=await f.evaluate();
       assert.equal(binding.lifecycleDigest,undefined);assert.equal(f.observeCount(),0);
+      assert.ok(isDigest(binding.originalProofDigest));
       assert.equal(f.host.current(f.input,binding),true);
+      assert.equal(f.host.current(f.input,{...binding,originalProofDigest:hash('forged')}),false);
+      const {originalProofDigest:_,...missing}=binding;
+      assert.equal(f.host.current(f.input,missing),false);
+      assert.equal(sameGenerationPolicy(binding,missing),false);
+      assert.equal(sameGenerationPolicy(binding,await f.evaluate()),true);
 
       // A restrictive policy revision retires the exact binding.
       f.state({effective:{config:effective,
@@ -162,9 +170,100 @@ for(const role of ['generation','reranking','embedding'] as const){
       f.state({rules,materials:policyOriginals(f.input).map(source=>({lifecycle:{state:'unresolved' as const,
         sourceId:source.sourceId,sha256:source.sourceSha256,rootId:f.input.scopeId},provenance:null}))});
       await assert.rejects(f.evaluate(),{message:'DISCLOSURE_DENIED'});
-    },role==='embedding'?'query':'document');
+    },role==='embedding'?'query':'document',false);
   });
 }
+
+for(const role of ['generation','reranking','embedding'] as const){
+  for(const purpose of role==='embedding'?['query','document'] as const:['document'] as const){
+    test('effective '+role+' '+purpose+' rejects same-byte substitution at dispatch and publication without ledger',async()=>{
+      await fixture(role,async f=>{
+        f.state({mode:'effective',rules:undefined,materials:[],effective:{config:{
+          version:EFFECTIVE_POLICY_CONFIG_VERSION,verifiedAbsent:'eligible',rules:[]},origins:policyOriginals(f.input).map(()=>null)}});
+        const replace=async()=>{await writeFile(join(f.root,'replacement.md'),body('b.md'));await rename(join(f.root,'replacement.md'),join(f.root,'b.md'));};
+        const initial=await f.evaluate();
+        const operation=new VerifiedEvidenceOperation(),signal=new AbortController().signal;
+        let calls=0;
+        const run=(binding:typeof initial,change=false)=>operation.run(role,f.approval(binding),{signal,deadlineUnixMs:f.input.deadlineUnixMs},
+          async hit=>{verifySpan(hit,await f.reader.read(hit.sourceId));},()=>f.host.current(f.input,binding),
+          async()=>{calls++;if(change)await replace();return 'synthetic-response';},
+          role==='embedding'&&purpose==='query',()=>f.evaluate(signal));
+        await run(initial);assert.equal(calls,1);
+        await replace();
+        // A same-byte new original may receive a new decision but never reuse the old approval.
+        const next=await f.evaluate();
+        assert.notEqual(next.originalProofDigest,initial.originalProofDigest);
+        assert.equal(sameGenerationPolicy(initial,next),false);
+        await assert.rejects(run(initial));assert.equal(calls,1);
+        await assert.rejects(run(next,true));assert.equal(calls,2);
+        assert.equal(f.observeCount(),0);
+      },purpose,false);
+    });
+  }
+}
+
+test('effective source version changes during evaluation and cancellation remain fail closed',async()=>{
+  await fixture('generation',async f=>{
+    f.state({mode:'effective',rules:undefined,materials:[],effective:{config:{
+      version:EFFECTIVE_POLICY_CONFIG_VERSION,verifiedAbsent:'eligible',rules:[]},origins:policyOriginals(f.input).map(()=>null)}});
+    const read=f.reader.readVerifiedOriginal.bind(f.reader);
+    let count=0;
+    f.reader.readVerifiedOriginal=async path=>{
+      const observed=await read(path);
+      if(++count===1){await writeFile(join(f.root,'replacement.md'),body(path));await rename(join(f.root,'replacement.md'),join(f.root,path));}
+      return observed;
+    };
+    await assert.rejects(f.evaluate());
+    f.reader.readVerifiedOriginal=read;
+    const binding=await f.evaluate();
+    let entered!:()=>void,release!:()=>void;
+    const waiting=new Promise<void>(resolve=>{entered=resolve;}),hold=new Promise<void>(resolve=>{release=resolve;});
+    f.reader.readVerifiedOriginal=async path=>{entered();await hold;return read(path);};
+    const abort=new AbortController();
+    try{
+      const pending=f.evaluate(abort.signal);await waiting;abort.abort();
+      await assert.rejects(pending,{message:'CANCELLED'});
+      assert.equal(f.gate.busy,true);await assert.rejects(f.evaluate(),{message:'BUSY'});
+    }finally{release();await f.gate.drain();f.reader.readVerifiedOriginal=read;}
+    assert.equal(f.gate.busy,false);
+    assert.equal(sameGenerationPolicy(binding,await f.evaluate()),true);
+  },'document',false);
+});
+
+test('effective source proof rejects missing, stale or foreign evidence and changed authority',async()=>{
+  await fixture('generation',async f=>{
+    const config:EffectivePolicyConfig={version:EFFECTIVE_POLICY_CONFIG_VERSION,verifiedAbsent:'eligible',rules:[]};
+    const origins=policyOriginals(f.input).map(()=>null);
+    f.state({mode:'effective',rules:undefined,materials:[],effective:{config,origins}});
+    const original=await f.evaluate(),read=f.reader.readVerifiedOriginal.bind(f.reader);
+    assert.equal(f.host.current({...f.input,credentialEpoch:2},original),false);
+    assert.equal(f.host.current({...f.input,scopeBinding:hash('changed-scope')},original),false);
+    f.state({mode:undefined,effective:undefined});
+    assert.equal(f.host.current(f.input,original),false);
+    f.state({mode:'effective',effective:{config,origins}});
+    for(const mutate of [
+      (x:Awaited<ReturnType<typeof read>>)=>({...x,proof:{...x.proof,stableIdentity:'invalid'}}),
+      (x:Awaited<ReturnType<typeof read>>)=>({...x,proof:{...x.proof,version:{...x.proof.version,rootId:hash('foreign')}}}),
+      (x:Awaited<ReturnType<typeof read>>)=>({...x,proof:{...x.proof,version:{...x.proof.version,sha256:hash('foreign')}}})
+    ]){
+      f.reader.readVerifiedOriginal=async path=>mutate(await read(path));
+      await assert.rejects(f.evaluate());
+    }
+    f.reader.readVerifiedOriginal=read;
+    // Origin-dependent decisions may not inherit a stale provenance assertion.
+    const proof=await f.reader.readLifecycleProof('z.md');
+    const bound={origin:{originId:'synthetic-import',digest:hash('synthetic-origin'),sourceId:'z.md',
+      sha256:proof.version.sha256,rootId:proof.version.rootId},versionId:proof.version.versionId,stableIdentity:proof.stableIdentity};
+    f.state({effective:{config,origins:policyOriginals(f.input).map(x=>x.sourceId==='z.md'?bound:null)}});
+    const admitted=await f.evaluate();assert.ok(admitted.originalProofDigest);
+    await writeFile(join(f.root,'replacement.md'),body('z.md'));await rename(join(f.root,'replacement.md'),join(f.root,'z.md'));
+    await assert.rejects(f.evaluate());
+    f.state({effective:{config,origins}});
+    const renewed=await f.evaluate();assert.notEqual(renewed.originalProofDigest,admitted.originalProofDigest);
+    await writeFile(join(f.root,'z.md'),body('z.md')+' changed metadata or content');
+    await assert.rejects(f.evaluate());
+  },'document',false);
+});
 
 test('fresh lifecycle denies malformed evidence, changed owner revision and changed rules, without fallback',async()=>{
   await fixture('generation',async f=>{

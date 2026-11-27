@@ -1,5 +1,5 @@
 import { BOUNDS, hash, isDigest, validPath } from '../standalone/contracts';
-import type { SourceProvider } from '../standalone/source';
+import type { SourceProvider, DescriptorLifecycleProof, VerifiedOriginalRead } from '../standalone/source';
 import type { PolicyMetadataParser } from '../standalone/worker';
 import type { PolicyMetadataState, PolicyMetadataProof } from '../standalone/shared';
 import { AI_ROLES, ProviderFailure, type AiRole, type CallContext, type ProviderConfig } from './contracts';
@@ -30,13 +30,16 @@ export type PolicySnapshot = Readonly<{
   policyRevision: string; configRevision: string; credentialEpoch: number; deadlineUnixMs: number;
   payloadDigest: string; restrictions: readonly Restriction[]; evaluationComplete: boolean;
 }>;
-export type PolicyHost = Readonly<{ snapshot(): PolicySnapshot | null; current(): boolean; marking?(proof:PolicyMetadataProof):boolean }>;
+export type PolicyHost = Readonly<{ snapshot(): PolicySnapshot | null; current(): boolean;
+  requireOriginalProof?:true; marking?(proof:PolicyMetadataProof,original?:DescriptorLifecycleProof):boolean }>;
 export type PolicyEnvelope = Readonly<{
   policyVersion: typeof POLICY_VERSION; allowed: boolean; reason: PolicyReason;
   bindingDigest: string | null; rootId: string;
   sourceVersions: readonly Readonly<{sourceId:string;sha256:string;metadataState:PolicyMetadataState;reason:PolicyReason}>[];
   /** Host-private evidence binding; never a proof, path diagnostic, or grant. */
   lifecycleDigest?:string;
+  /** Fresh descriptor evidence, independent of lifecycle classification. */
+  originalProofDigest?:string;
 }>;
 const identifier = (v: unknown): v is string => typeof v === 'string' && v.length > 0
   && Buffer.byteLength(v) <= 256 && Buffer.from(v,'utf8').toString('utf8')===v && !/[\0\r\n]/.test(v);
@@ -130,9 +133,10 @@ export class EligibilityEvaluator {
     const signal=context.signal;
     const versions:{sourceId:string;sha256:string;metadataState:PolicyMetadataState;reason:PolicyReason}[]=[];
     const rootId=this.reader.rootId;
-    let bindingDigest:string|null=null;
+    let bindingDigest:string|null=null,originalProofDigest:string|undefined;
     const done=(reason:PolicyReason):PolicyEnvelope=>freeze({policyVersion:POLICY_VERSION,
-      allowed:reason==='eligible',reason,bindingDigest,rootId,sourceVersions:versions.map(x=>({...x}))});
+      allowed:reason==='eligible',reason,bindingDigest,rootId,sourceVersions:versions.map(x=>({...x})),
+      ...(reason==='eligible'&&originalProofDigest?{originalProofDigest}:{})});
     const failure=():PolicyReason=>{
       const terminal=deadlineFailure(context);
       return terminal?.code==='TIMEOUT'?'timeout':signal.aborted||terminal?.code==='CANCELLED'?'cancelled':'authority-changed';
@@ -175,12 +179,26 @@ export class EligibilityEvaluator {
         return done('ownership-unresolved');
     }
     if(!notes.length)return done('lineage-unresolved');
+    const requireProof=this.host.requireOriginalProof===true;
+    const originals=new Map<string,string>();
+    const read=async(x:PolicySubject):Promise<{bytes:Uint8Array;proof?:DescriptorLifecycleProof;digest?:string}>=>{
+      if(!requireProof)return {bytes:await this.reader.read(x.sourceId)};
+      if(!this.reader.readVerifiedOriginal)throw new ProviderFailure('SOURCE_STALE');
+      const observed:VerifiedOriginalRead=await this.reader.readVerifiedOriginal(x.sourceId);
+      const {bytes,proof}=observed,v=proof?.version;
+      if(!(bytes instanceof Uint8Array)||bytes.byteLength>BOUNDS.fileBytes||!v||v.rootId!==rootId||v.sourceId!==x.sourceId||v.sha256!==x.expectedSha256
+        ||!isDigest(v.versionId)||!isDigest(proof.stableIdentity)||hash(bytes)!==v.sha256)
+        throw new ProviderFailure('SOURCE_STALE');
+      return {bytes,proof,digest:hash(JSON.stringify([v.rootId,v.sourceId,v.sha256,v.versionId,proof.stableIdentity]))};
+    };
     for(const x of notes){
       try{
         if(!current())return done(failure());
-        const bytes=await this.awaitDependency(context,current,()=>this.reader.read(x.sourceId));
+        const observed=await this.awaitDependency(context,current,()=>read(x));
         if(!current())return done(failure());
+        const {bytes,proof,digest}=observed;
         if(bytes.byteLength>BOUNDS.fileBytes||hash(bytes)!==x.expectedSha256)return done('source-stale');
+        if(digest)originals.set(x.sourceId,digest);
         const doc=await this.awaitDependency(context,current,()=>this.parser.policyMetadata(x.sourceId,bytes,rootId));
         if(!current())return done(failure());
         if(doc.sha256!==x.expectedSha256||doc.sourceId!==x.sourceId||doc.scopeId!==rootId)return done('source-stale');
@@ -188,7 +206,7 @@ export class EligibilityEvaluator {
         versions.push({sourceId:x.sourceId,sha256:x.expectedSha256,metadataState:doc.state,reason});
         if(reason==='metadata-unresolved'||(s.profile!.classification==='external'&&reason!=='eligible'))return done(reason);
         if(s.profile!.classification==='external'&&this.host.marking){
-          if(!this.host.marking(doc))return done('marking-denied');
+          if(!this.host.marking(doc,proof))return done('marking-denied');
           if(!current())return done(failure());
         }
       }catch{return done(current()?'source-unresolved':failure());}
@@ -199,10 +217,15 @@ export class EligibilityEvaluator {
     for(const x of notes){
       try{
         if(!current())return done(failure());
-        const bytes=await this.awaitDependency(context,current,()=>this.reader.read(x.sourceId));
+        const {bytes,digest}=await this.awaitDependency(context,current,()=>read(x));
         if(!current())return done(failure());
-        if(bytes.byteLength>BOUNDS.fileBytes||hash(bytes)!==x.expectedSha256)return done('source-stale');
+        if(bytes.byteLength>BOUNDS.fileBytes||hash(bytes)!==x.expectedSha256
+          ||(requireProof&&(!digest||originals.get(x.sourceId)!==digest)))return done('source-stale');
       }catch{return done(current()?'source-unresolved':failure());}
+    }
+    if(requireProof){
+      if(originals.size!==notes.length)return done('source-unresolved');
+      originalProofDigest=hash(JSON.stringify(['oks-effective-originals-v1',rootId,[...originals]]));
     }
     return done(current()?'eligible':failure());
   }

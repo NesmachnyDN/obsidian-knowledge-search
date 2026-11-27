@@ -10,6 +10,8 @@ export interface SourceProvider {
   list(): Promise<string[]>;
   versionHints(paths: readonly string[]): Promise<string[]>;
   read(path: string): Promise<Uint8Array>;
+  /** Optional stronger descriptor-bound read; consumers requiring it fail closed if absent. */
+  readVerifiedOriginal?(path:string):Promise<VerifiedOriginalRead>;
 }
 export type OriginalVersionProof = Readonly<{
   rootId: string; sourceId: string; sha256: string; versionId: string;
@@ -23,6 +25,7 @@ export type OriginalVersionProof = Readonly<{
 export type DescriptorLifecycleProof = Readonly<{
   version: OriginalVersionProof; stableIdentity: string;
 }>;
+export type VerifiedOriginalRead = Readonly<{bytes:Uint8Array;proof:DescriptorLifecycleProof}>;
 /**
  * A bounded, fail-closed observation for future lifecycle baseline work.
  * This is intentionally not SourceProvider.list(): Basic indexing keeps its
@@ -275,16 +278,21 @@ export class BoundedVaultReader implements SourceProvider {
   }
   /** One protected descriptor read supplies both version and stable identity. */
   async readLifecycleProof(relative: string): Promise<DescriptorLifecycleProof> {
+    return (await this.readVerifiedOriginal(relative)).proof;
+  }
+  /** Read content and descriptor proof from the same protected observation, without ledger admission. */
+  async readVerifiedOriginal(relative:string):Promise<VerifiedOriginalRead> {
     const observed = await this.readOriginal(relative);
     const birthtime = observed.info.birthtimeNs;
     // Linux filesystems which cannot supply a real creation time must not
     // manufacture an identity from mutable timestamps.
     if (birthtime <= 0n) throw new StandaloneError('LIFECYCLE_IDENTITY_UNSUPPORTED');
     const version = this.versionProof(relative, observed);
-    return Object.freeze({ version, stableIdentity: hash(JSON.stringify([
+    const proof=Object.freeze({ version, stableIdentity: hash(JSON.stringify([
       'oks-lifecycle-descriptor-identity-v1', this.rootId,
       observed.info.dev.toString(), observed.info.ino.toString(), birthtime.toString(),
     ])) });
+    return Object.freeze({bytes:observed.bytes,proof});
   }
   private versionProof(relative:string, observed:{bytes:Uint8Array;version:string[]}):OriginalVersionProof {
     const sha256 = hash(observed.bytes);
