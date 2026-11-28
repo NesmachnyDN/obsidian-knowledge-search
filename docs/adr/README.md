@@ -35,3 +35,5 @@ Use states Proposed, Accepted, Superseded or Rejected. Do not mark an experiment
 - [ADR-0024 — Search-first product boundary and minimum necessary complexity](0024-search-first-minimum-complexity.md) — Proposed 2026-11-28 product-owner direction; independent DOCS_ONLY review and architecture checkpoint.
 
 - [ADR-0025 — Search-first delivery and bounded ownership simplification](0025-search-first-delivery-and-ownership.md) — Post-audit priority overlay; targeted simplification, common document retrieval before scoped RAG, no gate waiver; independent DOCS_ONLY acceptance pending.
+
+- [ADR-0026 — Minimum operation ownership and completion](0026-minimum-operation-ownership.md) — Proposed P0.1 design; B-07 evidence reconciliation and bounded P0.2 contract; independent acceptance pending.

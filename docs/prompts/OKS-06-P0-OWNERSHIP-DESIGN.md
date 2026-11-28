@@ -15,3 +15,7 @@ Prove the design preserves hard scope, current-original provenance, ownership, f
 Deliver a DOCS_ONLY design PR with explicit baseline/candidate, alternatives, state/ownership table, migration impact, bounded implementation proposal and traceable before/after validation matrix. Specify exactly what is kept, moved or removed and why; no invented numerical complexity savings. Record unresolved questions as such. Independent exact-HEAD design review, applicable CI and normal delivery gates are mandatory; the author must not approve or merge their own unreviewed work. Production implementation requires a later independently accepted bounded contract; no source code changes in this step.
 
 No production Vault, actual provider traffic, credentials, heavy inference, model downloads, deployment, source changes, PR #155 status changes or issue closure. Synthetic evidence only. Report in the maintainer's language; public repository records in English. Stop at a recoverable handoff if a mandatory gate remains unresolved.
+
+## P0.1 candidate output
+
+See [ADR-0026](../adr/0026-minimum-operation-ownership.md) and [proposed P0.2 execution contract](OKS-06-P0-OWNERSHIP-SIMPLIFICATION.md). These are pending independent DOCS_ONLY acceptance; no implementation or runtime acceptance follows from their creation.
