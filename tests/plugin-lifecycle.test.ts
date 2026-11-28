@@ -2349,8 +2349,33 @@ test('06H.2 native registered chat separates retrieve, classify, preview and one
     await wait(()=>find('Completed. History verified locally.'));
     assert.equal(sends,1);assert.ok(find('Quotation'));assert.ok(find('REQ-LIFE-1'));
     confirm.onclick!();assert.equal(sends,1);
+    // B-03: an ordinary lexical lifecycle publication is not a source change.
+    const chat=view as unknown as {session:Parameters<typeof f.plugin.searchController.readRetainedChatHistory>[0]};
+    const session=chat.session, controller=f.plugin.searchController;
+    const history=controller.readRetainedChatHistory(session), revision=controller.sourceAuthorityRevision();
+    assert.equal(history.length,1);
+    const assertRetained=()=>{
+      assert.ok(find(JSON.stringify({mode:'vault-wide'})));
+      assert.ok(find('Quotation'));assert.ok(find('REQ-LIFE-1'));
+      assert.equal(chat.session,session);assert.deepEqual(controller.readRetainedChatHistory(session),history);
+      assert.equal(controller.sourceAuthorityRevision(),revision);assert.equal(sends,1);
+    };
+    assert.equal((await controller.search(uiRequest('REQ-LIFE-1',1))).ok,true);assertRetained();
     const selected=root.all().find(el=>el.type==='checkbox');assert.ok(selected);selected.checked=true;selected.onchange?.();
     question.oninput?.();assert.equal(selected.checked,false);
+    // Explicit shared revocation historically clears retained history, but
+    // it does not change source identity or erase the user's selected scope.
+    controller.invalidate();
+    assert.ok(find(JSON.stringify({mode:'vault-wide'})));
+    assert.equal(chat.session,session);assert.deepEqual(controller.readRetainedChatHistory(session),[]);
+    assert.equal(find('Quotation'),undefined);assert.equal(controller.sourceAuthorityRevision(),revision);
+    controller.invalidateSource([]);
+    assert.ok(find('No scope selected'));assert.equal(find('Quotation'),undefined);
+    assert.throws(()=>controller.readRetainedChatHistory(session));
+    scope.value='vault-wide';scope.oninput?.();button('Apply scope').onclick!();
+    assert.ok(find(JSON.stringify({mode:'vault-wide'})));
+    await f.plugin.patchSettings(settings=>{settings.ai.generation={state:'disabled'};});
+    assert.ok(find('No scope selected'));
     await view.onClose();assert.equal(root.children.length,0);
     confirm.onclick!();assert.equal(sends,1);
   }finally{await view?.onClose();await new Promise<void>(r=>server.close(()=>r()));await f.cleanup();}
@@ -2478,4 +2503,46 @@ test('P0.1c native effective mode reads originals without ledger or provider adm
     assert.equal((await port(replacement).previewEffectivePolicy(eligible)).decision,'eligible');
     assert.deepEqual(await readFile(join(f.vault,file.path)),original);
   }finally{replacement?.onunload();await f.cleanup();}
+});
+
+for(const route of ['reset','basic','source','settings','generation'] as const)
+test('B-03 native ChatView observes identity without opening lifecycle admission: '+route,async t=>{
+  const f=await fixture();
+  let view:{contentEl:TestElement;onOpen():Promise<void>;onClose():Promise<void>;applyHostScope(scope:{mode:'vault-wide'}):void}|undefined;
+  let off=()=>{};
+  try{
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    const factory=(f.plugin as unknown as HostPlugin).views.get('oks-native-chat');assert.ok(factory);
+    view=factory({}) as NonNullable<typeof view>;await view.onOpen();view.applyHostScope({mode:'vault-wide'});
+    const root=view.contentEl,controller=f.plugin.searchController;
+    const find=(text:string)=>root.all().find(el=>el.textContent===text);
+    const question=root.all().find(el=>el.attributes.get('aria-label')==='Question');
+    const retrieve=find('Retrieve evidence');assert.ok(question&&retrieve?.onclick);
+    question.value='REQ-LIFE-1';question.oninput?.();
+    const revision=controller.sourceAuthorityRevision(),scope=JSON.stringify({mode:'vault-wide'});
+    assert.ok(find(scope));
+    const admission=t.mock.method(controller,'startRetainedChatTurn');
+    const observed:boolean[]=[];
+    off=controller.subscribe(()=>{
+      observed.push(!controller.sourceAuthorityCurrent(controller.sourceAuthorityRevision())&&controller.captureSourceAuthority()===null);
+      retrieve.onclick!();
+    });
+    if(route==='reset')controller.invalidate();
+    else if(route==='basic')assert.equal((await controller.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    else if(route==='source')controller.invalidateSource([]);
+    else if(route==='settings')await f.plugin.patchSettings(settings=>{settings.propertiesEnabled=!settings.propertiesEnabled;});
+    else{
+      const engine=f.plugin.standalone!,status=engine.status.bind(engine);
+      t.mock.method(engine,'status',()=>({...status(),generationId:hash('different-synthetic-generation')}));
+      controller.invalidate();
+    }
+    assert.ok(observed.length>0&&observed.every(Boolean));
+    assert.equal(admission.mock.callCount(),0,'observer must not admit a retained turn');
+    if(route==='reset'||route==='basic'){
+      assert.ok(find(scope));assert.equal(controller.sourceAuthorityRevision(),revision);
+      assert.equal(controller.sourceAuthorityCurrent(revision),true);
+    }else{
+      assert.ok(find('No scope selected'));assert.equal(controller.sourceAuthorityCurrent(revision),route==='generation');
+    }
+  }finally{off();await view?.onClose();await f.cleanup();}
 });
