@@ -28,4 +28,6 @@ OKS exists to process and search existing knowledge, and to make source-backed e
 
 ## Required architecture checkpoint
 
+The post-audit maintainer scheduling decision is recorded in [ADR-0025](0025-search-first-delivery-and-ownership.md); its independent DOCS_ONLY acceptance is required before changed implementation.
+
 Before further implementation/remediation in the PR #155 contour or the next OKS-06 slice, perform the independent [Architecture Scope and Complexity Audit](../prompts/OKS-06-ARCHITECTURE-AUDIT.md). Keep PR #155 Draft pending its own independent SDD acceptance and a maintainer decision informed by the audit. The audit is analysis-only, not implementation authority, not a substitute for exact-HEAD PR review and not a release gate waiver. It must assess the merged baseline separately from the candidate and propose the smallest coherent path to the user-visible outcomes. Do not alter historical evidence or accept a runtime capability through this documentation decision.

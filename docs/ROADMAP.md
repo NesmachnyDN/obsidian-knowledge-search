@@ -6,7 +6,21 @@ Dependency-order plan. Consult merged PRs for completion state; listed outcomes 
 
 **2026-11-27 prospective rebaseline (ADR-0023):** [Standalone consumer and reuse](adr/0023-standalone-consumer-reuse.md) and [execution contract](prompts/OKS-06-REBASELINE.md). Merge independent DOCS_ONLY gate first. P0 scope/authority, read-only POLICY.2 and Basic preservation; P1 canonical Markdown pipeline and actual generation/scoped lexical RAG with applicable corpus/security prerequisites; P2 canonical attachment coexistence (including required minimal cache/registry work), dense/hybrid/rerank/graph/corpus/incremental/scale; P3 cache, format breadth, portability and managed runtime. Existing bounded slices and conditional acceptance requirements remain unless expressly superseded below. This priority overlay does not waive real-provider/host/format tests or #105. #80 remains optional deferred, not a chat dependency.
 
-**2026-11-28 search-first architecture checkpoint (ADR-0024):** [product principles](adr/0024-search-first-minimum-complexity.md) and [independent audit contract](prompts/OKS-06-ARCHITECTURE-AUDIT.md). Before further implementation/remediation in the PR #155 contour or the next OKS-06 slice, assess scope, legacy dependencies, complexity and user-visible outcomes. Keep existing P0–P3 dependency order until a separate maintainer decision; compare accelerating document extraction/content retrieval with Markdown RAG. No gate waiver, runtime claim or automatic PR #155 merge.
+**2026-11-28 historical search-first architecture checkpoint (ADR-0024):** [product principles](adr/0024-search-first-minimum-complexity.md) and [independent audit contract](prompts/OKS-06-ARCHITECTURE-AUDIT.md). Before further implementation/remediation in the PR #155 contour or the next OKS-06 slice, assess scope, legacy dependencies, complexity and user-visible outcomes. Keep existing P0–P3 dependency order until a separate maintainer decision; compare accelerating document extraction/content retrieval with Markdown RAG. No gate waiver, runtime claim or automatic PR #155 merge.
+
+**2026-11-28 post-audit priority overlay (ADR-0025):** [Decision](adr/0025-search-first-delivery-and-ownership.md). This supersedes earlier P0–P3 scheduling and historical "high priority" labels where they conflict, not CAP/AC or dependency/acceptance obligations. Keep #155 Draft; SIMPLIFY_BEFORE_CONTINUATION.
+
+| Priority | Deliverable and exit gate |
+|---|---|
+| P0.1 | Reconcile #155 review evidence; [minimum ownership design](prompts/OKS-06-P0-OWNERSHIP-DESIGN.md), independent DOCS_ONLY acceptance before code. |
+| P0.2 | Smallest justified ownership/completion simplification, independently accepted bounded PR; retain source seal and existing safety tests. |
+| P0.3 | Complete native hard scope (#149), all-route freshness/retirement and cumulative Basic regression; reconcile read-only policy (#78/#79) before affected role activation, never gate Basic on AI. |
+| P1.1 | Minimum common extraction registry/cache/source/chunk/evidence and retrieval integration (#108/#109/#111), qualified reuse, no parallel active engine. |
+| P1.2 | Unified Markdown + PDF/DOCX local content search, authentic locators, original and authorized card navigation, per-format Gate C and Basic non-regression. |
+| P1.3 | Expand Office and other format families (#113/#116) incrementally; complete initial P1.2 before P2, remaining formats may follow independently. |
+| P2 | Scoped lexical RAG/chat (#70), applicable policy/corpus (#78/#79/#136–138), independently admitted actual generation and host. No mandatory dense/rerank/graph or full format breadth. |
+| P3 | Optional dense/hybrid/rerank/graph extensions, remaining format/cache/runtime/portability and portable artifacts; independent per-claim gates, one active dense generation. Scale and incremental correctness are prerequisites wherever required by the claimed vertical. |
+
 
 | Slice | Depends on | Outcome / exit gate |
 |---|---|---|
