@@ -616,3 +616,73 @@ test('POLICY.3d2 completed local-only lineage is not a grant; fresh history reje
     assert.equal(f.requests.length,3);
   });
 });
+
+// O2: original independent policy alias transfer, using the existing real synthetic worker fixture.
+test('independent policy owner alias transfers into active slot exactly once',async()=>{
+  await fixture({'a.md':raw()},async f=>{
+    const c=f.controller;
+    const i=c as unknown as {concreteOwners():Set<AbortController>; prepared:{generation?:{policyAbort?:AbortController}};activeEvidence:{generation?:{abort:AbortController}}};
+    assert.equal((await c.search(uiRequest(request.query,3))).ok,true);
+    const preview=await c.prepareGenerationWithPolicy('synthetic-token');
+    const owner=i.prepared.generation?.policyAbort;
+    assert.ok(owner);
+    assert.deepEqual([...i.concreteOwners()],[owner]);
+    const observations:{same:boolean;count:number}[]=[];
+    f.onResponse(()=>{observations.push({same:i.activeEvidence.generation?.abort===owner,count:i.concreteOwners().size});});
+    await c.generationConfirmed(preview,'synthetic');
+    assert.equal(f.requests.length,1);
+    assert.deepEqual(observations,[{same:true,count:1}]);
+    assert.equal(i.concreteOwners().size,0);
+    assert.equal(c.snapshot().generation?.phase,'results');
+  });
+});
+
+for(const role of ['generation','reranking'] as const)
+for(const route of ['direct','shared','basic'] as const)
+for(const afterSignal of [false,true])
+test('P0.2 independent policy preparation failure '+role+'/'+route+'/'+afterSignal,async t=>{
+  await fixture({'a.md':raw('external')},async f=>{
+    const c=f.controller;
+    f.state({profile:{profileId:'synthetic-profile',admissionId:'synthetic-review',role,
+      configDigest:configDigest(role,f.config),adapter:'synthetic-adapter',classification:'external'}});
+    (c as unknown as {rerankProfiles:RerankRuntimeProfiles}).rerankProfiles.installSyntheticFixture(f.config,f.reader.rootId,'policy-owner-fixture');
+    assert.equal((await c.search(uiRequest('REQ-42',5))).ok,true);
+    const original=f.reader.read.bind(f.reader);
+    let release!:()=>void,entered!:()=>void,first=true,attempts=0,fault=true;
+    const hold=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r);
+    f.reader.read=async path=>{if(first){first=false;entered();await hold;}return original(path);};
+    type Pin={owner?:AbortController;failed?:boolean};
+    const i=c as unknown as {generationPolicyPreparation?:{abort:AbortController};generationPolicyGate:GenerationPolicyGate;
+      retirement:{obligations:Pin[]};concreteOwners():Set<AbortController>};
+    const prepare=()=>role==='generation'?c.prepareGenerationWithPolicy('synthetic-token'):c.prepareRerankWithPolicy('synthetic-token');
+    const cancel=()=>role==='generation'?c.cancelGeneration():c.cancelRerank();
+    let pending:Promise<unknown>|undefined;
+    t.mock.method(console,'warn',()=>{});
+    try{
+      pending=prepare();
+      const rejected=assert.rejects(pending,{message:'CANCELLED'});
+      await started;
+      const owner=i.generationPolicyPreparation!.abort,real=owner.abort.bind(owner);
+      owner.abort=()=>{attempts++;if(fault){if(afterSignal)real();throw Error('synthetic fault');}real();};
+      if(route==='direct')cancel();
+      else if(route==='shared')c.invalidate();
+      else {const basic=await c.search(uiRequest('REQ-42',5));assert.ok(basic.ok&&basic.value.status==='ok'&&basic.value.hits.length>0);}
+      const pin=i.retirement.obligations.find(p=>p.owner===owner);
+      assert.ok(pin?.failed);assert.equal(owner.signal.aborted,afterSignal);
+      assert.equal(c.sharedAuthorityTransition(),false);
+      const basic=await c.search(uiRequest('REQ-42',5));
+      assert.ok(basic.ok&&basic.value.status==='ok'&&basic.value.hits.length>0);
+      assert.equal(attempts,1);assert.equal(i.generationPolicyGate.busy,true);
+      await assert.rejects(prepare(),{message:'BUSY'});
+      await assert.rejects(f.engine.previewPolicyMetadata('a.md',()=>true),{message:'PARSER_BUSY'});
+      release();await rejected;await i.generationPolicyGate.drain();await f.engine.whenIdle();
+      assert.equal(f.requests.length,0);assert.ok(i.retirement.obligations.includes(pin));
+      assert.ok(i.concreteOwners().has(owner));
+      await assert.rejects(prepare(),{message:'NOT_READY'});
+      fault=false;
+      if(route==='direct')cancel();else assert.equal(c.control('rebuild').ok,true);
+      assert.equal(attempts,2);assert.ok(!i.retirement.obligations.includes(pin));
+      assert.equal(f.requests.length,0);
+    }finally{fault=false;release();await pending?.catch(()=>{});f.reader.read=original;}
+  });
+});

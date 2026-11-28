@@ -1795,7 +1795,10 @@ test('LIFE-17 nested source event retains multiple failed obligations; terminal 
   }finally{await f.cleanup();}
 });
 
-test('LIFE-17 shared retirement retains failed evidence abort and attempts independent sibling',async()=>{
+for(const failedRole of ['reranking','generation'] as const)
+for(const afterSignal of [false,true])
+for(const supersession of [false,true])
+test('LIFE-17 shared retirement retains failed evidence abort and attempts independent sibling: '+failedRole+'/'+afterSignal+'/'+supersession,async()=>{
   const f=await fixture(),p=f.plugin,c=p.searchController;
   const gate=deferredDrain(),entered=deferredDrain();
   let reads=0,http=0,fault=true;
@@ -1823,21 +1826,37 @@ test('LIFE-17 shared retirement retains failed evidence abort and attempts indep
         assert.equal(c.snapshot().response,null);
         assert.equal(c.isEvidencePreviewCurrent('generation',g.sequence),false);
         assert.equal(c.isEvidencePreviewCurrent('reranking',r.sequence),false);
-        if(role==='reranking'&&fault)throw Error('synthetic abort retirement fault');
+        if(role===failedRole&&fault){
+          if(afterSignal)original();
+          throw Error('synthetic abort retirement fault');
+        }
         original();
       };
     }
-    c.invalidate();
+    const owner=activeEvidence[failedRole].abort;
+    const pins=()=> (c as unknown as {retirement:{obligations:{owner?:AbortController;failed?:boolean}[]}}).retirement.obligations;
+    if(supersession){
+      const basic=await c.search(uiRequest('REQ-LIFE-1',1));assert.ok(basic.ok&&basic.value.status==='ok'&&basic.value.hits.length>0);
+    }else{
+      c.invalidate();assert.equal(c.snapshot().phase,'idle');
+    }
     assert.deepEqual(calls,['reranking','generation']);
-    assert.equal(c.sharedAuthorityTransition(),true);
-    assert.equal(c.snapshot().phase,'error');
-    assert.equal(c.status().status,'failed');
-    assert.equal((await c.search(uiRequest('blocked',1))).ok,false);
+    assert.equal(c.sharedAuthorityTransition(),false);
+    assert.equal(c.status().status,'ready');
+    const basic=await c.search(uiRequest('REQ-LIFE-1',1));
+    assert.ok(basic.ok&&basic.value.status==='ok'&&basic.value.hits.length>0);
+    assert.deepEqual(calls,['reranking','generation']);
+    const pin=pins().find(item=>item.owner===owner);
+    assert.ok(pin?.failed);assert.equal(owner.signal.aborted,afterSignal);
+    assert.equal(c.evidenceOperationStatus(failedRole).phase,'failed');
     gate.release();await navigationWatchdog(Promise.all(active));assert.equal(http,0);
+    assert.ok(pins().includes(pin));
+    assert.throws(()=>failedRole==='generation'?c.prepareGeneration('fixture'):c.prepareRerank(),/NOT_READY/);
     assert.equal(c.control('rebuild').ok,false);
-    assert.deepEqual(calls,['reranking','generation','reranking']);
+    assert.deepEqual(calls,['reranking','generation',failedRole]);
     fault=false;assert.equal(c.control('rebuild').ok,true);
-    assert.deepEqual(calls,['reranking','generation','reranking','reranking']);
+    assert.deepEqual(calls,['reranking','generation',failedRole,failedRole]);
+    assert.ok(!pins().includes(pin));
     await p.standalone!.whenIdle();
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
   }finally{
@@ -1873,10 +1892,12 @@ for(const failedPath of ['new.md','fixture.md'])test('LIFE-17 dense store retire
 });
 
 for(const role of ['reranking','generation'] as const)
-test('systemic role-local failed abort preserves independent role and Basic: '+role,async()=>{
+for(const afterSignal of [false,true])
+test('systemic role-local failed abort preserves independent role and Basic: '+role+'/'+afterSignal,async()=>{
   const f=await fixture(),p=f.plugin,c=p.searchController;
   const gate=deferredDrain(),entered=deferredDrain();
-  const server=createServer((_req,res)=>{res.writeHead(500);res.end();});
+  let http=0;
+  const server=createServer((_req,res)=>{http++;res.writeHead(500);res.end();});
   let active:Promise<void>|undefined,fault=true,attempts=0;
   try{
     await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
@@ -1898,16 +1919,21 @@ test('systemic role-local failed abort preserves independent role and Basic: '+r
     owner.abort=()=>{
       attempts++;
       assert.equal(c.sharedAuthorityTransition(),false);
-      if(fault){cancel();throw Error('synthetic role-local abort fault');}
+      if(fault){if(afterSignal)original();cancel();throw Error('synthetic role-local abort fault');}
       original();
     };
     cancel();assert.equal(attempts,1);
     assert.equal(c.isEvidencePreviewCurrent(other,otherPreview.sequence),true);
     assert.equal(c.sharedAuthorityTransition(),false);
     assert.equal(c.evidenceOperationStatus(role).phase,'failed');
+    const pins=()=> (c as unknown as {retirement:{obligations:{owner?:AbortController;failed?:boolean}[]}}).retirement.obligations;
+    const pin=pins().find(item=>item.owner===owner);
+    assert.ok(pin?.failed);assert.equal(owner.signal.aborted,afterSignal);
+    const basic=await c.search(uiRequest('REQ-LIFE-1',1));
+    assert.ok(basic.ok&&basic.value.status==='ok'&&basic.value.hits.length>0);
     gate.release();await navigationWatchdog(active);
     assert.equal((await c.search(uiRequest('REQ-LIFE-1',1))).ok,true);
-    assert.equal(attempts,1);
+    assert.equal(attempts,1);assert.equal(http,0);assert.ok(pins().includes(pin));
     assert.throws(()=>role==='generation'?c.prepareGeneration('fixture'):c.prepareRerank(),/NOT_READY/);
     cancel();assert.equal(attempts,2);
     fault=false;cancel();assert.equal(attempts,3);
@@ -2349,8 +2375,33 @@ test('06H.2 native registered chat separates retrieve, classify, preview and one
     await wait(()=>find('Completed. History verified locally.'));
     assert.equal(sends,1);assert.ok(find('Quotation'));assert.ok(find('REQ-LIFE-1'));
     confirm.onclick!();assert.equal(sends,1);
+    // B-03: an ordinary lexical lifecycle publication is not a source change.
+    const chat=view as unknown as {session:Parameters<typeof f.plugin.searchController.readRetainedChatHistory>[0]};
+    const session=chat.session, controller=f.plugin.searchController;
+    const history=controller.readRetainedChatHistory(session), revision=controller.sourceAuthorityRevision();
+    assert.equal(history.length,1);
+    const assertRetained=()=>{
+      assert.ok(find(JSON.stringify({mode:'vault-wide'})));
+      assert.ok(find('Quotation'));assert.ok(find('REQ-LIFE-1'));
+      assert.equal(chat.session,session);assert.deepEqual(controller.readRetainedChatHistory(session),history);
+      assert.equal(controller.sourceAuthorityRevision(),revision);assert.equal(sends,1);
+    };
+    assert.equal((await controller.search(uiRequest('REQ-LIFE-1',1))).ok,true);assertRetained();
     const selected=root.all().find(el=>el.type==='checkbox');assert.ok(selected);selected.checked=true;selected.onchange?.();
     question.oninput?.();assert.equal(selected.checked,false);
+    // Explicit shared revocation historically clears retained history, but
+    // it does not change source identity or erase the user's selected scope.
+    controller.invalidate();
+    assert.ok(find(JSON.stringify({mode:'vault-wide'})));
+    assert.equal(chat.session,session);assert.deepEqual(controller.readRetainedChatHistory(session),[]);
+    assert.equal(find('Quotation'),undefined);assert.equal(controller.sourceAuthorityRevision(),revision);
+    controller.invalidateSource([]);
+    assert.ok(find('No scope selected'));assert.equal(find('Quotation'),undefined);
+    assert.throws(()=>controller.readRetainedChatHistory(session));
+    scope.value='vault-wide';scope.oninput?.();button('Apply scope').onclick!();
+    assert.ok(find(JSON.stringify({mode:'vault-wide'})));
+    await f.plugin.patchSettings(settings=>{settings.ai.generation={state:'disabled'};});
+    assert.ok(find('No scope selected'));
     await view.onClose();assert.equal(root.children.length,0);
     confirm.onclick!();assert.equal(sends,1);
   }finally{await view?.onClose();await new Promise<void>(r=>server.close(()=>r()));await f.cleanup();}
@@ -2478,4 +2529,46 @@ test('P0.1c native effective mode reads originals without ledger or provider adm
     assert.equal((await port(replacement).previewEffectivePolicy(eligible)).decision,'eligible');
     assert.deepEqual(await readFile(join(f.vault,file.path)),original);
   }finally{replacement?.onunload();await f.cleanup();}
+});
+
+for(const route of ['reset','basic','source','settings','generation'] as const)
+test('B-03 native ChatView observes identity without opening lifecycle admission: '+route,async t=>{
+  const f=await fixture();
+  let view:{contentEl:TestElement;onOpen():Promise<void>;onClose():Promise<void>;applyHostScope(scope:{mode:'vault-wide'}):void}|undefined;
+  let off=()=>{};
+  try{
+    await f.plugin.onload();f.layout();await f.internal.initializing;await f.plugin.standalone!.whenIdle();
+    const factory=(f.plugin as unknown as HostPlugin).views.get('oks-native-chat');assert.ok(factory);
+    view=factory({}) as NonNullable<typeof view>;await view.onOpen();view.applyHostScope({mode:'vault-wide'});
+    const root=view.contentEl,controller=f.plugin.searchController;
+    const find=(text:string)=>root.all().find(el=>el.textContent===text);
+    const question=root.all().find(el=>el.attributes.get('aria-label')==='Question');
+    const retrieve=find('Retrieve evidence');assert.ok(question&&retrieve?.onclick);
+    question.value='REQ-LIFE-1';question.oninput?.();
+    const revision=controller.sourceAuthorityRevision(),scope=JSON.stringify({mode:'vault-wide'});
+    assert.ok(find(scope));
+    const admission=t.mock.method(controller,'startRetainedChatTurn');
+    const observed:boolean[]=[];
+    off=controller.subscribe(()=>{
+      observed.push(!controller.sourceAuthorityCurrent(controller.sourceAuthorityRevision())&&controller.captureSourceAuthority()===null);
+      retrieve.onclick!();
+    });
+    if(route==='reset')controller.invalidate();
+    else if(route==='basic')assert.equal((await controller.search(uiRequest('REQ-LIFE-1',1))).ok,true);
+    else if(route==='source')controller.invalidateSource([]);
+    else if(route==='settings')await f.plugin.patchSettings(settings=>{settings.propertiesEnabled=!settings.propertiesEnabled;});
+    else{
+      const engine=f.plugin.standalone!,status=engine.status.bind(engine);
+      t.mock.method(engine,'status',()=>({...status(),generationId:hash('different-synthetic-generation')}));
+      controller.invalidate();
+    }
+    assert.ok(observed.length>0&&observed.every(Boolean));
+    assert.equal(admission.mock.callCount(),0,'observer must not admit a retained turn');
+    if(route==='reset'||route==='basic'){
+      assert.ok(find(scope));assert.equal(controller.sourceAuthorityRevision(),revision);
+      assert.equal(controller.sourceAuthorityCurrent(revision),true);
+    }else{
+      assert.ok(find('No scope selected'));assert.equal(controller.sourceAuthorityCurrent(revision),route==='generation');
+    }
+  }finally{off();await view?.onClose();await f.cleanup();}
 });
