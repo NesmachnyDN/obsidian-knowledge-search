@@ -4,6 +4,10 @@
 
 The chain is Specification (CAP/AC) -> Architecture / accepted ADR -> dependency-ordered Roadmap -> bounded execution contract -> implementation and tests -> independent review -> authorized merge. GitHub issues, PRs, commits and check results are the sole execution-state history; do not maintain duplicate state ledgers. A candidate issue is not implementation authority until relevant requirements and roadmap are reconciled. Prefer the smallest complete change and use existing SDKs, standard libraries or maintained dependencies before custom mechanics.
 
+## Search-first scope and complexity discipline
+
+Apply [ADR-0024](../adr/0024-search-first-minimum-complexity.md) at intake, design and independent review. Trace each mechanism to a required observable product outcome or safety invariant, distinguish mandatory core from conditional profiles, and justify new state/ownership or coordination against simpler alternatives. Repeated systemic review findings require architecture/root-cause assessment before another implementation attempt; do not reduce the evidence or security standard. The [OKS-06 architecture checkpoint](../prompts/OKS-06-ARCHITECTURE-AUDIT.md) is analysis-only and does not replace exact-HEAD SDD review or authorize implementation. Normative changes follow DOCS_ONLY independent acceptance.
+
 ## 2026-11-23 product-owner requirements rebaseline
 
 The approved target direction in [ADR-0015](../adr/0015-api-first-ai-optional-dense.md) is **autonomous offline basic text-occurrence and typed Properties/metadata search**, with optional AI search over explicitly configured local or cloud APIs. Dense/hybrid, rerank and LLM are no longer required to run locally without Internet or to pass the basic MVP gate. The historical ADR-0006 and original 05D execution contract are retained as evidence, but their **mandatory offline Advanced gate is superseded** for future work. Changes to original CAP-04/05 scope and new conditional gates are defined in [SPEC](../SPEC.md) and [ROADMAP](../ROADMAP.md); provider and data-processing choices are evaluated in [AI provider evaluation](../AI-PROVIDER-EVALUATION.md).

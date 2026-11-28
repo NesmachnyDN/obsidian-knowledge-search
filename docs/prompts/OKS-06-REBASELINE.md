@@ -2,6 +2,8 @@
 
 Base: 892590ea553087b3e30243a372c04e3317ae978e. Authority: AGENTS, SECURITY, SDD, SPEC, ROADMAP, ADR-0023, #78/#79/#105/#111. DOCS_ONLY normative first gate; independent exact-HEAD review and guarded merge required. No runtime changes, private data, provider calls, source writes or capability acceptance. Historical bounded contracts and acceptance evidence remain, including fixture-only #143 if independently accepted. No merge of changed base/head on stale review.
 
+The [ADR-0024 principles](../adr/0024-search-first-minimum-complexity.md) and [architecture checkpoint](OKS-06-ARCHITECTURE-AUDIT.md) refine this contract. No further implementation/remediation in the PR #155 contour or next slice before the independent audit and maintainer disposition; existing dependency sequence and gates remain unless separately revised.
+
 ## Dependency-ordered delivery
 
 - P0: reconcile current role and index owners, retirement and source proof consumers, POLICY.2 rules/ledger/native lifecycle usage and scope exclusions. Freeze a bounded implementation contract and before/after negative-test matrix. Read-only effective policy must not need baseline enrollment, import adapter or writer; preserve exact source/owner proof and all grant/credential/scope/profile/retirement protections. Do not remove existing defenses until equivalent protections are independently proven. Keep #79 open against revised acceptance, #78 for shared role enforcement.
