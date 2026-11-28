@@ -6,6 +6,10 @@ Status: target API-first AI architecture under product-owner ADR-0015 rebaseline
 
 OKS reads the authoritative Vault, creates only derived search data and performs retrieval/RAG; external intake and domain knowledge lifecycle remain outside. A producer may coexist but is never required. An optional versioned local extraction provider resolves a verified current cache, explicitly admitted compatible immutable artifact, or standalone extractor; otherwise typed partial/unavailable. Validate exact bytes, identity, schema/profile, locators, coverage, limits and current owners/scope/policy; no hash-only trust, external parsing or shared mutable index. Canonical pipeline: Original → Verified Extraction → ParsedDocument → Chunk → Lexical/Dense Index → Retrieval → Optional Reranking → EvidenceHit → RAG. Current Advanced/Dense host exclusion is retained until shared-generation and authority coexistence tests pass. See [ADR-0023](adr/0023-standalone-consumer-reuse.md).
 
+## Search-first architecture principles (ADR-0024)
+
+Apply the nine principles and guardrails in [ADR-0024](adr/0024-search-first-minimum-complexity.md). Separate source/version authority, operation lifetimes, index generation and provider admission without duplicating authority. Maintain cohesive extraction, retrieval, presentation and optional AI boundaries; justify cross-profile coordination by actual requirements. Search artifacts and necessary operational state are private derivatives, never a competing knowledge base. Evaluate legacy dependencies and repeated systemic findings before adding more coordination logic; simplification must preserve all safety invariants and applicable acceptance gates.
+
 ## Logical components and deployment profiles
 
 The **mandatory default** contains only Obsidian and the installed plugin:
