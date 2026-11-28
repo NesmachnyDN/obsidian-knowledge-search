@@ -942,3 +942,66 @@ test('POLICY.3d3 retained citations resolve by host-owned identity and guard nat
     assert.equal((await c.startScopedChatRetrieval(selector,request).result).ok,true);
   }finally{held.resolve();c.dispose();navigator.dispose();}
 });
+
+/** B-06: actual public noncredential reranking admission can coexist with
+ * scoped retrieval. Hold source verification, not a real provider request. */
+for(const mode of ['success','throw-before','throw-after','terminal'] as const)
+test('completion protocol drains deferred reranking cancellation: '+mode,async t=>{
+  let sends=0;
+  await generationFixture(async cfg=>{
+    const verified=deferred<void>(),verifyRelease=deferred<void>(),scopeRelease=deferred<void>();
+    let c:SearchController,armed=false,attempts=0,nativeCalls=0;
+    const events:string[]=[];
+    c=new SearchController(async()=>{},undefined,undefined,{
+      config:()=>cfg,scopeId:()=>root,verify:async()=>{verified.resolve();await verifyRelease.promise;}
+    },undefined,()=>{if(armed)events.push('hook');});
+    const internal=c as unknown as {rerankProfiles:import('../plugin/src/ai/rerank-profile').RerankRuntimeProfiles;
+      activeEvidence:{reranking?:{abort:AbortController}}};
+    let active:Promise<void>|undefined;
+    const off=c.subscribeEvidence(()=>{if(armed)events.push('evidence');});
+    const offLife=c.subscribe(()=>{if(armed)events.push('observer');});
+    t.mock.method(console,'warn',()=>{});
+    try{
+      c.attach(engine(async(_input,signal)=>{
+        signal.addEventListener('abort',()=>{events.push('scoped-enter');c.cancelRerank();events.push('scoped-return');},{once:true});
+        await scopeRelease.promise;return lease();
+      }));
+      internal.rerankProfiles.installSyntheticFixture(cfg,root,'retirement-completion');
+      assert.equal((await c.search(uiRequest('synthetic',1))).ok,true);
+      active=c.rerankConfirmed(c.prepareRerank(),'synthetic','fixture');
+      await verified.promise;
+      const owner=internal.activeEvidence.reranking!.abort,real=owner.abort.bind(owner);
+      owner.signal.addEventListener('abort',()=>nativeCalls++,{once:true});
+      let fail=mode==='throw-before'||mode==='throw-after';
+      owner.abort=()=>{
+        attempts++;events.push('role-enter');
+        if(fail&&mode==='throw-before'){events.push('role-return');throw Error('synthetic failure');}
+        real();
+        if(mode==='terminal'){c.dispose();c.dispose();}
+        events.push('role-return');
+        if(fail&&mode==='throw-after')throw Error('synthetic failure');
+      };
+      const turn=c.startScopedChatRetrieval(selector,request);
+      armed=true;turn.cancel();assert.deepEqual(await turn.result,error('CANCELLED'));
+      assert.equal(attempts,1);
+      const expected=['scoped-enter','scoped-return','role-enter','role-return'];
+      expected.push(...(mode==='terminal'?['hook','observer']:['evidence']));
+      assert.deepEqual(events,expected);
+      assert.equal(nativeCalls,mode==='throw-before'?0:1);
+      assert.equal(sends,0);
+      if(mode==='terminal'){assert.equal(c.captureSourceAuthority(),null);c.dispose();assert.deepEqual(events,expected);}
+      else{
+        assert.equal(c.sharedAuthorityTransition(),false);
+        if(fail){
+          assert.equal(c.evidenceOperationStatus('reranking').phase,'failed');
+          assert.equal((await c.search(uiRequest('independent',1))).ok,true);
+          assert.equal(attempts,1,'ordinary Basic does not retry failed role pin');
+          fail=false;c.cancelRerank();assert.equal(attempts,2);assert.equal(nativeCalls,1);
+        }else{c.cancelRerank();assert.equal(attempts,1);}
+      }
+      verifyRelease.resolve();scopeRelease.resolve();await active;await flush();
+      assert.equal(sends,0);
+      assert.equal(nativeCalls,1);
+    }finally{armed=false;off();offLife();verifyRelease.resolve();scopeRelease.resolve();c.dispose();await active?.catch(()=>{});}
+  },(_req,res)=>{sends++;reply(res,{});});
+});

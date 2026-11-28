@@ -360,3 +360,131 @@ test('B-04 failed concrete pin remains retryable after native signal retirement'
     f.read.resolve();await tick();
   }finally{f.read.resolve();c.dispose();}
 });
+
+/** B-05: nested ordinary work owns publication even without source promotion. */
+for(const route of ['graph','navigation','scoped'] as const)
+for(const action of ['invalidate','basic','basic-source','source-basic'] as const)
+test('completion protocol settles '+route+' / '+action,async()=>{
+  let armed=false, callback=()=>{};
+  const events:string[]=[],checks:boolean[]=[], replies:ReturnType<SearchController['search']>[]=[];
+  const f=fixture(()=>callback(),()=>{if(armed){events.push('hook');checks.push(!c.sourceAuthorityCurrent(c.sourceAuthorityRevision()));}},route==='navigation'),c=f.c;
+  const seal=c.captureSourceAuthority()!,revision=c.sourceAuthorityRevision();
+  let dispatchAtReturn=-1;
+  const off=c.subscribe(()=>{if(armed){events.push('observer');checks.push(!c.sourceAuthorityCurrent(c.sourceAuthorityRevision()));}});
+  const basic=()=>{replies.push(c.search(uiRequest('nested',1)));};
+  callback=()=>{
+    events.push('abort-enter');
+    if(action==='invalidate')c.invalidate();
+    else if(action==='basic')basic();
+    else if(action==='basic-source'){basic();c.invalidateSource([()=>events.push('source')]);}
+    else{c.invalidateSource([()=>events.push('source')]);basic();}
+    dispatchAtReturn=f.dispatches();events.push('abort-return');
+  };
+  try{
+    if(route==='navigation'){
+      const retrieved=await c.graphSearch(request);assert.ok(retrieved.ok);
+      armed=true;assert.equal((await c.openGraphEvidence(retrieved.value,0)).ok,false);
+    }else if(route==='graph'){
+      const pending=c.graphSearch(request);armed=true;f.read.resolve();
+      assert.equal((await pending).ok,false);
+    }else{
+      const turn=c.startScopedChatRetrieval(scope,{requestId:'synthetic',query:'synthetic',limit:1});
+      armed=true;turn.cancel();assert.equal((await turn.result).ok,false);f.read.resolve();
+    }
+    await tick();await tick();
+    const source=action.includes('source');
+    assert.equal(dispatchAtReturn,0,'no dispatch while a retirement owner is running');
+    assert.equal(c.sourceAuthorityCurrent(c.sourceAuthorityRevision()),true,'no stranded publication fence');
+    assert.ok(checks.length>0&&checks.every(Boolean));
+    const expected=['abort-enter','abort-return',...(source?['source']:[]),'hook','observer'];
+    if(action==='basic')expected.push('hook','observer');
+    assert.deepEqual(events,expected);
+    assert.equal(f.dispatches(),action==='basic'?1:0);
+    assert.deepEqual(await Promise.all(replies).then(items=>items.map(item=>item.ok)),
+      action==='invalidate'?[]:[action==='basic']);
+    assert.equal(seal.retired,source);
+    assert.equal(c.sourceAuthorityRevision()===revision,!source);
+    assert.equal(c.captureSourceAuthority()===seal,!source);
+  }finally{armed=false;off();f.read.resolve();c.dispose();await Promise.all(replies);}
+});
+
+/** A source failure may not silently hide a standalone retirement fault. */
+for(const route of ['graph','scoped'] as const)
+test('completion protocol publishes standalone '+route+' retirement failure and recovery',async t=>{
+  let armed=false,aborts=0,fail=true;const events:string[]=[];
+  const f=fixture(()=>{},()=>{if(armed)events.push('hook');}),c=f.c;
+  const off=c.subscribe(()=>{if(armed)events.push('observer');});
+  t.mock.method(console,'warn',()=>{});
+  type Slot={abort:AbortController};
+  const internal=c as unknown as {graphOperation?:Slot;scopedRetrieval?:Slot};
+  try{
+    const graphTurn=route==='graph'?c.graphSearch(request):undefined;
+    const scopedTurn=route==='scoped'?c.startScopedChatRetrieval(scope,{requestId:'synthetic',query:'synthetic',limit:1}):undefined;
+    const owner=(internal.graphOperation??internal.scopedRetrieval)!.abort,real=owner.abort.bind(owner);
+    owner.abort=()=>{aborts++;events.push('abort');if(fail)throw Error('synthetic fault');real();};
+    armed=true;
+    if(scopedTurn)scopedTurn.cancel();else f.read.resolve();
+    assert.equal((await (graphTurn??scopedTurn!.result)).ok,false);
+    assert.deepEqual(events,['abort','hook','observer']);
+    assert.equal(c.captureSourceAuthority(),null);
+    assert.equal(c.snapshot().message,'INTERNAL_FAILURE');
+    assert.equal((await c.search(uiRequest('denied',1))).ok,false);
+    f.read.resolve();await tick();fail=false;
+    assert.equal(c.control('rebuild').ok,true);assert.equal(aborts,2);
+    assert.ok(c.captureSourceAuthority());assert.equal(owner.signal.aborted,true);
+  }finally{armed=false;off();fail=false;f.read.resolve();c.dispose();}
+});
+
+/** Artificial boundary state, not a claim that eight detached role pins are
+ * reachable through public operations. Test the admission invariant itself. */
+test('concrete reservation counts detached owners and does not spend source capacity',async t=>{
+  const f=fixture(()=>{},()=>{}),c=f.c;
+  type Pin={kind:'role';role:'reranking';revision:number;owner:AbortController;run:()=>void;attempted:boolean;failed:boolean};
+  const internal=c as unknown as {retirement:{obligations:Pin[]};revision:number};
+  const counts=Array<number>(8).fill(0);
+  t.mock.method(console,'warn',()=>{});
+  try{
+    for(let i=0;i<8;i++){
+      const owner=new AbortController();
+      internal.retirement.obligations.push({kind:'role',role:'reranking',revision:internal.revision,owner,
+        run:()=>{counts[i]=counts[i]!+1;owner.abort();},attempted:true,failed:true});
+    }
+    const graphTurn=c.graphSearch(request);
+    let graphSettled=false;void graphTurn.then(()=>{graphSettled=true;});
+    await tick();assert.equal(graphSettled,true,'capacity denial must settle without invoking the gated graph');
+    assert.equal((await graphTurn).ok,false);
+    const scopedTurn=c.startScopedChatRetrieval(scope,{requestId:'synthetic',query:'synthetic',limit:1});
+    let scopedSettled=false;void scopedTurn.result.then(()=>{scopedSettled=true;});
+    await tick();assert.equal(scopedSettled,true,'capacity denial must settle without invoking the gated scope');
+    assert.equal((await scopedTurn.result).ok,false);
+    assert.equal((await c.search(uiRequest('independent',1))).ok,true);
+    assert.deepEqual(counts,Array(8).fill(0));
+    // Successful independent source work never retries failed role-local pins.
+    let sources=0;c.invalidateSource(Array.from({length:4096},()=>()=>{sources++;}));
+    assert.equal(sources,4096);assert.deepEqual(counts,Array(8).fill(0));
+    c.dispose();c.dispose();assert.deepEqual(counts,Array(8).fill(1));
+  }finally{f.read.resolve();c.dispose();}
+});
+
+test('defensive concrete transfer overflow retains every already owned abort',async t=>{
+  let aborted=0;const f=fixture(()=>{aborted++;},()=>{}),c=f.c;
+  type Pin={kind:'role';role:'reranking';revision:number;owner:AbortController;run:()=>void;attempted:boolean;failed:boolean};
+  const internal=c as unknown as {retirement:{obligations:Pin[]};revision:number};
+  const counts=Array<number>(8).fill(0);
+  t.mock.method(console,'warn',()=>{});
+  try{
+    const pending=c.graphSearch(request);
+    // Deliberately violate the admission invariant with synthetic injection.
+    // The fallback must fail closed but not discard the ninth existing owner.
+    for(let i=0;i<8;i++){
+      const owner=new AbortController();
+      internal.retirement.obligations.push({kind:'role',role:'reranking',revision:internal.revision,owner,
+        run:()=>{counts[i]=counts[i]!+1;owner.abort();},attempted:true,failed:true});
+    }
+    c.invalidate();assert.equal((await pending).ok,false);
+    assert.equal(aborted,1);assert.equal(c.captureSourceAuthority(),null);
+    assert.equal(c.control('rebuild').ok,false);
+    c.dispose();c.dispose();
+    assert.equal(aborted,1);assert.deepEqual(counts,Array(8).fill(1));
+  }finally{f.read.resolve();c.dispose();}
+});
