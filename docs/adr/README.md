@@ -33,3 +33,5 @@ Use states Proposed, Accepted, Superseded or Rejected. Do not mark an experiment
 - [ADR-0022 — Semantic corpus](0022-semantic-corpus-policy.md) — Independent automatic AI corpus eligibility; preserved by ADR-0023.
 - [ADR-0023 — Standalone consumer, reuse and unified retrieval](0023-standalone-consumer-reuse.md) — Proposed 2026-11-27 rebaseline; independent review required; no runtime claim.
 - [ADR-0024 — Search-first product boundary and minimum necessary complexity](0024-search-first-minimum-complexity.md) — Proposed 2026-11-28 product-owner direction; independent DOCS_ONLY review and architecture checkpoint.
+
+- [ADR-0025 — Search-first delivery and bounded ownership simplification](0025-search-first-delivery-and-ownership.md) — Post-audit priority overlay; targeted simplification, common document retrieval before scoped RAG, no gate waiver; independent DOCS_ONLY acceptance pending.
